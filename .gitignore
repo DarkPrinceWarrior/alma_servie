@@ -1,0 +1,28 @@
+# Bytecode and caches
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# IDE and editor files
+.idea/
+.vscode/
+.DS_Store
+
+# Virtual environments
+venv/
+.env/
+
+# Data outputs
+data/raw/
+data/interim/
+data/processed/
+reports/
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+СУ_объединенные.csv

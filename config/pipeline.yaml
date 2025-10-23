@@ -1,0 +1,79 @@
+paths:
+  raw_dir: data/raw
+  interim_dir: data/interim
+  processed_dir: data/processed
+  reports_dir: reports
+
+agzu:
+  sheet_name: "Замеры АГЗУ из ТМ"
+  key_columns:
+    - "Дата окончания замера"
+    - "Планируемая продолжительность, мин"
+    - "Фактическая продолжительность???, мин"
+    - "Объемный дебит жидкости, м3/сут"
+    - "Объемный дебит газа, м3/сут"
+    - "Давление в коллекторе ГЗУ при замере"
+  well_column: "well_number"
+  datetime_column: "Дата окончания замера"
+  max_gap_hours_flag: 24
+  negative_sensitive_columns:
+    - "Объемный дебит жидкости, м3/сут"
+    - "Давление в коллекторе ГЗУ при замере"
+  extreme_thresholds:
+    "Фактическая продолжительность???, мин": 1440
+
+su:
+  sheet_name: "Замеры СУ"
+  key_columns:
+    - "Дата замера"
+    - "Ток фазы A"
+    - "Коэффициент загрузки"
+    - "Выходная частота"
+    - "Давление на приеме насоса"
+    - "Температура двигателя"
+    - "Устьевое давление"
+  well_column: "well_number"
+  datetime_column: "Дата замера"
+  fill_method:
+    - ffill
+    - bfill
+  zero_sensitive_columns:
+    - "Ток фазы A"
+    - "Коэффициент загрузки"
+    - "Выходная частота"
+    - "Устьевое давление"
+  gap_minutes_flag: 60
+
+anomalies:
+  source_workbook: "./alma/Общая таблица.xlsx"
+  sheet_name: "Ненормальная работа"
+  pre_window_days: 3
+  metrics_agzu_prefix: "АГЗУ"
+  metrics_su_prefix: "СУ"
+  agzu_metrics:
+    - "Планируемая продолжительность, мин"
+    - "Фактическая продолжительность???, мин"
+    - "Объемный дебит жидкости, м3/сут"
+    - "Объемный дебит газа, м3/сут"
+    - "Давление в коллекторе ГЗУ при замере"
+  su_metrics:
+    - "Ток фазы A"
+    - "Коэффициент загрузки"
+    - "Выходная частота"
+    - "Давление на приеме насоса"
+    - "Температура двигателя"
+    - "Устьевое давление"
+  conditions: []
+  calibration_percentiles:
+    - 0.05
+    - 0.5
+    - 0.95
+
+metadata:
+  manifest_file: data/raw/manifest.csv
+  hash_algorithm: sha256
+
+alignment:
+  frequency: "1H"
+  agzu_max_ffill_hours: 24
+  su_max_ffill_hours: 6
