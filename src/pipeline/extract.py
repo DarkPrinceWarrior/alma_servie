@@ -48,9 +48,10 @@ def scan_raw_directory(raw_dir: Path, wells: Optional[Iterable[str]] = None) -> 
     return sorted(files)
 
 
-def validate_agzu(df: pd.DataFrame, expected_columns: List[str], file_path: Path) -> List[ValidationIssue]:
-    missing = [col for col in expected_columns if col not in df.columns]
+def validate_agzu(df: pd.DataFrame, expected_columns: List[str], file_path: Path) -> Tuple[pd.DataFrame, List[ValidationIssue]]:
     issues: List[ValidationIssue] = []
+    available = [col for col in expected_columns if col in df.columns]
+    missing = [col for col in expected_columns if col not in df.columns]
     if missing:
         issues.append(
             ValidationIssue(
@@ -61,7 +62,8 @@ def validate_agzu(df: pd.DataFrame, expected_columns: List[str], file_path: Path
                 details={"columns": missing},
             )
         )
-    return issues
+    filtered = df[available].copy() if available else pd.DataFrame(columns=expected_columns)
+    return filtered, issues
 
 
 def validate_su(df: pd.DataFrame, expected_columns: List[str], file_path: Path) -> Tuple[pd.DataFrame, List[ValidationIssue]]:
@@ -108,9 +110,11 @@ def process_excel_file(file_path: Path, config: Dict) -> Tuple[Optional[pd.DataF
     # АГЗУ sheet
     agzu_sheet = agzu_conf["sheet_name"]
     if agzu_sheet in excel.sheet_names:
-        agzu_df = excel.parse(agzu_sheet)
-        agzu_df[well_column] = well_number
-        issues.extend(validate_agzu(agzu_df, agzu_conf["key_columns"], file_path))
+        agzu_df_full = excel.parse(agzu_sheet)
+        filtered, agzu_issues = validate_agzu(agzu_df_full, agzu_conf["key_columns"], file_path)
+        filtered[well_column] = well_number
+        agzu_df = filtered
+        issues.extend(agzu_issues)
     else:
         issues.append(
             ValidationIssue(
