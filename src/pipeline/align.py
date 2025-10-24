@@ -23,59 +23,130 @@ def load_clean_tables(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     return pd.read_parquet(agzu_path), pd.read_parquet(su_path)
 
 
-def _resample_with_limit(
+def _hourly_interpolate(
     df: pd.DataFrame,
     datetime_col: str,
     well_col: str,
     freq: str,
-    max_hours: float,
 ) -> pd.DataFrame:
-    dfs: List[pd.DataFrame] = []
+    """Build hourly series per well, fill temporal gaps via interpolation, preserve original NaNs."""
     value_cols = [col for col in df.columns if col not in {datetime_col, well_col}]
+    results: List[pd.DataFrame] = []
+
     for well, part in df.groupby(well_col):
-        single = (
-            part.sort_values(datetime_col)
-            .set_index(datetime_col)[value_cols]
-        )
-        resampled = single.resample(freq).ffill()
-        last_valid = single.index.to_series().reindex(resampled.index, method="ffill")
-        hours_since = (resampled.index.to_series() - last_valid).dt.total_seconds() / 3600.0
-        mask = hours_since > max_hours
-        resampled.loc[mask, value_cols] = np.nan
-        resampled = resampled.reset_index().assign(**{well_col: well})
-        dfs.append(resampled)
-    return pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=[datetime_col, well_col] + value_cols)
+        if part.empty:
+            continue
+
+        ordered = part.sort_values(datetime_col)
+        indexed = ordered.set_index(datetime_col)[value_cols]
+        if indexed.empty:
+            continue
+
+        hourly_mean = indexed.resample(freq).mean()
+        # Count rows that landed in each hourly bucket (regardless of NaNs)
+        hourly_counts = indexed.resample(freq).apply(lambda s: s.shape[0])
+
+        interpolated = hourly_mean.interpolate(method="time")
+        # Restore NaNs that were present in original data (hour had rows but all were NaN)
+        original_nan_mask = (hourly_counts > 0) & hourly_mean.isna()
+        interpolated[original_nan_mask] = np.nan
+
+        interpolated = interpolated.reset_index()
+        interpolated[well_col] = well
+        results.append(interpolated)
+
+    columns = [datetime_col] + value_cols + [well_col]
+    return pd.concat(results, ignore_index=True)[columns] if results else pd.DataFrame(columns=columns)
 
 
 def resample_agzu(agzu: pd.DataFrame, config: Dict) -> pd.DataFrame:
     agzu_conf = config["agzu"]
     alignment = config.get("alignment", {})
     freq = alignment.get("frequency", "1H").lower()
-    limit = alignment.get("agzu_max_ffill_hours", 24)
-    return _resample_with_limit(agzu, agzu_conf["datetime_column"], agzu_conf["well_column"], freq, limit)
+    return _hourly_interpolate(agzu, agzu_conf["datetime_column"], agzu_conf["well_column"], freq)
 
 
 def resample_su(su: pd.DataFrame, config: Dict) -> pd.DataFrame:
     su_conf = config["su"]
     alignment = config.get("alignment", {})
     freq = alignment.get("frequency", "1H").lower()
-    limit = alignment.get("su_max_ffill_hours", 6)
+    return _hourly_interpolate(su, su_conf["datetime_column"], su_conf["well_column"], freq)
 
-    # Average within resample window before limiting propagation
-    dfs: List[pd.DataFrame] = []
-    value_cols = [col for col in su.columns if col not in {su_conf["datetime_column"], su_conf["well_column"]}]
-    for well, part in su.groupby(su_conf["well_column"]):
-        single = (
-            part.sort_values(su_conf["datetime_column"])
-            .set_index(su_conf["datetime_column"])[value_cols]
+
+def _align_time_ranges(
+    agzu_df: pd.DataFrame,
+    su_df: pd.DataFrame,
+    config: Dict,
+    freq: str,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    agzu_conf = config["agzu"]
+    su_conf = config["su"]
+    datetime_agzu = agzu_conf["datetime_column"]
+    datetime_su = su_conf["datetime_column"]
+    well_col = agzu_conf["well_column"]
+
+    agzu_values = [col for col in agzu_df.columns if col not in {datetime_agzu, well_col}]
+    su_values = [col for col in su_df.columns if col not in {datetime_su, well_col}]
+
+    wells = sorted(set(agzu_df[well_col].unique()).union(su_df[well_col].unique()))
+    aligned_agzu: List[pd.DataFrame] = []
+    aligned_su: List[pd.DataFrame] = []
+
+    for well in wells:
+        agzu_part = agzu_df[agzu_df[well_col] == well]
+        su_part = su_df[su_df[well_col] == well]
+
+        agzu_indexed = (
+            agzu_part.sort_values(datetime_agzu).set_index(datetime_agzu)[agzu_values]
+            if not agzu_part.empty
+            else pd.DataFrame(columns=agzu_values)
         )
-        resampled = single.resample(freq).mean()
-        resampled = resampled.reset_index()
-        resampled[su_conf["well_column"]] = well
-        dfs.append(resampled)
-    averaged = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame(columns=[su_conf["datetime_column"], su_conf["well_column"]] + value_cols)
+        su_indexed = (
+            su_part.sort_values(datetime_su).set_index(datetime_su)[su_values]
+            if not su_part.empty
+            else pd.DataFrame(columns=su_values)
+        )
 
-    return _resample_with_limit(averaged, su_conf["datetime_column"], su_conf["well_column"], freq, limit)
+        candidates_start = []
+        candidates_end = []
+        if not agzu_indexed.empty:
+            candidates_start.append(agzu_indexed.index.min())
+            candidates_end.append(agzu_indexed.index.max())
+        if not su_indexed.empty:
+            candidates_start.append(su_indexed.index.min())
+            candidates_end.append(su_indexed.index.max())
+        if not candidates_start:
+            continue
+
+        start = min(candidates_start)
+        end = max(candidates_end)
+        full_index = pd.date_range(start=start, end=end, freq=freq)
+
+        agzu_reindexed = (
+            agzu_indexed.reindex(full_index)
+            if not agzu_indexed.empty
+            else pd.DataFrame(index=full_index, columns=agzu_values, dtype=float)
+        )
+        su_reindexed = (
+            su_indexed.reindex(full_index)
+            if not su_indexed.empty
+            else pd.DataFrame(index=full_index, columns=su_values, dtype=float)
+        )
+
+        agzu_ready = agzu_reindexed.reset_index().rename(columns={"index": datetime_agzu})
+        su_ready = su_reindexed.reset_index().rename(columns={"index": datetime_su})
+        agzu_ready[well_col] = well
+        su_ready[well_col] = well
+
+        agzu_cols = [datetime_agzu, well_col] + agzu_values
+        su_cols = [datetime_su, well_col] + su_values
+
+        aligned_agzu.append(agzu_ready[agzu_cols])
+        aligned_su.append(su_ready[su_cols])
+
+    agzu_aligned = pd.concat(aligned_agzu, ignore_index=True) if aligned_agzu else agzu_df.copy()
+    su_aligned = pd.concat(aligned_su, ignore_index=True) if aligned_su else su_df.copy()
+    return agzu_aligned, su_aligned
 
 
 def merge_datasets(agzu_resampled: pd.DataFrame, su_resampled: pd.DataFrame, config: Dict) -> pd.DataFrame:
@@ -108,13 +179,17 @@ def save_aligned_tables(agzu_resampled: pd.DataFrame, su_resampled: pd.DataFrame
 def run_alignment(config_path: Path) -> Dict[str, int]:
     config = load_config(config_path)
     agzu_clean, su_clean = load_clean_tables(config)
+    alignment = config.get("alignment", {})
+    freq = alignment.get("frequency", "1H").lower()
+
     agzu_resampled = resample_agzu(agzu_clean, config)
     su_resampled = resample_su(su_clean, config)
-    merged = merge_datasets(agzu_resampled, su_resampled, config)
-    save_aligned_tables(agzu_resampled, su_resampled, merged, config)
+    agzu_aligned, su_aligned = _align_time_ranges(agzu_resampled, su_resampled, config, freq)
+    merged = merge_datasets(agzu_aligned, su_aligned, config)
+    save_aligned_tables(agzu_aligned, su_aligned, merged, config)
     return {
-        "agzu_resampled_rows": len(agzu_resampled),
-        "su_resampled_rows": len(su_resampled),
+        "agzu_resampled_rows": len(agzu_aligned),
+        "su_resampled_rows": len(su_aligned),
         "merged_rows": len(merged),
     }
 
