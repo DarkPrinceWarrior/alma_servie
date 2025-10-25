@@ -40,7 +40,7 @@ def cmd_align(args: argparse.Namespace) -> None:
 
 def cmd_anomalies(args: argparse.Namespace) -> None:
     result = anomalies.run_anomaly_analysis(Path(args.config), workbook_override=args.source)
-    print(f"Computed anomalies for {len(result)} events.")
+    print(f"Detected {len(result)} anomaly segments.")
 
 
 def cmd_events(args: argparse.Namespace) -> None:
@@ -89,9 +89,13 @@ def build_parser() -> argparse.ArgumentParser:
     align_parser.add_argument("--config", default="config/pipeline.yaml")
     align_parser.set_defaults(func=cmd_align)
 
-    anomaly_parser = subparsers.add_parser("anomalies", help="Compute anomaly metrics from merged data.")
+    anomaly_parser = subparsers.add_parser("anomalies", help="Detect anomalies in merged hourly data using rule-based logic.")
     anomaly_parser.add_argument("--config", default="config/pipeline.yaml")
-    anomaly_parser.add_argument("--source", type=Path, help="Override path to anomaly workbook.")
+    anomaly_parser.add_argument(
+        "--source",
+        type=Path,
+        help="(Необязательно) путь к эталонному workbook; для правил не используется, оставлено для совместимости.",
+    )
     anomaly_parser.set_defaults(func=cmd_anomalies)
 
     events_parser = subparsers.add_parser("events", help="Analyse reference workbook (normal vs abnormal).")

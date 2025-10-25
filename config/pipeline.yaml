@@ -65,6 +65,270 @@ anomalies:
     - 0.05
     - 0.5
     - 0.95
+  detection:
+    metrics:
+      - "Выходная частота"
+      - "Давление на приеме насоса"
+      - "Ток фазы A"
+      - "Объемный дебит жидкости, м3/сут"
+      - "Температура двигателя"
+      - "Устьевое давление"
+    window_hours: 6
+    baseline_shift_hours: 6
+    min_valid_fraction: 0.6
+    default_min_baseline_abs: 0.1
+    min_baseline_abs:
+      "Давление на приеме насоса": 0.5
+      "Объемный дебит жидкости, м3/сут": 0.5
+      "Ток фазы A": 0.1
+      "Выходная частота": 0.1
+  rules:
+    - name: pressure_rise_constant_freq
+      label: "Рост параметров при постоянной частоте"
+      description: "Рост давления на приеме при неизменной частоте и росте дебита/тока."
+      min_duration_hours: 4
+      cooldown_hours: 2
+      focus_metrics:
+        - "Давление на приеме насоса"
+        - "Выходная частота"
+        - "Объемный дебит жидкости, м3/сут"
+      all:
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: ">="
+          value: 15
+        - feature: "Давление на приеме насоса__delta"
+          operator: ">="
+          value: 2
+        - feature: "Давление на приеме насоса__current_mean"
+          operator: ">="
+          value: 5
+        - feature: "Выходная частота__pct_change"
+          operator: "between"
+          min: -4
+          max: 4
+        - feature: "Выходная частота__current_std"
+          operator: "<="
+          value: 2
+        - feature: "Давление на приеме насоса__valid_fraction"
+          operator: ">="
+          value: 0.7
+        - feature: "Выходная частота__valid_fraction"
+          operator: ">="
+          value: 0.7
+      any:
+        - feature: "Объемный дебит жидкости, м3/сут__pct_change"
+          operator: ">="
+          value: 5
+        - feature: "Ток фазы A__pct_change"
+          operator: ">="
+          value: 0.5
+    - name: pressure_drop_constant_freq
+      label: "Падение давления на приеме при постоянной частоте"
+      description: "Быстрое падение давления при практически неизменной частоте вращения."
+      min_duration_hours: 3
+      cooldown_hours: 2
+      focus_metrics:
+        - "Давление на приеме насоса"
+        - "Выходная частота"
+      all:
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: "<="
+          value: -12
+        - feature: "Давление на приеме насоса__delta"
+          operator: "<="
+          value: -2
+        - feature: "Давление на приеме насоса__current_mean"
+          operator: ">="
+          value: 5
+        - feature: "Выходная частота__pct_change"
+          operator: "between"
+          min: -3
+          max: 3
+        - feature: "Выходная частота__current_std"
+          operator: "<="
+          value: 2
+        - feature: "Давление на приеме насоса__valid_fraction"
+          operator: ">="
+          value: 0.7
+        - feature: "Выходная частота__valid_fraction"
+          operator: ">="
+          value: 0.7
+    - name: pressure_rise_apv
+      label: "Рост давления на приеме в режиме АПВ"
+      description: "Нарастание давления при автоматическом переходе на пониженную частоту и снижении дебита."
+      min_duration_hours: 3
+      cooldown_hours: 3
+      focus_metrics:
+        - "Давление на приеме насоса"
+        - "Выходная частота"
+        - "Объемный дебит жидкости, м3/сут"
+      all:
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: ">="
+          value: 20
+        - feature: "Давление на приеме насоса__delta"
+          operator: ">="
+          value: 3
+        - feature: "Выходная частота__pct_change"
+          operator: "<="
+          value: -3
+        - feature: "Выходная частота__current_std"
+          operator: ">="
+          value: 2
+        - feature: "Объемный дебит жидкости, м3/сут__pct_change"
+          operator: "<="
+          value: -10
+        - feature: "Давление на приеме насоса__valid_fraction"
+          operator: ">="
+          value: 0.7
+        - feature: "Выходная частота__valid_fraction"
+          operator: ">="
+          value: 0.7
+    - name: apv_unstable
+      label: "Нестабильная работа в режиме АПВ"
+      description: "Многократные попытки запуска с резким падением частоты и тока."
+      min_duration_hours: 2
+      cooldown_hours: 4
+      focus_metrics:
+        - "Выходная частота"
+        - "Давление на приеме насоса"
+      all:
+        - feature: "Выходная частота__pct_change"
+          operator: "<="
+          value: -70
+        - feature: "Выходная частота__current_mean"
+          operator: "<="
+          value: 5
+        - feature: "Выходная частота__valid_fraction"
+          operator: ">="
+          value: 0.6
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: "<="
+          value: 10
+          abs: true
+    - name: flow_off
+      label: "Срыв подачи"
+      description: "Переход в режим срыва подачи с одновременным ростом частоты/тока и падением дебита."
+      min_duration_hours: 6
+      cooldown_hours: 6
+      focus_metrics:
+        - "Объемный дебит жидкости, м3/сут"
+        - "Выходная частота"
+        - "Ток фазы A"
+      all:
+        - feature: "Объемный дебит жидкости, м3/сут__pct_change"
+          operator: "<="
+          value: -10
+        - feature: "Объемный дебит жидкости, м3/сут__delta"
+          operator: "<="
+          value: -1
+        - feature: "Выходная частота__pct_change"
+          operator: ">="
+          value: 10
+        - feature: "Ток фазы A__pct_change"
+          operator: ">="
+          value: 10
+        - feature: "Объемный дебит жидкости, м3/сут__valid_fraction"
+          operator: ">="
+          value: 0.6
+    - name: flow_off_oscillation
+      label: "Срыв подачи (пилообразная нагрузка)"
+      description: "Высокая пилообразная вариация тока и частоты при росте давления."
+      min_duration_hours: 4
+      cooldown_hours: 4
+      focus_metrics:
+        - "Выходная частота"
+        - "Ток фазы A"
+        - "Давление на приеме насоса"
+      all:
+        - feature: "Выходная частота__current_std"
+          operator: ">="
+          value: 2
+        - feature: "Выходная частота__current_range"
+          operator: ">="
+          value: 10
+        - feature: "Выходная частота__pct_change"
+          operator: "between"
+          min: -5
+          max: 10
+        - feature: "Ток фазы A__current_cv"
+          operator: ">="
+          value: 0.03
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: ">="
+          value: 5
+    - name: missing_frequency
+      label: "Отсутствует частота"
+      description: "Отсутствие телеметрии частоты при сохранении остальных сигналов."
+      min_duration_hours: 4
+      cooldown_hours: 6
+      focus_metrics:
+        - "Выходная частота"
+        - "Давление на приеме насоса"
+        - "Ток фазы A"
+      all:
+        - feature: "Выходная частота__missing_fraction"
+          operator: ">="
+          value: 0.8
+        - feature: "Давление на приеме насоса__missing_fraction"
+          operator: "<="
+          value: 0.4
+        - feature: "Ток фазы A__missing_fraction"
+          operator: "<="
+          value: 0.4
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: ">="
+          value: 10
+    - name: tms_failure
+      label: "Отказ или сбой ТМС"
+      description: "Падение давления измерительного канала до нулевых значений при рабочей частоте."
+      min_duration_hours: 2
+      cooldown_hours: 6
+      focus_metrics:
+        - "Давление на приеме насоса"
+        - "Выходная частота"
+      all:
+        - feature: "Давление на приеме насоса__current_mean"
+          operator: "<="
+          value: 2.5
+        - feature: "Давление на приеме насоса__current_max"
+          operator: "<="
+          value: 3.5
+        - feature: "Давление на приеме насоса__baseline_mean"
+          operator: ">="
+          value: 5
+        - feature: "Давление на приеме насоса__valid_fraction"
+          operator: ">="
+          value: 0.7
+        - feature: "Выходная частота__valid_fraction"
+          operator: ">="
+          value: 0.6
+    - name: pressure_hump
+      label: "Рост давления на приеме"
+      description: "Выраженный холмик давления с резким ростом дебита."
+      min_duration_hours: 3
+      cooldown_hours: 4
+      focus_metrics:
+        - "Давление на приеме насоса"
+        - "Объемный дебит жидкости, м3/сут"
+        - "Выходная частота"
+      all:
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: ">="
+          value: 10
+        - feature: "Давление на приеме насоса__delta"
+          operator: ">="
+          value: 2
+        - feature: "Объемный дебит жидкости, м3/сут__pct_change"
+          operator: ">="
+          value: 50
+        - feature: "Объемный дебит жидкости, м3/сут__delta"
+          operator: ">="
+          value: 5
+        - feature: "Выходная частота__pct_change"
+          operator: "between"
+          min: -5
+          max: 5
 
 metadata:
   manifest_file: data/raw/manifest.csv
