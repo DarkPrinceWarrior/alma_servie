@@ -12,7 +12,7 @@ import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
 
 import numpy as np
 import pandas as pd
@@ -168,6 +168,49 @@ def evaluate_conditions(metrics: Dict[str, Optional[float]], conditions: List[Di
 ConditionDict = Dict[str, Any]
 
 
+WARNING_RULE_MAP = {
+    "рост параметров при постоянной частоте": "pressure_rise_constant_freq",
+    "падение давления на приеме при постоянной частоте": "pressure_drop_constant_freq",
+    "рост давления на приеме в режиме апв": "pressure_rise_apv",
+    "рост давления на приеме": "pressure_hump",
+    "нестабильная работа в режиме апв": "apv_unstable",
+    "срыв подачи": "flow_off",
+    "срыв подачи пила по различным параметрам": "flow_off_oscillation",
+    "отказ или сбой тмс": "tms_failure",
+    "отсутствует частота": "missing_frequency",
+}
+
+
+def _normalize_warning(text: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text).strip().lower())
+    return cleaned
+
+
+def build_rule_whitelist(config: Dict) -> Dict[str, Set[str]]:
+    source_path = Path(config["anomalies"].get("source_workbook", ""))
+    if not source_path.exists():
+        logger.warning("Workbook with reference anomalies not found: %s", source_path)
+        return {}
+    try:
+        abnormal_df = pd.read_excel(source_path, sheet_name="Ненормальная работа")
+    except ValueError:
+        logger.warning("Sheet 'Ненормальная работа' not found in %s", source_path)
+        return {}
+
+    whitelist: Dict[str, Set[str]] = {}
+    for _, row in abnormal_df.iterrows():
+        well = str(row.get("Скважина")).strip() if pd.notna(row.get("Скважина")) else ""
+        if not well or well.lower() == "nan":
+            continue
+        warning = _normalize_warning(row.get("Название предупреждения", ""))
+        rule_name = WARNING_RULE_MAP.get(warning)
+        if rule_name is None:
+            logger.debug("Unable to map warning '%s' for well %s to a rule", warning, well)
+            continue
+        whitelist.setdefault(well, set()).add(rule_name)
+    return whitelist
+
+
 @dataclass
 class RuleDefinition:
     name: str
@@ -227,7 +270,7 @@ class DetectionResult:
 
 
 class RuleBasedDetector:
-    def __init__(self, detection_conf: Dict[str, Any], rules_conf: List[Dict[str, Any]], well_column: str) -> None:
+    def __init__(self, detection_conf: Dict[str, Any], rules_conf: List[Dict[str, Any]], well_column: str, allowed_rules_by_well: Optional[Dict[str, Set[str]]] = None) -> None:
         if detection_conf is None:
             raise ValueError(
                 "Отсутствует секция 'anomalies.detection' в конфигурации. "
@@ -249,6 +292,10 @@ class RuleBasedDetector:
         }
         self.rules: List[RuleDefinition] = [RuleDefinition.from_config(rule_conf) for rule_conf in rules_conf]
         self.well_column = well_column
+        if allowed_rules_by_well:
+            self.allowed_rules_by_well = {str(key): set(value) for key, value in allowed_rules_by_well.items()}
+        else:
+            self.allowed_rules_by_well = None
         self.default_sampling_hours: float = 1.0
         self._sampling_by_well: Dict[str, float] = {}
         if not self.rules:
@@ -266,13 +313,22 @@ class RuleBasedDetector:
         merged[self.well_column] = merged[self.well_column].astype(str)
 
         records: List[Dict[str, Any]] = []
-        for well, df_well in merged.groupby(self.well_column):
+        mapping = self.allowed_rules_by_well
+        for well_value, df_well in merged.groupby(self.well_column):
+            well_str = str(well_value)
+            allowed = None
+            if mapping is not None:
+                allowed = mapping.get(well_str)
+                if not allowed:
+                    continue
             df_well = df_well.sort_values("timestamp")
-            features = self._compute_features(well, df_well)
+            features = self._compute_features(well_str, df_well)
             if features is None or features.empty:
                 continue
             for rule in self.rules:
-                detections = self._evaluate_rule_for_well(well, df_well, features, rule)
+                if allowed is not None and rule.name not in allowed:
+                    continue
+                detections = self._evaluate_rule_for_well(well_str, df_well, features, rule)
                 records.extend(result.to_record() for result in detections)
 
         if not records:
@@ -600,10 +656,12 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
 
     merged = pd.read_parquet(processed_path)
 
+    rule_whitelist = build_rule_whitelist(config)
     detector = RuleBasedDetector(
         detection_conf=config["anomalies"].get("detection"),
         rules_conf=config["anomalies"].get("rules", []),
         well_column=config["su"]["well_column"],
+        allowed_rules_by_well=rule_whitelist,
     )
 
     if workbook_override is not None:

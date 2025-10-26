@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Dict, Set
+import sys
 
 import matplotlib.backends.backend_pdf as pdf_backend
 import matplotlib.dates as mdates
@@ -29,8 +31,11 @@ HERE = Path(__file__).resolve().parent
 PROJECT_ROOT = HERE.parent
 DETECTIONS_PATH = PROJECT_ROOT / "reports" / "anomalies" / "anomaly_analysis.parquet"
 MERGED_PATH = PROJECT_ROOT / "data" / "processed" / "merged_hourly.parquet"
-SU_CLEAN_PATH = PROJECT_ROOT / "data" / "processed" / "su_clean.parquet"
 OUTPUT_DIR = HERE / "well_pipeline_anom"
+CONFIG_PATH = PROJECT_ROOT / "config" / "pipeline.yaml"
+
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+from pipeline.anomalies import build_rule_whitelist, load_config
 
 CONTEXT_HOURS = 12
 
@@ -58,7 +63,7 @@ METRIC_GROUPS = [
 ]
 
 
-def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, Dict[str, Set[str]]]:
     if not DETECTIONS_PATH.exists():
         raise FileNotFoundError(
             "Не найден файл с детекциями. Запустите `PYTHONPATH=src python -m pipeline anomalies`."
@@ -80,16 +85,10 @@ def load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     merged["well_number"] = merged["well_number"].astype(str)
     merged.sort_values(["well_number", "timestamp"], inplace=True)
 
-    if not SU_CLEAN_PATH.exists():
-        raise FileNotFoundError(
-            "Не найден файл `data/processed/su_clean.parquet`. "
-            "Запустите этап clean перед генерацией PDF."
-        )
-    su_clean = pd.read_parquet(SU_CLEAN_PATH)
-    su_clean["Дата замера"] = pd.to_datetime(su_clean["Дата замера"])
-    su_clean["well_number"] = su_clean["well_number"].astype(str)
+    config = load_config(CONFIG_PATH)
+    whitelist = build_rule_whitelist(config)
 
-    return detections, merged, su_clean
+    return detections, merged, whitelist
 
 
 def ensure_output_dir() -> None:
@@ -122,7 +121,6 @@ def build_cover_page(well: str, well_detections: pd.DataFrame) -> plt.Figure:
 def plot_detection(
     well_data: pd.DataFrame,
     detection: pd.Series,
-    raw_su: pd.DataFrame,
 ) -> plt.Figure | None:
     start = detection["start"]
     end = detection["end"]
@@ -151,18 +149,13 @@ def plot_detection(
     highlight_start = start
     highlight_end = end
     if detection["rule_name"] == "tms_failure":
-        su_window = raw_su[
-            (raw_su["Дата замера"] >= window_start)
-            & (raw_su["Дата замера"] <= window_end)
-        ].copy()
-        if not su_window.empty:
-            threshold = 1.5
-            low_mask = su_window["Давление на приеме насоса"] <= threshold
-            if low_mask.any():
-                highlight_start = su_window.loc[low_mask, "Дата замера"].min()
-                highlight_end = su_window.loc[low_mask, "Дата замера"].max()
-                highlight_start = max(highlight_start, window_start)
-                highlight_end = min(highlight_end, window_end)
+        pressure_col = "Давление на приеме насоса"
+        if pressure_col in window_df.columns:
+            low_points = window_df[window_df[pressure_col] <= 1.5]
+            if not low_points.empty:
+                highlight_start = max(low_points["timestamp"].min(), window_start)
+                highlight_end = min(low_points["timestamp"].max(), window_end)
+        highlight_start = max(highlight_start - pd.Timedelta(minutes=15), window_start)
 
     for ax, (group_name, metrics) in zip(axes, METRIC_GROUPS):
         plotted = False
@@ -222,14 +215,20 @@ def plot_detection(
 
 
 def generate_pdfs() -> None:
-    detections, merged, su_clean = load_inputs()
+    detections, merged, whitelist = load_inputs()
     ensure_output_dir()
 
-    for well, well_detections in detections.groupby("well_number"):
+    target_wells = sorted({str(key) for key in whitelist.keys()})
+    if not target_wells:
+        target_wells = sorted(detections["well_number"].unique())
+
+    for well in target_wells:
         well_data = merged[merged["well_number"] == well]
         if well_data.empty:
+            print(f"Пропуск: нет данных на сетке для скважины {well}")
             continue
-        well_su = su_clean[su_clean["well_number"] == well].copy()
+
+        well_detections = detections[detections["well_number"] == well]
 
         pdf_path = OUTPUT_DIR / f"скважина_{well}_pipeline_аномалии.pdf"
         with pdf_backend.PdfPages(pdf_path) as pdf:
@@ -238,7 +237,7 @@ def generate_pdfs() -> None:
             plt.close(cover)
 
             for _, detection in well_detections.iterrows():
-                fig = plot_detection(well_data, detection, well_su)
+                fig = plot_detection(well_data, detection)
                 if fig is None:
                     continue
                 pdf.savefig(fig)
