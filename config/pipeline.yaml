@@ -73,8 +73,8 @@ anomalies:
       - "Объемный дебит жидкости, м3/сут"
       - "Температура двигателя"
       - "Устьевое давление"
-    window_hours: 6
-    baseline_shift_hours: 6
+    window_hours: 2
+    baseline_shift_hours: 2
     min_valid_fraction: 0.6
     default_min_baseline_abs: 0.1
     min_baseline_abs:
@@ -280,23 +280,23 @@ anomalies:
           operator: ">="
           value: 10
     - name: tms_failure
-      label: "Отказ или сбой ТМС"
-      description: "Падение давления измерительного канала до нулевых значений при рабочей частоте."
-      min_duration_hours: 2
-      cooldown_hours: 6
+      label: "Аномалия по условиям"
+      description: ""
+      min_duration_hours: 0.5
+      cooldown_hours: 3
       focus_metrics:
         - "Давление на приеме насоса"
         - "Выходная частота"
       all:
         - feature: "Давление на приеме насоса__current_mean"
           operator: "<="
-          value: 2.5
-        - feature: "Давление на приеме насоса__current_max"
-          operator: "<="
-          value: 3.5
+          value: 1.5
         - feature: "Давление на приеме насоса__baseline_mean"
           operator: ">="
-          value: 5
+          value: 1.0
+        - feature: "Давление на приеме насоса__pct_change"
+          operator: "<="
+          value: -30
         - feature: "Давление на приеме насоса__valid_fraction"
           operator: ">="
           value: 0.7
@@ -335,6 +335,6 @@ metadata:
   hash_algorithm: sha256
 
 alignment:
-  frequency: "1H"
+  frequency: "15T"
   agzu_max_ffill_hours: 24
   su_max_ffill_hours: 6

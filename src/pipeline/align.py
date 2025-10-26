@@ -202,10 +202,14 @@ def parse_args(argv: Iterable[str]) -> argparse.Namespace:
 
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv or [])
+    config = load_config(args.config)
+    alignment = config.get("alignment", {})
+    freq_raw = alignment.get("frequency", "1H")
+    freq_display = freq_raw.replace('T', 'min').replace('t', 'min')
     stats = run_alignment(args.config)
-    print(f"Resampled AGZU rows: {stats['agzu_resampled_rows']}")
-    print(f"Resampled SU rows: {stats['su_resampled_rows']}")
-    print(f"Merged rows: {stats['merged_rows']}")
+    print(f"Resampled AGZU rows: {stats['agzu_resampled_rows']} (freq={freq_display})")
+    print(f"Resampled SU rows: {stats['su_resampled_rows']} (freq={freq_display})")
+    print(f"Merged rows: {stats['merged_rows']} (freq={freq_display})")
     return 0
 
 
