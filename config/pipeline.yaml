@@ -103,12 +103,11 @@ anomalies:
           operator: ">="
           value: 5
         - feature: "Выходная частота__pct_change"
-          operator: "between"
-          min: -4
-          max: 4
+          operator: ">="
+          value: 1
         - feature: "Выходная частота__current_std"
           operator: "<="
-          value: 2
+          value: 5
         - feature: "Давление на приеме насоса__valid_fraction"
           operator: ">="
           value: 0.7
@@ -133,10 +132,10 @@ anomalies:
       all:
         - feature: "Давление на приеме насоса__pct_change"
           operator: "<="
-          value: -12
+          value: -5
         - feature: "Давление на приеме насоса__delta"
           operator: "<="
-          value: -2
+          value: -1
         - feature: "Давление на приеме насоса__current_mean"
           operator: ">="
           value: 5
@@ -146,7 +145,7 @@ anomalies:
           max: 3
         - feature: "Выходная частота__current_std"
           operator: "<="
-          value: 2
+          value: 5
         - feature: "Давление на приеме насоса__valid_fraction"
           operator: ">="
           value: 0.7
@@ -254,9 +253,6 @@ anomalies:
         - feature: "Ток фазы A__current_cv"
           operator: ">="
           value: 0.03
-        - feature: "Давление на приеме насоса__pct_change"
-          operator: ">="
-          value: 5
     - name: missing_frequency
       label: "Отсутствует частота"
       description: "Отсутствие телеметрии частоты при сохранении остальных сигналов."
