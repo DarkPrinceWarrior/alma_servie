@@ -14,6 +14,24 @@ import pandas as pd
 from .config import DEFAULT_CONFIG_PATH, load_config
 
 
+def _normalise_frequency(freq: str | None) -> str:
+    """Convert deprecated pandas offset aliases to their modern form."""
+    if not freq:
+        return "1h"
+    freq_str = str(freq).strip()
+    if not freq_str:
+        return "1h"
+    suffix_map = {"t": "min", "T": "min", "H": "h"}
+    last_char = freq_str[-1]
+    mapped = suffix_map.get(last_char)
+    if mapped:
+        prefix = freq_str[:-1]
+        if prefix and prefix[-1].isdigit():
+            return f"{prefix}{mapped}"
+        return mapped
+    return freq_str
+
+
 def load_clean_tables(config: Dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     processed_dir = Path(config["paths"]["processed_dir"])
     agzu_path = processed_dir / "agzu_clean.parquet"
@@ -42,10 +60,13 @@ def _hourly_interpolate(
         if indexed.empty:
             continue
 
-        hourly_mean = indexed.resample(freq).mean()
-        # Count rows that landed in each hourly bucket (regardless of NaNs)
-        hourly_counts = indexed.resample(freq).apply(lambda s: s.shape[0])
-
+        aggregated = indexed.resample(freq).agg(["mean", "size"])
+        hourly_mean = aggregated.xs("mean", axis=1, level=1, drop_level=True)
+        hourly_counts = aggregated.xs("size", axis=1, level=1, drop_level=True)
+        if isinstance(hourly_mean, pd.Series):
+            hourly_mean = hourly_mean.to_frame(name=hourly_mean.name)
+        if isinstance(hourly_counts, pd.Series):
+            hourly_counts = hourly_counts.to_frame(name=hourly_counts.name)
         interpolated = hourly_mean.interpolate(method="time")
         # Restore NaNs that were present in original data (hour had rows but all were NaN)
         original_nan_mask = (hourly_counts > 0) & hourly_mean.isna()
@@ -62,14 +83,14 @@ def _hourly_interpolate(
 def resample_agzu(agzu: pd.DataFrame, config: Dict) -> pd.DataFrame:
     agzu_conf = config["agzu"]
     alignment = config.get("alignment", {})
-    freq = alignment.get("frequency", "1H").lower()
+    freq = _normalise_frequency(alignment.get("frequency", "1H"))
     return _hourly_interpolate(agzu, agzu_conf["datetime_column"], agzu_conf["well_column"], freq)
 
 
 def resample_su(su: pd.DataFrame, config: Dict) -> pd.DataFrame:
     su_conf = config["su"]
     alignment = config.get("alignment", {})
-    freq = alignment.get("frequency", "1H").lower()
+    freq = _normalise_frequency(alignment.get("frequency", "1H"))
     return _hourly_interpolate(su, su_conf["datetime_column"], su_conf["well_column"], freq)
 
 
@@ -180,7 +201,7 @@ def run_alignment(config_path: Path) -> Dict[str, int]:
     config = load_config(config_path)
     agzu_clean, su_clean = load_clean_tables(config)
     alignment = config.get("alignment", {})
-    freq = alignment.get("frequency", "1H").lower()
+    freq = _normalise_frequency(alignment.get("frequency", "1H"))
 
     agzu_resampled = resample_agzu(agzu_clean, config)
     su_resampled = resample_su(su_clean, config)
