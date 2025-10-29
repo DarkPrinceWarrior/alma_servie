@@ -1,717 +1,670 @@
-"""
-Compute anomaly metrics by comparing pre-window averages with anomaly-period averages.
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
-import re
-import sys
-import logging
-import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Set
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+import math
 
 import numpy as np
 import pandas as pd
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 
-logger = logging.getLogger(__name__)
+
+@dataclass
+class ReferenceInterval:
+    well: str
+    start: pd.Timestamp
+    end: pd.Timestamp
+    label: str  # "anomaly" or "normal"
+    notes: List[str]
 
 
 @dataclass
-class AnomalyEvent:
-    well: str
-    name: str
-    start: pd.Timestamp
-    end: pd.Timestamp
-    raw_row: Dict
+class DetectionSettings:
+    window_minutes: int = 60
+    shift_minutes: int = 60
+    min_samples: int = 30
+    delta_factor: float = 0.6
+    delta_quantile: float = 0.1
+    slope_margin: float = 0.03
+    slope_quantile: float = 0.15
+    min_duration_minutes: int = 60
+    gap_minutes: int = 10
 
 
-def parse_datetime_range(value: str) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp]]:
-    pattern = r"(\d{2})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})\s*-\s*(\d{2})\.(\d{2})\.(\d{2})\s+(\d{2}):(\d{2})"
-    match = re.search(pattern, str(value))
-    if not match:
-        return None, None
-    day1, month1, year1, hour1, minute1, day2, month2, year2, hour2, minute2 = match.groups()
-    start = pd.Timestamp(f"20{year1}-{month1}-{day1} {hour1}:{minute1}:00")
-    end = pd.Timestamp(f"20{year2}-{month2}-{day2} {hour2}:{minute2}:00")
+@dataclass
+class InterpretationThresholds:
+    strong_increase: float = 0.1
+    mild_increase: float = 0.03
+    mild_drop: float = -0.03
+    strong_drop: float = -0.1
+
+
+def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    denominator = denominator.replace(0, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        result = numerator / denominator
+    result.replace([np.inf, -np.inf], np.nan, inplace=True)
+    return result
+
+
+def load_detection_settings(config: Dict) -> Tuple[DetectionSettings, InterpretationThresholds]:
+    detection_cfg = config.get("anomalies", {}).get("detection", {}) or {}
+    interpretation_cfg = config.get("anomalies", {}).get("interpretation", {}) or {}
+    settings = DetectionSettings(
+        window_minutes=int(detection_cfg.get("window_minutes", 60)),
+        shift_minutes=int(detection_cfg.get("shift_minutes", 60)),
+        min_samples=int(detection_cfg.get("min_samples", 30)),
+        delta_factor=float(detection_cfg.get("delta_factor", 0.6)),
+        delta_quantile=float(detection_cfg.get("delta_quantile", 0.1)),
+        slope_margin=float(detection_cfg.get("slope_margin", 0.03)),
+        slope_quantile=float(detection_cfg.get("slope_quantile", 0.15)),
+        min_duration_minutes=int(detection_cfg.get("min_duration_minutes", 60)),
+        gap_minutes=int(detection_cfg.get("gap_minutes", 10)),
+    )
+    interpretation = InterpretationThresholds(
+        strong_increase=float(interpretation_cfg.get("strong_increase", 0.1)),
+        mild_increase=float(interpretation_cfg.get("mild_increase", 0.03)),
+        mild_drop=float(interpretation_cfg.get("mild_drop", -0.03)),
+        strong_drop=float(interpretation_cfg.get("strong_drop", -0.1)),
+    )
+    return settings, interpretation
+
+
+def load_svod_sheet(xl: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
+    svod = xl.parse(sheet_name, header=2)
+    svod = svod.copy()
+    svod["Скв"] = svod["Скв"].ffill()
+    svod["ПричОст"] = svod["ПричОст"].ffill()
+    if "Время возникновения аномалии" in svod.columns:
+        svod["Время возникновения аномалии"] = pd.to_datetime(
+            svod["Время возникновения аномалии"], errors="coerce", dayfirst=True
+        )
+    if "Время остановки скважины" in svod.columns:
+        svod["Время остановки скважины"] = pd.to_datetime(
+            svod["Время остановки скважины"], errors="coerce", dayfirst=True
+        )
+    return svod
+
+
+def load_well_series(xl: pd.ExcelFile, svod_sheet: str) -> Dict[str, pd.DataFrame]:
+    data: Dict[str, pd.DataFrame] = {}
+    for sheet_name in xl.sheet_names:
+        if sheet_name == svod_sheet:
+            continue
+        df = xl.parse(sheet_name)
+        metric_frames: Dict[str, pd.Series] = {}
+        for column in df.columns:
+            if not str(column).startswith("timestamp_"):
+                continue
+            metric = column.replace("timestamp_", "")
+            if metric not in df.columns:
+                continue
+            timestamps = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
+            values = pd.to_numeric(df[metric], errors="coerce")
+            mask = timestamps.notna() & values.notna()
+            if not mask.any():
+                continue
+            series = pd.Series(values[mask].values, index=pd.Index(timestamps[mask].values).tz_localize(None))
+            series = series.sort_index()
+            series = series[~series.index.duplicated(keep="last")]
+            metric_frames[metric] = series
+
+        if not metric_frames:
+            continue
+
+        start = max(series.index.min() for series in metric_frames.values())
+        end = min(series.index.max() for series in metric_frames.values())
+        if pd.isna(start) or pd.isna(end) or start >= end:
+            continue
+
+        clipped_frames: Dict[str, pd.Series] = {}
+        for metric, series in metric_frames.items():
+            clipped = series[(series.index >= start) & (series.index <= end)]
+            if clipped.empty:
+                continue
+            clipped_frames[metric] = clipped
+        if not clipped_frames:
+            continue
+
+        combined_index = sorted({ts for series in clipped_frames.values() for ts in series.index})
+        datetime_index = pd.DatetimeIndex(combined_index)
+
+        aligned: Dict[str, pd.Series] = {}
+        for metric, series in clipped_frames.items():
+            aligned[metric] = series.reindex(datetime_index)
+        data[sheet_name] = pd.DataFrame(aligned, index=datetime_index)
+    return data
+
+
+def clip_interval_to_data(
+    well_df: pd.DataFrame,
+    start: Optional[pd.Timestamp],
+    end: Optional[pd.Timestamp],
+) -> Optional[Tuple[pd.Timestamp, pd.Timestamp]]:
+    data_start = well_df.index.min()
+    data_end = well_df.index.max()
+    if pd.isna(start) or start < data_start:
+        start = data_start
+    if pd.isna(end) or end > data_end:
+        end = data_end
+    if start >= end:
+        return None
     return start, end
 
 
-def load_anomaly_table(config: Dict, override_path: Optional[Path] = None) -> pd.DataFrame:
-    workbook_path = override_path or Path(config["anomalies"]["source_workbook"])
-    if not workbook_path.exists():
-        raise FileNotFoundError(
-            f"Anomaly workbook not found at {workbook_path}. "
-            "Provide the file or use --source to override the path."
-        )
-    sheet = config["anomalies"]["sheet_name"]
-    return pd.read_excel(workbook_path, sheet_name=sheet)
-
-
-def extract_events(anomalies_df: pd.DataFrame) -> List[AnomalyEvent]:
-    events: List[AnomalyEvent] = []
-    for _, row in anomalies_df.iterrows():
-        start, end = parse_datetime_range(row.get("Дата и время"))
-        if start is None or end is None:
+def parse_reference_intervals(
+    svod: pd.DataFrame,
+    well_data: Dict[str, pd.DataFrame],
+    anomaly_label: str,
+    normal_label: str,
+) -> List[ReferenceInterval]:
+    intervals: List[ReferenceInterval] = []
+    comment_columns = [col for col in svod.columns if col.startswith("Unnamed")]
+    for _, row in svod.iterrows():
+        well_raw = row.get("Скв")
+        if pd.isna(well_raw):
             continue
-        events.append(
-            AnomalyEvent(
-                well=str(row.get("Скважина")),
-                name=str(row.get("Название предупреждения")),
-                start=start,
-                end=end,
-                raw_row=row.to_dict(),
-            )
-        )
-    return events
-
-
-def compute_percent_change(before: float, during: float) -> Optional[float]:
-    if pd.isna(before) or pd.isna(during):
-        return None
-    if before == 0:
-        if during == 0:
-            return 0.0
-        return 100.0
-    return round(((during - before) / before) * 100.0, 2)
-
-
-def compute_metrics_for_event(
-    merged: pd.DataFrame,
-    event: AnomalyEvent,
-    config: Dict,
-) -> Dict[str, Optional[float]]:
-    anomalies_conf = config["anomalies"]
-    pre_window_days = anomalies_conf.get("pre_window_days", 3)
-    agzu_metrics = anomalies_conf.get("agzu_metrics", [])
-    su_metrics = anomalies_conf.get("su_metrics", [])
-    agzu_prefix = anomalies_conf.get("metrics_agzu_prefix", "АГЗУ")
-    su_prefix = anomalies_conf.get("metrics_su_prefix", "СУ")
-
-    df_well = merged[merged[config["su"]["well_column"]].astype(str) == event.well]
-    if df_well.empty:
-        return {}
-
-    timestamp_col = "timestamp"
-    df_well = df_well.sort_values(timestamp_col)
-
-    pre_start = event.start - pd.Timedelta(days=pre_window_days)
-    window_before = df_well[(df_well[timestamp_col] >= pre_start) & (df_well[timestamp_col] < event.start)]
-    window_anomaly = df_well[(df_well[timestamp_col] >= event.start) & (df_well[timestamp_col] <= event.end)]
-
-    metrics: Dict[str, Optional[float]] = {}
-
-    def _window_mean(frame: pd.DataFrame, column: str) -> float:
-        return pd.to_numeric(frame[column], errors="coerce").mean()
-
-    for metric in su_metrics:
-        if metric not in df_well.columns:
+        well = str(well_raw)
+        if well not in well_data:
             continue
-        before_mean = _window_mean(window_before, metric)
-        during_mean = _window_mean(window_anomaly, metric)
-        metrics[f"{su_prefix}_{metric}_изм%"] = compute_percent_change(before_mean, during_mean)
 
-    for metric in agzu_metrics:
-        if metric not in df_well.columns:
+        label_raw = str(row.get("ПричОст", "")).strip()
+        if not label_raw:
             continue
-        before_mean = _window_mean(window_before, metric)
-        during_mean = _window_mean(window_anomaly, metric)
-        metrics[f"{agzu_prefix}_{metric}_изм%"] = compute_percent_change(before_mean, during_mean)
-
-    metrics[f"{agzu_prefix}_точек_до"] = int(len(window_before))
-    metrics[f"{agzu_prefix}_точек_во_время"] = int(len(window_anomaly))
-    return metrics
-
-
-def evaluate_conditions(metrics: Dict[str, Optional[float]], conditions: List[Dict]) -> Dict[str, bool]:
-    results: Dict[str, bool] = {}
-    for condition in conditions:
-        name = condition.get("name", "condition")
-        rules = condition.get("rules", [])
-        condition_met = True
-        for rule in rules:
-            metric_name = rule.get("metric")
-            if metric_name not in metrics or metrics[metric_name] is None:
-                condition_met = False
-                break
-            value = metrics[metric_name]
-            operator = rule.get("operator", ">=")
-            threshold = rule.get("threshold", 0)
-            if operator == ">=":
-                if not (value >= threshold):
-                    condition_met = False
-                    break
-            elif operator == "<=":
-                if not (value <= threshold):
-                    condition_met = False
-                    break
-            elif operator == ">":
-                if not (value > threshold):
-                    condition_met = False
-                    break
-            elif operator == "<":
-                if not (value < threshold):
-                    condition_met = False
-                    break
-            else:
-                condition_met = False
-                break
-        results[name] = condition_met
-    return results
-
-
-ConditionDict = Dict[str, Any]
-
-
-WARNING_RULE_MAP = {
-    "рост параметров при постоянной частоте": "pressure_rise_constant_freq",
-    "падение давления на приеме при постоянной частоте": "pressure_drop_constant_freq",
-    "рост давления на приеме в режиме апв": "pressure_rise_apv",
-    "рост давления на приеме": "pressure_hump",
-    "нестабильная работа в режиме апв": "apv_unstable",
-    "срыв подачи": "flow_off",
-    "срыв подачи пила по различным параметрам": "flow_off_oscillation",
-    "отказ или сбой тмс": "tms_failure",
-    "отсутствует частота": "missing_frequency",
-}
-
-
-def _normalize_warning(text: str) -> str:
-    cleaned = re.sub(r"\s+", " ", str(text).strip().lower())
-    return cleaned
-
-
-def build_rule_whitelist(config: Dict) -> Dict[str, Set[str]]:
-    source_path = Path(config["anomalies"].get("source_workbook", ""))
-    if not source_path.exists():
-        logger.warning("Workbook with reference anomalies not found: %s", source_path)
-        return {}
-    try:
-        abnormal_df = pd.read_excel(source_path, sheet_name="Ненормальная работа")
-    except ValueError:
-        logger.warning("Sheet 'Ненормальная работа' not found in %s", source_path)
-        return {}
-
-    whitelist: Dict[str, Set[str]] = {}
-    for _, row in abnormal_df.iterrows():
-        well = str(row.get("Скважина")).strip() if pd.notna(row.get("Скважина")) else ""
-        if not well or well.lower() == "nan":
+        if label_raw not in {anomaly_label, normal_label}:
             continue
-        warning = _normalize_warning(row.get("Название предупреждения", ""))
-        rule_name = WARNING_RULE_MAP.get(warning)
-        if rule_name is None:
-            logger.debug("Unable to map warning '%s' for well %s to a rule", warning, well)
+
+        start = row.get("Время возникновения аномалии")
+        end = row.get("Время остановки скважины")
+        clipped = clip_interval_to_data(well_data[well], start, end)
+        if clipped is None:
             continue
-        whitelist.setdefault(well, set()).add(rule_name)
-    return whitelist
-
-
-@dataclass
-class RuleDefinition:
-    name: str
-    label: str
-    description: str = ""
-    min_duration_hours: float = 1.0
-    cooldown_hours: float = 0.0
-    focus_metrics: List[str] = field(default_factory=list)
-    all: List[ConditionDict] = field(default_factory=list)
-    any: List[ConditionDict] = field(default_factory=list)
-    none: List[ConditionDict] = field(default_factory=list)
-
-    @classmethod
-    def from_config(cls, cfg: Dict[str, Any]) -> "RuleDefinition":
-        return cls(
-            name=cfg["name"],
-            label=cfg.get("label", cfg["name"]),
-            description=cfg.get("description", ""),
-            min_duration_hours=cfg.get("min_duration_hours", 1.0),
-            cooldown_hours=cfg.get("cooldown_hours", 0.0),
-            focus_metrics=cfg.get("focus_metrics", []),
-            all=cfg.get("all", []),
-            any=cfg.get("any", []),
-            none=cfg.get("none", []),
-        )
-
-
-@dataclass
-class DetectionResult:
-    well: str
-    rule_name: str
-    rule_label: str
-    rule_description: str
-    start: pd.Timestamp
-    end: pd.Timestamp
-    duration_hours: float
-    samples: int
-    score: float
-    peak_time: Optional[pd.Timestamp]
-    details: Dict[str, Any] = field(default_factory=dict)
-
-    def to_record(self) -> Dict[str, Any]:
-        record: Dict[str, Any] = {
-            "well_number": self.well,
-            "rule_name": self.rule_name,
-            "rule_label": self.rule_label,
-            "rule_description": self.rule_description,
-            "start": self.start,
-            "end": self.end,
-            "duration_hours": self.duration_hours,
-            "sample_count": self.samples,
-            "score": self.score,
-            "peak_time": self.peak_time,
-        }
-        record.update(self.details)
-        return record
-
-
-class RuleBasedDetector:
-    def __init__(self, detection_conf: Dict[str, Any], rules_conf: List[Dict[str, Any]], well_column: str, allowed_rules_by_well: Optional[Dict[str, Set[str]]] = None) -> None:
-        if detection_conf is None:
-            raise ValueError(
-                "Отсутствует секция 'anomalies.detection' в конфигурации. "
-                "Добавьте её в config/pipeline.yaml."
-            )
-        self.metrics: List[str] = detection_conf.get("metrics") or [
-            "Выходная частота",
-            "Давление на приеме насоса",
-            "Ток фазы A",
-            "Объемный дебит жидкости, м3/сут",
-        ]
-        self.window_hours: int = int(detection_conf.get("window_hours", 6))
-        self.baseline_shift_hours: int = int(detection_conf.get("baseline_shift_hours", self.window_hours))
-        self.min_valid_fraction: float = float(detection_conf.get("min_valid_fraction", 0.6))
-        self.min_valid_fraction = max(0.0, min(1.0, self.min_valid_fraction))
-        self.default_min_baseline_abs: float = float(detection_conf.get("default_min_baseline_abs", 0.0))
-        self.min_baseline_abs: Dict[str, float] = {
-            key: float(value) for key, value in detection_conf.get("min_baseline_abs", {}).items()
-        }
-        self.rules: List[RuleDefinition] = [RuleDefinition.from_config(rule_conf) for rule_conf in rules_conf]
-        self.well_column = well_column
-        if allowed_rules_by_well:
-            self.allowed_rules_by_well = {str(key): set(value) for key, value in allowed_rules_by_well.items()}
-        else:
-            self.allowed_rules_by_well = None
-        self.default_sampling_hours: float = 1.0
-        self._sampling_by_well: Dict[str, float] = {}
-        if not self.rules:
-            logger.warning("Аномальные правила не заданы (anomalies.rules). Детектор вернёт пустой результат.")
-
-    def run(self, merged: pd.DataFrame) -> pd.DataFrame:
-        if merged.empty:
-            return pd.DataFrame()
-
-        if "timestamp" not in merged.columns:
-            raise ValueError("Merged dataset must contain 'timestamp' column.")
-
-        merged = merged.copy()
-        merged["timestamp"] = pd.to_datetime(merged["timestamp"])
-        merged[self.well_column] = merged[self.well_column].astype(str)
-
-        records: List[Dict[str, Any]] = []
-        mapping = self.allowed_rules_by_well
-        for well_value, df_well in merged.groupby(self.well_column):
-            well_str = str(well_value)
-            allowed = None
-            if mapping is not None:
-                allowed = mapping.get(well_str)
-                if not allowed:
-                    continue
-            df_well = df_well.sort_values("timestamp")
-            features = self._compute_features(well_str, df_well)
-            if features is None or features.empty:
-                continue
-            for rule in self.rules:
-                if allowed is not None and rule.name not in allowed:
-                    continue
-                detections = self._evaluate_rule_for_well(well_str, df_well, features, rule)
-                records.extend(result.to_record() for result in detections)
-
-        if not records:
-            return pd.DataFrame(columns=[
-                "well_number",
-                "rule_name",
-                "rule_label",
-                "rule_description",
-                "start",
-                "end",
-                "duration_hours",
-                "sample_count",
-                "score",
-                "peak_time",
-            ])
-
-        detections_df = pd.DataFrame(records)
-        detections_df.sort_values(["start", "well_number", "rule_name"], inplace=True)
-        detections_df.reset_index(drop=True, inplace=True)
-        return detections_df
-
-    def _compute_features(self, well: str, df_well: pd.DataFrame) -> Optional[pd.DataFrame]:
-        df = df_well.set_index("timestamp")
-        if df.empty:
-            return None
-
-        sampling_hours = self._infer_sampling_hours(df.index)
-        self._sampling_by_well[well] = sampling_hours
-
-        window = max(1, int(round(self.window_hours / sampling_hours)))
-        baseline_shift = max(1, int(round(self.baseline_shift_hours / sampling_hours)))
-        min_periods = max(1, int(math.ceil(window * self.min_valid_fraction)))
-
-        features = pd.DataFrame(index=df.index)
-
-        for metric in self.metrics:
-            if metric not in df.columns:
-                logger.debug("Metric '%s' отсутствует в данных, пропускаю её.", metric)
-                continue
-            series = pd.to_numeric(df[metric], errors="coerce")
-            if series.isna().all():
-                continue
-
-            current_mean = series.rolling(window=window, min_periods=min_periods).mean()
-            baseline_mean = series.shift(baseline_shift).rolling(window=window, min_periods=min_periods).mean()
-            delta = current_mean - baseline_mean
-
-            min_abs = self.min_baseline_abs.get(metric, self.default_min_baseline_abs)
-            with np.errstate(divide="ignore", invalid="ignore"):
-                denom = baseline_mean.where(baseline_mean.abs() >= min_abs)
-                pct_change = (delta / denom) * 100.0
-
-            valid_count = series.rolling(window=window, min_periods=1).count()
-            baseline_count = series.shift(baseline_shift).rolling(window=window, min_periods=1).count()
-            valid_fraction = valid_count / window
-            baseline_fraction = baseline_count / window
-            current_std = series.rolling(window=window, min_periods=min_periods).std()
-            current_min = series.rolling(window=window, min_periods=min_periods).min()
-            current_max = series.rolling(window=window, min_periods=min_periods).max()
-            current_range = current_max - current_min
-            with np.errstate(divide="ignore", invalid="ignore"):
-                current_cv = current_std / current_mean.abs()
-
-            features[f"{metric}__pct_change"] = pct_change
-            features[f"{metric}__delta"] = delta
-            features[f"{metric}__current_mean"] = current_mean
-            features[f"{metric}__baseline_mean"] = baseline_mean
-            features[f"{metric}__valid_fraction"] = valid_fraction
-            features[f"{metric}__baseline_fraction"] = baseline_fraction
-            features[f"{metric}__missing_fraction"] = 1.0 - valid_fraction
-            features[f"{metric}__current_std"] = current_std
-            features[f"{metric}__current_min"] = current_min
-            features[f"{metric}__current_max"] = current_max
-            features[f"{metric}__current_range"] = current_range
-            features[f"{metric}__current_cv"] = current_cv
-
-        return features
-
-    def _evaluate_rule_for_well(
-        self,
-        well: str,
-        df_well: pd.DataFrame,
-        features: pd.DataFrame,
-        rule: RuleDefinition,
-    ) -> List[DetectionResult]:
-        if features.empty:
-            return []
-
-        mask = self._evaluate_conditions(features, rule)
-        if mask is None or not mask.any():
-            return []
-
-        sampling_hours = self._sampling_by_well.get(well, self.default_sampling_hours)
-        min_samples = max(1, int(math.ceil(rule.min_duration_hours / sampling_hours)))
-        cooldown_samples = max(0, int(math.ceil(rule.cooldown_hours / sampling_hours)))
-        segments = self._mask_to_segments(mask, min_samples, cooldown_samples)
-        results: List[DetectionResult] = []
-
-        for start, end in segments:
-            segment = features.loc[start:end]
-            if segment.empty:
-                continue
-            result = self._summarise_segment(well, rule, segment, sampling_hours)
-            results.append(result)
-        return results
-
-    def _evaluate_conditions(self, features: pd.DataFrame, rule: RuleDefinition) -> Optional[pd.Series]:
-        if features.empty:
-            return None
-        mask = pd.Series(True, index=features.index, dtype=bool)
-
-        for cond in rule.all:
-            cond_mask = self._condition_mask(features, cond)
-            mask &= cond_mask
-
-        if rule.any:
-            any_mask = pd.Series(False, index=features.index, dtype=bool)
-            for cond in rule.any:
-                any_mask |= self._condition_mask(features, cond)
-            mask &= any_mask
-
-        for cond in rule.none:
-            mask &= ~self._condition_mask(features, cond)
-
-        return mask
-
-    def _condition_mask(self, features: pd.DataFrame, cond: ConditionDict) -> pd.Series:
-        feature_name = cond.get("feature")
-        if feature_name not in features:
-            return pd.Series(False, index=features.index, dtype=bool)
-        series = features[feature_name]
-        if cond.get("abs", False):
-            series = series.abs()
-
-        operator = cond.get("operator", ">=")
-        value = cond.get("value")
-        if operator == ">=":
-            mask = series >= value
-        elif operator == ">":
-            mask = series > value
-        elif operator == "<=":
-            mask = series <= value
-        elif operator == "<":
-            mask = series < value
-        elif operator == "between":
-            lower = cond.get("min", -np.inf)
-            upper = cond.get("max", np.inf)
-            mask = series.between(lower, upper)
-        elif operator == "outside":
-            lower = cond.get("min", -np.inf)
-            upper = cond.get("max", np.inf)
-            mask = (series < lower) | (series > upper)
-        elif operator == "==":
-            mask = series == value
-        elif operator == "!=":
-            mask = series != value
-        elif operator == "isna":
-            mask = series.isna()
-        elif operator == "notna":
-            mask = series.notna()
-        else:
-            raise ValueError(f"Неизвестный оператор условия: {operator}")
-
-        if cond.get("fill", False):
-            fill_value = bool(cond["fill"])
-            mask = mask.fillna(fill_value)
-        else:
-            mask = mask.fillna(False)
-        return mask
-
-    def _mask_to_segments(
-        self,
-        mask: pd.Series,
-        min_samples: int,
-        cooldown_samples: int,
-    ) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-        if mask.empty:
-            return []
-
-        values = mask.fillna(False).to_numpy(dtype=bool)
-        index = mask.index.to_list()
-        segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-
-        n = len(values)
-        i = 0
-        while i < n:
-            if values[i]:
-                start_idx = i
-                while i < n and values[i]:
-                    i += 1
-                end_idx = i - 1
-                length = end_idx - start_idx + 1
-                if length >= min_samples:
-                    segments.append((index[start_idx], index[end_idx]))
-                    i += cooldown_samples
-                    continue
-            i += 1
-        return segments
-
-    def _summarise_segment(
-        self,
-        well: str,
-        rule: RuleDefinition,
-        segment: pd.DataFrame,
-        sampling_hours: float,
-    ) -> DetectionResult:
-        start = segment.index[0]
-        end = segment.index[-1]
-        samples = len(segment)
-        duration_hours = float(samples * sampling_hours)
-
-        details: Dict[str, Any] = {}
-        score_values: List[float] = []
-        peak_time: Optional[pd.Timestamp] = None
-
-        for metric in rule.focus_metrics:
-            prefix = self._metric_prefix(metric)
-            pct_col = f"{metric}__pct_change"
-            delta_col = f"{metric}__delta"
-            mean_col = f"{metric}__current_mean"
-            std_col = f"{metric}__current_std"
-            valid_col = f"{metric}__valid_fraction"
-
-            if pct_col in segment:
-                pct_series = segment[pct_col]
-                if not pct_series.isna().all():
-                    details[f"{prefix}__pct_mean"] = self._to_float(pct_series.mean())
-                    details[f"{prefix}__pct_max"] = self._to_float(pct_series.max())
-                    details[f"{prefix}__pct_min"] = self._to_float(pct_series.min())
-                    score_values.append(abs(pct_series).mean())
-                    if peak_time is None:
-                        try:
-                            peak_time = pct_series.abs().idxmax()
-                        except ValueError:
-                            peak_time = None
-
-            if delta_col in segment:
-                delta_series = segment[delta_col]
-                if not delta_series.isna().all():
-                    details[f"{prefix}__delta_mean"] = self._to_float(delta_series.mean())
-
-            if mean_col in segment:
-                mean_series = segment[mean_col]
-                if not mean_series.isna().all():
-                    details[f"{prefix}__current_mean"] = self._to_float(mean_series.mean())
-
-            if std_col in segment:
-                std_series = segment[std_col]
-                if not std_series.isna().all():
-                    details[f"{prefix}__std_mean"] = self._to_float(std_series.mean())
-
-            if valid_col in segment:
-                valid_series = segment[valid_col]
-                if not valid_series.isna().all():
-                    details[f"{prefix}__valid_fraction_mean"] = self._to_float(valid_series.mean())
-
-        score = self._to_float(np.nanmean(score_values)) if score_values else float("nan")
-
-        if peak_time is None and len(segment.index) > 0:
-            peak_time = segment.index[min(len(segment.index) // 2, len(segment.index) - 1)]
 
         notes = []
-        for metric in rule.focus_metrics:
-            prefix = self._metric_prefix(metric)
-            key = f"{prefix}__pct_mean"
-            if key in details and not math.isnan(details[key]):
-                notes.append(f"{metric}: Δ% ср.{details[key]:.1f}")
-        if notes:
-            details["notes"] = "; ".join(notes)
-
-        details.setdefault("focus_metrics", ", ".join(rule.focus_metrics))
-
-        return DetectionResult(
-            well=well,
-            rule_name=rule.name,
-            rule_label=rule.label,
-            rule_description=rule.description,
-            start=start,
-            end=end,
-            duration_hours=duration_hours,
-            samples=samples,
-            score=score,
-            peak_time=peak_time,
-            details=details,
+        for col in comment_columns:
+            value = row.get(col)
+            if isinstance(value, str) and value.strip():
+                notes.append(value.strip())
+        intervals.append(
+            ReferenceInterval(
+                well=well,
+                start=clipped[0],
+                end=clipped[1],
+                label="anomaly" if label_raw == anomaly_label else "normal",
+                notes=notes,
+            )
         )
+    return intervals
 
-    def _infer_sampling_hours(self, index: pd.Index) -> float:
-        if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
-            return self.default_sampling_hours
-        diffs = index.to_series().diff().dropna().dt.total_seconds()
+
+def compute_feature_frame(
+    well_df: pd.DataFrame,
+    settings: DetectionSettings,
+) -> pd.DataFrame:
+    def _compute_window_params(series: pd.Series) -> Tuple[int, int, int]:
+        valid = series.dropna()
+        if len(valid) < 2:
+            return 1, 1, 1
+        diffs = valid.index.to_series().diff().dropna().dt.total_seconds()
         if diffs.empty:
-            return self.default_sampling_hours
-        median_seconds = float(diffs.median())
-        if median_seconds <= 0:
-            return self.default_sampling_hours
-        return median_seconds / 3600.0
+            median_seconds = 60.0
+        else:
+            median_seconds = float(diffs.median())
+            if median_seconds <= 0:
+                median_seconds = 60.0
+        window_points = max(1, int(round((settings.window_minutes * 60) / median_seconds)))
+        shift_points = max(1, int(round((settings.shift_minutes * 60) / median_seconds)))
+        fraction = min(1.0, settings.min_samples / max(1, settings.window_minutes))
+        min_periods = max(1, min(window_points, int(math.ceil(window_points * fraction))))
+        return window_points, shift_points, min_periods
 
-    @staticmethod
-    def _metric_prefix(metric: str) -> str:
-        prefix = (
-            metric.lower()
-            .replace(" ", "_")
-            .replace(",", "")
-            .replace("/", "_")
-            .replace("?", "")
+    features = pd.DataFrame(index=well_df.index)
+
+    pressure_series = pd.to_numeric(well_df["Intake_Pressure"], errors="coerce")
+    pressure_window, pressure_shift, pressure_min_periods = _compute_window_params(pressure_series)
+    rolling_pressure = pressure_series.rolling(window=pressure_window, min_periods=pressure_min_periods).mean()
+    baseline_pressure = (
+        pressure_series.shift(pressure_shift)
+        .rolling(window=pressure_window, min_periods=pressure_min_periods)
+        .mean()
+    )
+    baseline_pressure = baseline_pressure.reindex(rolling_pressure.index).interpolate(method="time")
+    pressure_delta = _safe_divide(rolling_pressure - baseline_pressure, baseline_pressure)
+    pressure_slope = pressure_series - pressure_series.shift(pressure_shift)
+
+    features["pressure_delta"] = pressure_delta
+    features["pressure_slope"] = pressure_slope
+
+    if "Current" in well_df.columns:
+        current_series = pd.to_numeric(well_df["Current"], errors="coerce")
+        current_window, current_shift, current_min_periods = _compute_window_params(current_series)
+        rolling_current = current_series.rolling(window=current_window, min_periods=current_min_periods).mean()
+        baseline_current = (
+            current_series.shift(current_shift)
+            .rolling(window=current_window, min_periods=current_min_periods)
+            .mean()
         )
-        return prefix
+        baseline_current = baseline_current.reindex(rolling_current.index).interpolate(method="time")
+        features["current_delta"] = _safe_divide(rolling_current - baseline_current, baseline_current)
+    else:
+        features["current_delta"] = np.nan
 
-    @staticmethod
-    def _to_float(value: Any) -> float:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return float("nan")
+    if "Motor_Temperature" in well_df.columns:
+        temp_series = pd.to_numeric(well_df["Motor_Temperature"], errors="coerce")
+        temp_window, temp_shift, temp_min_periods = _compute_window_params(temp_series)
+        rolling_temperature = temp_series.rolling(window=temp_window, min_periods=temp_min_periods).mean()
+        baseline_temperature = (
+            temp_series.shift(temp_shift)
+            .rolling(window=temp_window, min_periods=temp_min_periods)
+            .mean()
+        )
+        baseline_temperature = baseline_temperature.reindex(rolling_temperature.index).interpolate(method="time")
+        features["temperature_delta"] = _safe_divide(
+            rolling_temperature - baseline_temperature, baseline_temperature
+        )
+    else:
+        features["temperature_delta"] = np.nan
+
+    features["pressure"] = pressure_series
+    features["current"] = (
+        pd.to_numeric(well_df["Current"], errors="coerce") if "Current" in well_df else pd.Series(np.nan, index=well_df.index)
+    )
+    features["temperature"] = (
+        pd.to_numeric(well_df["Motor_Temperature"], errors="coerce")
+        if "Motor_Temperature" in well_df
+        else pd.Series(np.nan, index=well_df.index)
+    )
+    features["frequency"] = (
+        pd.to_numeric(well_df["Frequency"], errors="coerce")
+        if "Frequency" in well_df
+        else pd.Series(np.nan, index=well_df.index)
+    )
+    return features
+
+
+def aggregate_feature_values(
+    intervals: Sequence[ReferenceInterval],
+    features_map: Dict[str, pd.DataFrame],
+) -> Dict[str, pd.Series]:
+    collected: Dict[str, List[pd.Series]] = {
+        "pressure_delta": [],
+        "pressure_slope": [],
+        "current_delta": [],
+        "temperature_delta": [],
+    }
+    for interval in intervals:
+        frame = features_map.get(interval.well)
+        if frame is None:
+            continue
+        segment = frame.loc[interval.start : interval.end]
+        if segment.empty:
+            continue
+        for key in collected.keys():
+            if key in segment:
+                collected[key].append(segment[key].dropna())
+
+    aggregated = {}
+    for key, parts in collected.items():
+        if parts:
+            aggregated[key] = pd.concat(parts).dropna()
+        else:
+            aggregated[key] = pd.Series(dtype=float)
+    return aggregated
+
+
+def derive_thresholds(
+    normal_features: Dict[str, pd.Series],
+    anomaly_features: Dict[str, pd.Series],
+    settings: DetectionSettings,
+) -> Dict[str, Dict[str, float]]:
+    normal_delta_series = normal_features["pressure_delta"]
+    normal_slope_series = normal_features["pressure_slope"]
+    anomaly_delta_series = anomaly_features["pressure_delta"]
+    anomaly_slope_series = anomaly_features["pressure_slope"]
+
+    normal_delta_abs = normal_delta_series.abs() if not normal_delta_series.empty else pd.Series(dtype=float)
+    normal_slope_abs = normal_slope_series.abs() if not normal_slope_series.empty else pd.Series(dtype=float)
+
+    normal_delta_max = float(normal_delta_series.max()) if not normal_delta_series.empty else 0.0
+    anomaly_delta_quantile = float(
+        anomaly_delta_series.quantile(settings.delta_quantile, interpolation="linear")
+    ) if not anomaly_delta_series.empty else 0.0
+    delta_threshold = max(normal_delta_max * settings.delta_factor, anomaly_delta_quantile)
+
+    normal_slope_max = float(normal_slope_series.max()) if not normal_slope_series.empty else 0.0
+    anomaly_slope_quantile = float(
+        anomaly_slope_series.quantile(settings.slope_quantile, interpolation="linear")
+    ) if not anomaly_slope_series.empty else 0.0
+    slope_threshold = max(normal_slope_max + settings.slope_margin, anomaly_slope_quantile)
+
+    normal_delta_threshold = float(normal_delta_abs.quantile(0.95, interpolation="linear")) if not normal_delta_abs.empty else 0.01
+    normal_slope_threshold = float(normal_slope_abs.quantile(0.95, interpolation="linear")) if not normal_slope_abs.empty else 0.5
+
+    return {
+        "anomaly": {
+            "pressure_delta": delta_threshold,
+            "pressure_slope": slope_threshold,
+        },
+        "normal": {
+            "pressure_delta": normal_delta_threshold,
+            "pressure_slope": normal_slope_threshold,
+        },
+    }
+
+
+def _extract_segments(
+    mask: pd.Series,
+    min_duration: pd.Timedelta,
+    gap: pd.Timedelta,
+) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
+    segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
+    current_start: Optional[pd.Timestamp] = None
+    last_true: Optional[pd.Timestamp] = None
+
+    for timestamp, is_true in mask.items():
+        if bool(is_true):
+            if current_start is None:
+                current_start = timestamp
+            last_true = timestamp
+            continue
+
+        if current_start is not None and last_true is not None:
+            if timestamp - last_true <= gap:
+                # allow short gaps inside the segment
+                continue
+            if last_true - current_start >= min_duration:
+                segments.append((current_start, last_true))
+            current_start = None
+            last_true = None
+
+    if current_start is not None and last_true is not None:
+        if last_true - current_start >= min_duration:
+            segments.append((current_start, last_true))
+
+    return segments
+
+
+def classify_direction(delta_value: float, thresholds: InterpretationThresholds) -> str:
+    if np.isnan(delta_value):
+        return "?"
+    if delta_value >= thresholds.strong_increase:
+        return "↑↑"
+    if delta_value >= thresholds.mild_increase:
+        return "↑"
+    if delta_value <= thresholds.strong_drop:
+        return "↓↓"
+    if delta_value <= thresholds.mild_drop:
+        return "↓"
+    return "="
+
+
+def overlaps_interval(
+    start_a: pd.Timestamp,
+    end_a: pd.Timestamp,
+    ref: ReferenceInterval,
+) -> bool:
+    return not (end_a < ref.start or start_a > ref.end)
+
+
+def detect_segments_for_well(
+    well: str,
+    well_df: pd.DataFrame,
+    features: pd.DataFrame,
+    thresholds: Dict[str, float],
+    settings: DetectionSettings,
+    interpretation: InterpretationThresholds,
+    reference_intervals: List[ReferenceInterval],
+) -> List[Dict[str, object]]:
+    min_duration = pd.Timedelta(minutes=settings.min_duration_minutes)
+    gap = pd.Timedelta(minutes=settings.gap_minutes)
+
+    anomaly_thresholds = thresholds["anomaly"]
+    normal_thresholds = thresholds["normal"]
+
+    anomaly_mask = (
+        (features["pressure_delta"] >= anomaly_thresholds["pressure_delta"])
+        & (features["pressure_slope"] >= anomaly_thresholds["pressure_slope"])
+    ).fillna(False)
+
+    normal_conditions = (
+        features["pressure_delta"].abs() <= normal_thresholds["pressure_delta"]
+    ) & (
+        features["pressure_slope"].abs() <= normal_thresholds["pressure_slope"]
+    )
+    reference_anomaly_mask = pd.Series(False, index=features.index)
+    for ref in reference_intervals:
+        if ref.label != "anomaly" or ref.well != well:
+            continue
+        reference_anomaly_mask.loc[ref.start:ref.end] = True
+
+    normal_mask = normal_conditions.fillna(False) & ~anomaly_mask & ~reference_anomaly_mask
+
+    anomaly_segments = _extract_segments(anomaly_mask, min_duration=min_duration, gap=gap)
+    normal_segments = _extract_segments(normal_mask, min_duration=min_duration, gap=gap)
+
+    records: List[Dict[str, object]] = []
+    anomaly_refs = [ref for ref in reference_intervals if ref.label == "anomaly" and ref.well == well]
+    normal_refs = [ref for ref in reference_intervals if ref.label == "normal" and ref.well == well]
+
+    def _build_record(start: pd.Timestamp, end: pd.Timestamp, segment_type: str) -> Optional[Dict[str, object]]:
+        segment_features = features.loc[start:end]
+        if segment_features.empty:
+            return None
+        segment_data = well_df.loc[start:end]
+
+        def _safe_mean(series: Optional[pd.Series]) -> float:
+            if series is None:
+                return float("nan")
+            numeric = pd.to_numeric(series, errors="coerce").dropna()
+            if numeric.empty:
+                return float("nan")
+            return float(numeric.mean())
+
+        pressure_delta_series = pd.to_numeric(segment_features["pressure_delta"], errors="coerce").dropna()
+        pressure_slope_series = pd.to_numeric(segment_features["pressure_slope"], errors="coerce").dropna()
+        current_delta_series = (
+            pd.to_numeric(segment_features["current_delta"], errors="coerce").dropna()
+            if "current_delta" in segment_features
+            else pd.Series(dtype=float)
+        )
+        temperature_delta_series = (
+            pd.to_numeric(segment_features["temperature_delta"], errors="coerce").dropna()
+            if "temperature_delta" in segment_features
+            else pd.Series(dtype=float)
+        )
+
+        if pressure_delta_series.empty or pressure_slope_series.empty:
+            return None
+
+        pressure_delta_median = float(pressure_delta_series.median())
+        pressure_slope_median = float(pressure_slope_series.median())
+        current_delta_median = float(current_delta_series.median()) if not current_delta_series.empty else float("nan")
+        temperature_delta_median = float(temperature_delta_series.median()) if not temperature_delta_series.empty else float("nan")
+
+        reference_match = "none"
+        reference_notes: List[str] = []
+        for ref in anomaly_refs:
+            if overlaps_interval(start, end, ref):
+                reference_match = "anomaly"
+                reference_notes = ref.notes
+                break
+        if reference_match == "none":
+            for ref in normal_refs:
+                if overlaps_interval(start, end, ref):
+                    reference_match = "normal"
+                    reference_notes = ref.notes
+                    break
+
+        score = (
+            pressure_delta_median * pressure_slope_median
+            if (segment_type == "anomaly" and not np.isnan(pressure_delta_median))
+            else float("nan")
+        )
+
+        record: Dict[str, object] = {
+            "well": well,
+            "start": start,
+            "end": end,
+            "duration_minutes": (end - start).total_seconds() / 60.0,
+            "segment_type": segment_type,
+            "pressure_delta_median": pressure_delta_median,
+            "pressure_slope_median": pressure_slope_median,
+            "current_delta_median": current_delta_median,
+            "temperature_delta_median": temperature_delta_median,
+            "pressure_direction": classify_direction(pressure_delta_median, interpretation),
+            "current_direction": classify_direction(current_delta_median, interpretation),
+            "temperature_direction": classify_direction(temperature_delta_median, interpretation),
+            "pressure_mean": _safe_mean(segment_data.get("Intake_Pressure")),
+            "current_mean": _safe_mean(segment_data.get("Current")),
+            "temperature_mean": _safe_mean(segment_data.get("Motor_Temperature")),
+            "frequency_mean": _safe_mean(segment_data.get("Frequency")),
+            "score": score,
+            "reference_match": reference_match,
+            "reference_notes": "; ".join(reference_notes) if reference_notes else "",
+            "threshold_pressure_delta": anomaly_thresholds["pressure_delta"],
+            "threshold_pressure_slope": anomaly_thresholds["pressure_slope"],
+            "threshold_normal_pressure_delta": normal_thresholds["pressure_delta"],
+            "threshold_normal_pressure_slope": normal_thresholds["pressure_slope"],
+        }
+        return record
+
+    for start, end in anomaly_segments:
+        record = _build_record(start, end, "anomaly")
+        if record:
+            records.append(record)
+
+    # Ensure reference anomaly windows are represented even if mask-based segments were shorter.
+    existing_anomaly_segments = [(rec["start"], rec["end"]) for rec in records if rec["segment_type"] == "anomaly"]
+    for ref in anomaly_refs:
+        if any(overlaps_interval(seg_start, seg_end, ref) for seg_start, seg_end in existing_anomaly_segments):
+            continue
+        supplemental = _build_record(ref.start, ref.end, "anomaly")
+        if supplemental:
+            records.append(supplemental)
+
+    for start, end in normal_segments:
+        record = _build_record(start, end, "normal")
+        if record:
+            records.append(record)
+    return records
 
 
 def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> pd.DataFrame:
     config = load_config(config_path)
-    processed_path = Path(config["paths"]["processed_dir"]) / "merged_hourly.parquet"
-    if not processed_path.exists():
-        raise FileNotFoundError(
-            f"Не найден файл с объединёнными данными: {processed_path}. "
-            "Выполните шаги clean/align перед детекцией аномалий."
+    workbook_path = workbook_override or Path(config["anomalies"]["source_workbook"])
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook with well data not found: {workbook_path}")
+
+    settings, interpretation = load_detection_settings(config)
+    svod_sheet = config["anomalies"].get("svod_sheet", "svod")
+    anomaly_cause = config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")
+    normal_cause = config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")
+
+    xl = pd.ExcelFile(workbook_path)
+    svod = load_svod_sheet(xl, svod_sheet)
+    well_data = load_well_series(xl, svod_sheet)
+    if not well_data:
+        raise ValueError("Не удалось загрузить временные ряды из рабочего файла alma/Общая_таблица.xlsx.")
+
+    reference_intervals = parse_reference_intervals(svod, well_data, anomaly_cause, normal_cause)
+    anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
+    normal_intervals = [interval for interval in reference_intervals if interval.label == "normal"]
+
+    features_map = {well: compute_feature_frame(df, settings) for well, df in well_data.items()}
+    anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
+    normal_features = aggregate_feature_values(normal_intervals, features_map)
+    thresholds = derive_thresholds(normal_features, anomaly_features, settings)
+
+    detection_records: List[Dict[str, object]] = []
+    for well, well_df in well_data.items():
+        features = features_map[well]
+        detection_records.extend(
+            detect_segments_for_well(
+                well=well,
+                well_df=well_df,
+                features=features,
+                thresholds=thresholds,
+                settings=settings,
+                interpretation=interpretation,
+                reference_intervals=reference_intervals,
+            )
         )
 
-    merged = pd.read_parquet(processed_path)
-
-    rule_whitelist = build_rule_whitelist(config)
-    detector = RuleBasedDetector(
-        detection_conf=config["anomalies"].get("detection"),
-        rules_conf=config["anomalies"].get("rules", []),
-        well_column=config["su"]["well_column"],
-        allowed_rules_by_well=rule_whitelist,
-    )
-
-    if workbook_override is not None:
-        logger.info(
-            "Получен параметр --source (%s), однако для правил детекции он не используется. "
-            "Для анализа эталонных интервалов воспользуйтесь командой `python -m pipeline events`.",
-            workbook_override,
-        )
-
-    detections = detector.run(merged)
+    detections = pd.DataFrame(detection_records)
     if not detections.empty:
-        detections["rule_label"] = "Аномалия по условиям"
-        detections["rule_description"] = ""
+        detections.sort_values(["start", "well", "segment_type"], inplace=True)
+        detections.reset_index(drop=True, inplace=True)
 
     reports_dir = Path(config["paths"]["reports_dir"]) / "anomalies"
     reports_dir.mkdir(parents=True, exist_ok=True)
-    output_path = reports_dir / "anomaly_analysis.parquet"
-    detections.to_parquet(output_path, index=False)
 
-    excel_path = output_path.with_suffix(".xlsx")
-    detections.to_excel(excel_path, index=False)
+    output_parquet = reports_dir / "anomaly_analysis.parquet"
+    detections.to_parquet(output_parquet, index=False)
+    detections.to_excel(output_parquet.with_suffix(".xlsx"), index=False)
 
-    summary_records: List[Dict[str, Any]] = []
+    json_records: List[Dict[str, object]] = []
     for record in detections.to_dict(orient="records"):
-        converted: Dict[str, Any] = {}
+        converted: Dict[str, object] = {}
         for key, value in record.items():
             if isinstance(value, pd.Timestamp):
                 converted[key] = value.isoformat()
             elif isinstance(value, (np.floating, float)):
-                converted[key] = None if math.isnan(value) else float(value)
+                converted[key] = None if np.isnan(value) else float(value)
             else:
                 converted[key] = value
-        summary_records.append(converted)
+        json_records.append(converted)
 
-    summary_path = output_path.with_suffix(".json")
-    summary_path.write_text(json.dumps(summary_records, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary_path = output_parquet.with_suffix(".json")
+    summary_payload = {
+        "thresholds": thresholds,
+        "training": {
+            "anomaly_points": int(len(anomaly_features["pressure_delta"])),
+            "normal_points": int(len(normal_features["pressure_delta"])),
+            "anomaly_wells": sorted({interval.well for interval in anomaly_intervals}),
+            "normal_wells": sorted({interval.well for interval in normal_intervals}),
+        },
+        "settings": {
+            "window_minutes": settings.window_minutes,
+            "shift_minutes": settings.shift_minutes,
+            "min_samples": settings.min_samples,
+            "delta_factor": settings.delta_factor,
+            "delta_quantile": settings.delta_quantile,
+            "slope_margin": settings.slope_margin,
+            "slope_quantile": settings.slope_quantile,
+            "min_duration_minutes": settings.min_duration_minutes,
+            "gap_minutes": settings.gap_minutes,
+        },
+        "detections": json_records,
+    }
+    summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
     return detections
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Detect rule-based anomalies in merged well datasets.")
+    parser = argparse.ArgumentParser(description="Detect anomalies based on alma/Общая_таблица.xlsx reference data.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to pipeline configuration.")
-    parser.add_argument("--source", type=Path, help="Override path to anomaly workbook.")
+    parser.add_argument(
+        "--source",
+        type=Path,
+        help="Override path to workbook (по умолчанию -- alma/Общая_таблица.xlsx из конфигурации).",
+    )
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
-def main(argv: Iterable[str] | None = None) -> int:
-    args = parse_args(list(argv) if argv is not None else None)
-    result = run_anomaly_analysis(args.config, workbook_override=args.source)
-    print(f"Detected {len(result)} anomaly segments.")
+def main(argv: Optional[Iterable[str]] = None) -> int:
+    args = parse_args(argv)
+    detections = run_anomaly_analysis(args.config, workbook_override=args.source)
+    anomaly_count = int((detections["segment_type"] == "anomaly").sum()) if not detections.empty else 0
+    normal_count = int((detections["segment_type"] == "normal").sum()) if not detections.empty else 0
+    print(
+        f"Detected {anomaly_count} anomaly segments and {normal_count} normal segments "
+        f"(total {len(detections)})."
+    )
     return 0
 
 
