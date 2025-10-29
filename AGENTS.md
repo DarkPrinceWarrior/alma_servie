@@ -12,7 +12,7 @@
 - Установить зависимости: `pip install -r requirements.txt`.
 - Пересчитать детектор: `python -m src.pipeline anomalies --config config/pipeline.yaml`.
 - Обновить справочную статистику: `python -m src.pipeline events --config config/pipeline.yaml`.
-- Сформировать интерактивный отчёт по референсным скважинам: `python scripts/generate_reference_report.py --config config/pipeline.yaml`.
+- Сформировать интерактивный отчёт по всем скважинам (по умолчанию): `python scripts/generate_reference_report.py --config config/pipeline.yaml`. Ограничить набор можно опцией `--wells 5271г,1123л`.
 
 ## Coding Style & Naming Conventions
 - Follow PEP 8 (4 spaces), придерживайтесь существующих type hints и коротких docstring’ов.

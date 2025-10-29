@@ -23,7 +23,6 @@ from pipeline.anomalies import (
 from pipeline.config import DEFAULT_CONFIG_PATH, load_config
 
 
-REFERENCE_WELLS = ["5271г", "1123л", "524", "1128г", "3509г", "4651"]
 METRICS_TO_PLOT = [
     ("Intake_Pressure", "Давление на приеме"),
     ("Current", "Ток"),
@@ -52,8 +51,8 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--wells",
         type=str,
-        default=",".join(REFERENCE_WELLS),
-        help="Comma-separated list of wells to include.",
+        default=None,
+        help="Comma-separated list of wells to include. По умолчанию — все листы кроме svod.",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 
@@ -101,11 +100,10 @@ def load_well_series_subset(xl: pd.ExcelFile, wells: List[str]) -> Dict[str, Dic
 def load_reference_anomalies(
     config: Dict,
     wells: List[str],
-) -> Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]]:
-    workbook_path = Path(config["anomalies"]["source_workbook"])
+    xl: pd.ExcelFile,
+) -> Tuple[Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]], Dict[str, Dict[str, pd.Series]]]:
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
 
-    xl = pd.ExcelFile(workbook_path)
     svod = load_svod_sheet(xl, svod_sheet)
     full_well_data = load_well_series(xl, svod_sheet)
     raw_well_series = load_well_series_subset(xl, wells)
@@ -306,11 +304,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
 
-    wells = [w.strip() for w in args.wells.split(",") if w.strip()]
-    if not wells:
-        raise ValueError("Не задан список скважин для отчёта.")
+    workbook_path = Path(config["anomalies"]["source_workbook"])
+    if not workbook_path.exists():
+        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
+    xl = pd.ExcelFile(workbook_path)
 
-    reference_mapping, well_data = load_reference_anomalies(config, wells)
+    if args.wells:
+        wells = [w.strip() for w in args.wells.split(",") if w.strip()]
+    else:
+        svod_sheet = config["anomalies"].get("svod_sheet", "svod")
+        wells = sorted(sheet for sheet in xl.sheet_names if sheet != svod_sheet)
+
+    if not wells:
+        raise ValueError("Не удалось определить список скважин для отчёта.")
+
+    reference_mapping, well_data = load_reference_anomalies(config, wells, xl)
     detection_mapping = load_detected_anomalies(args.detections, wells)
 
     ensure_output_dir(args.output)
