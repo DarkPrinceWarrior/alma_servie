@@ -275,7 +275,7 @@ def build_well_figure(
             col=1,
         )
 
-    for start, end in detected_windows:
+    for window_idx, (start, end) in enumerate(detected_windows):
         fig.add_vrect(
             x0=start,
             x1=end,
@@ -284,6 +284,45 @@ def build_well_figure(
             line_width=0,
             row="all",
             col=1,
+        )
+        det_offset = (window_idx % 3) * 0.05
+        fig.add_vline(x=start, line=dict(color="#ff5733", dash="dot", width=1))
+        fig.add_annotation(
+            x=start,
+            y=_y_pos(0.25 + det_offset),
+            xref="x",
+            yref=yref_value,
+            text=f"Детектор: старт<br>{start:%d.%m %H:%M}",
+            showarrow=True,
+            arrowhead=1,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#ff5733",
+            ax=-80,
+            ay=0,
+            font=dict(size=9, color="#ff5733"),
+            bgcolor="rgba(255, 87, 51, 0.15)",
+            bordercolor="#ff5733",
+            borderwidth=0.5,
+        )
+        fig.add_vline(x=end, line=dict(color="#ff5733", dash="dot", width=1))
+        fig.add_annotation(
+            x=end,
+            y=_y_pos(0.3 + det_offset),
+            xref="x",
+            yref=yref_value,
+            text=f"Детектор: стоп<br>{end:%d.%m %H:%M}",
+            showarrow=True,
+            arrowhead=1,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#ff5733",
+            ax=80,
+            ay=0,
+            font=dict(size=9, color="#ff5733"),
+            bgcolor="rgba(255, 87, 51, 0.15)",
+            bordercolor="#ff5733",
+            borderwidth=0.5,
         )
 
     fig.add_trace(

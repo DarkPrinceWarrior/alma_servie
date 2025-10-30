@@ -7,8 +7,8 @@ anomalies:
   anomaly_cause: "Негерметичность НКТ"
   normal_cause: "Нормальная работа при изменении частоты"
   detection:
-    window_minutes: 60
-    shift_minutes: 60
+    window_minutes: 30
+    shift_minutes: 15
     min_samples: 30
     delta_factor: 0.6
     delta_quantile: 0.1
