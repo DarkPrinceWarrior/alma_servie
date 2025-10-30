@@ -1168,8 +1168,11 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     if not well_series_map:
         raise ValueError("Не удалось загрузить временные ряды из рабочего файла alma/Общая_таблица.xlsx.")
 
+    holdout_wells = set(config["anomalies"].get("holdout_wells", []) or [])
     base_well_data: Dict[str, pd.DataFrame] = {
-        well: series.base for well, series in well_series_map.items() if series.base is not None and not series.base.empty
+        well: series.base
+        for well, series in well_series_map.items()
+        if series.base is not None and not series.base.empty
     }
     pressure_fast_map: Dict[str, pd.DataFrame] = {
         well: series.pressure_fast
@@ -1240,7 +1243,9 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
 
     reference_intervals = parse_reference_intervals(svod, base_well_data, anomaly_cause, normal_cause)
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
-    normal_intervals = [interval for interval in reference_intervals if interval.label == "normal"]
+    anomaly_intervals_train = [interval for interval in anomaly_intervals if interval.well not in holdout_wells]
+    normal_intervals_full = [interval for interval in reference_intervals if interval.label == "normal"]
+    normal_intervals_train = [interval for interval in normal_intervals_full if interval.well not in holdout_wells]
 
     frequency_cfg = config["anomalies"].get("frequency_baseline", {})
     baseline: Optional[FrequencyBaseline] = None
@@ -1249,7 +1254,7 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         bin_width = float(frequency_cfg.get("bin_width_hz", 2.0))
         min_points = int(frequency_cfg.get("min_points", 10))
         baseline = build_frequency_baseline(
-            normal_intervals,
+            normal_intervals_train,
             base_well_data,
             metrics=metrics,
             bin_width=bin_width,
@@ -1267,12 +1272,23 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     }
 
     residual_settings = load_residual_settings(config)
-    residual_model = build_residual_detection_model(features_map, normal_intervals, residual_settings)
+    residual_model = build_residual_detection_model(features_map, normal_intervals_train, residual_settings)
     if residual_settings.enabled and residual_model is None:
         print("Residual detection: недостаточно данных для построения ковариационной модели.")
-    anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
-    normal_features = aggregate_feature_values(normal_intervals, features_map)
-    thresholds = derive_thresholds(normal_features, anomaly_features, settings)
+    if not anomaly_intervals_train:
+        anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
+        training_anomaly_intervals = anomaly_intervals
+    else:
+        anomaly_features = aggregate_feature_values(anomaly_intervals_train, features_map)
+        training_anomaly_intervals = anomaly_intervals_train
+
+    if normal_intervals_train:
+        normal_features_train = aggregate_feature_values(normal_intervals_train, features_map)
+        normal_training_intervals = normal_intervals_train
+    else:
+        normal_features_train = aggregate_feature_values(normal_intervals_full, features_map)
+        normal_training_intervals = normal_intervals_full
+    thresholds = derive_thresholds(normal_features_train, anomaly_features, settings)
 
     detection_records: List[Dict[str, object]] = []
     for well, well_df in base_well_data.items():
@@ -1316,9 +1332,9 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         "thresholds": thresholds,
         "training": {
             "anomaly_points": int(len(anomaly_features["pressure_delta"])),
-            "normal_points": int(len(normal_features["pressure_delta"])),
-            "anomaly_wells": sorted({interval.well for interval in anomaly_intervals}),
-            "normal_wells": sorted({interval.well for interval in normal_intervals}),
+            "normal_points": int(len(normal_features_train["pressure_delta"])),
+            "anomaly_wells": sorted({interval.well for interval in training_anomaly_intervals}),
+            "normal_wells": sorted({interval.well for interval in normal_training_intervals}),
         },
         "settings": {
             "window_minutes": settings.window_minutes,

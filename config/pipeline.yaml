@@ -6,6 +6,9 @@ anomalies:
   svod_sheet: "svod"
   anomaly_cause: "Негерметичность НКТ"
   normal_cause: "Нормальная работа при изменении частоты"
+  holdout_wells:
+    - "1128г"
+    - "4651"
   detection:
     window_minutes: 30
     shift_minutes: 15

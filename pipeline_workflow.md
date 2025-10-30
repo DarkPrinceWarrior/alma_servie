@@ -13,6 +13,7 @@
 - `calibration_percentiles` для отчёта `events`;
 - секцию `preprocessing` с параметрами Hampel-фильтра и ограничением `forward-fill`;
 - секцию `frequency_baseline` (управляет биннингом `Frequency`, списком метрик и минимальным количеством точек для расчёта baseline);
+  - `holdout_wells` — скважины, которые не используются при обучении baseline и служат для ручной валидации;
 - секцию `detection_residual` с параметрами EWMA/T² (λ, мультипликатор, порог всплеска, уровень значимости, минимальное число точек);
 - секцию `alignment` с настройками частоты (`frequency`), агрегатора базового контура (`base_aggregation`) и списка быстрых каналов (`pressure_fast_metrics`);
 - пути для экспортов (parquet/json/html).
