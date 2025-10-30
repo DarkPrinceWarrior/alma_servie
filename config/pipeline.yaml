@@ -25,6 +25,10 @@ anomalies:
     - 0.1
     - 0.5
     - 0.9
+  preprocessing:
+    hampel_window_minutes: 45
+    hampel_n_sigma: 3.0
+    ffill_limit_minutes: 30
 
 alignment:
   frequency: "15T"

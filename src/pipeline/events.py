@@ -20,6 +20,7 @@ from .anomalies import (
     load_svod_sheet,
     load_well_series,
     parse_reference_intervals,
+    preprocess_well_data,
 )
 from .config import DEFAULT_CONFIG_PATH, load_config
 
@@ -164,6 +165,24 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
     if not well_data:
         raise ValueError("Не удалось загрузить временные ряды из workbook для справочного анализа.")
 
+    preprocessing_cfg = config["anomalies"].get("preprocessing", {})
+    window_minutes = float(preprocessing_cfg.get("hampel_window_minutes", 45))
+    n_sigma = float(preprocessing_cfg.get("hampel_n_sigma", 3.0))
+    ffill_limit_minutes = float(preprocessing_cfg.get("ffill_limit_minutes", 30))
+
+    preprocess_summary: Dict[str, Dict[str, Dict[str, int]]] = {}
+    if window_minutes > 0 and n_sigma > 0:
+        for well, frame in list(well_data.items()):
+            processed, stats = preprocess_well_data(
+                frame,
+                window_minutes=window_minutes,
+                n_sigma=n_sigma,
+                ffill_limit_minutes=ffill_limit_minutes,
+            )
+            well_data[well] = processed
+            if stats:
+                preprocess_summary[well] = stats
+
     reference_intervals = parse_reference_intervals(svod, well_data, anomaly_cause, normal_cause)
     if not reference_intervals:
         raise ValueError("В листе svod отсутствуют интервалы нормальной/аномальной работы.")
@@ -189,6 +208,13 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
     }
     summary_path = reports_dir / "events_summary.json"
     summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if preprocess_summary:
+        print("Preprocessing summary (events):")
+        for well, stats in sorted(preprocess_summary.items()):
+            removed_total = sum(values.get("removed_outliers", 0) for values in stats.values())
+            filled_total = sum(values.get("ffill_values", 0) for values in stats.values())
+            print(f"  {well}: removed={removed_total}, ffilled={filled_total}")
 
     return summary_payload
 

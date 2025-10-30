@@ -49,6 +49,89 @@ class WellTimeseries:
     pressure_fast: Optional[pd.DataFrame]
 
 
+def _estimate_step_seconds(index: pd.Index) -> float:
+    if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
+        return 60.0
+    diffs = index.to_series().diff().dropna().dt.total_seconds()
+    if diffs.empty:
+        return 60.0
+    step = float(diffs.median())
+    return step if step > 0 else 60.0
+
+
+def _derive_window_points(index: pd.Index, window_minutes: float) -> int:
+    step_seconds = _estimate_step_seconds(index)
+    if step_seconds <= 0:
+        return 5
+    points = int(round((window_minutes * 60.0) / step_seconds))
+    points = max(points, 3)
+    if points % 2 == 0:
+        points += 1
+    return points
+
+
+def _hampel_filter(series: pd.Series, window_points: int, n_sigma: float) -> Tuple[pd.Series, pd.Series]:
+    if series.empty or window_points < 3:
+        return series.copy(), pd.Series(False, index=series.index)
+    rolling = series.rolling(window=window_points, center=True, min_periods=1)
+    median = rolling.median()
+    diff = (series - median).abs()
+    mad = rolling.apply(lambda x: np.median(np.abs(x - np.median(x))), raw=True)
+    threshold = n_sigma * 1.4826 * mad
+    mask = diff > threshold
+    filtered = series.copy()
+    filtered[mask] = np.nan
+    return filtered, mask.fillna(False)
+
+
+def preprocess_well_data(
+    frame: pd.DataFrame,
+    *,
+    window_minutes: float,
+    n_sigma: float,
+    ffill_limit_minutes: float,
+) -> Tuple[pd.DataFrame, Dict[str, Dict[str, int]]]:
+    processed = frame.copy()
+    stats: Dict[str, Dict[str, int]] = {}
+    if processed.empty:
+        return processed, stats
+
+    window_points = _derive_window_points(processed.index, window_minutes)
+    step_seconds = _estimate_step_seconds(processed.index)
+    limit_points: Optional[int] = None
+    if ffill_limit_minutes and step_seconds > 0:
+        limit_points = int(round((ffill_limit_minutes * 60.0) / step_seconds))
+        if limit_points <= 0:
+            limit_points = None
+
+    for column in processed.columns:
+        base_name = str(column)
+        if base_name.endswith("_min") or base_name.endswith("_max"):
+            continue
+        series = processed[base_name]
+        if series.dropna().empty:
+            continue
+        filtered, mask = _hampel_filter(series, window_points=window_points, n_sigma=n_sigma)
+        if mask.any():
+            processed[base_name] = filtered
+            stats.setdefault(base_name, {})["removed_outliers"] = int(mask.sum())
+            # propagate to derived pressure columns if present
+            if base_name == "Intake_Pressure":
+                for suffix in ("Intake_Pressure_min", "Intake_Pressure_max"):
+                    if suffix in processed.columns:
+                        processed.loc[mask, suffix] = np.nan
+
+        if limit_points is not None:
+            before_na = int(processed[base_name].isna().sum())
+            processed[base_name] = processed[base_name].ffill(limit=limit_points)
+            after_na = int(processed[base_name].isna().sum())
+            filled = before_na - after_na
+            if filled > 0:
+                stats.setdefault(base_name, {})["ffill_values"] = filled
+
+    return processed, stats
+
+
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denominator = denominator.replace(0, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -680,6 +763,24 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     if not base_well_data:
         raise ValueError("Не удалось подготовить 15-минутный контур для анализа аномалий.")
 
+    preprocessing_cfg = config["anomalies"].get("preprocessing", {})
+    window_minutes = float(preprocessing_cfg.get("hampel_window_minutes", 45))
+    n_sigma = float(preprocessing_cfg.get("hampel_n_sigma", 3.0))
+    ffill_limit_minutes = float(preprocessing_cfg.get("ffill_limit_minutes", 30))
+
+    preprocess_summary: Dict[str, Dict[str, Dict[str, int]]] = {}
+    if window_minutes > 0 and n_sigma > 0:
+        for well, frame in list(base_well_data.items()):
+            processed, stats = preprocess_well_data(
+                frame,
+                window_minutes=window_minutes,
+                n_sigma=n_sigma,
+                ffill_limit_minutes=ffill_limit_minutes,
+            )
+            base_well_data[well] = processed
+            if stats:
+                preprocess_summary[well] = stats
+
     reports_dir = Path(config["paths"]["reports_dir"]) / "anomalies"
     reports_dir.mkdir(parents=True, exist_ok=True)
 
@@ -712,6 +813,13 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         pressure_export_path = reports_dir / "pressure_fast.parquet"
         pressure_export_df.to_parquet(pressure_export_path, index=False)
         pressure_export_df.to_csv(pressure_export_path.with_suffix(".csv"), index=False)
+
+    if preprocess_summary:
+        print("Preprocessing summary (anomalies):")
+        for well, stats in sorted(preprocess_summary.items()):
+            removed_total = sum(values.get("removed_outliers", 0) for values in stats.values())
+            filled_total = sum(values.get("ffill_values", 0) for values in stats.values())
+            print(f"  {well}: removed={removed_total}, ffilled={filled_total}")
 
     reference_intervals = parse_reference_intervals(svod, base_well_data, anomaly_cause, normal_cause)
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
