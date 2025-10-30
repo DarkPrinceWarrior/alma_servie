@@ -29,6 +29,14 @@ anomalies:
     hampel_window_minutes: 45
     hampel_n_sigma: 3.0
     ffill_limit_minutes: 30
+  frequency_baseline:
+    enabled: true
+    bin_width_hz: 2.0
+    min_points: 10
+    metrics:
+      - "Intake_Pressure"
+      - "Current"
+      - "Motor_Temperature"
 
 alignment:
   frequency: "15T"

@@ -49,6 +49,13 @@ class WellTimeseries:
     pressure_fast: Optional[pd.DataFrame]
 
 
+@dataclass
+class FrequencyBaseline:
+    bin_width: float
+    metrics: Dict[str, Dict[int, Dict[str, float]]]
+    summary: pd.DataFrame
+
+
 def _estimate_step_seconds(index: pd.Index) -> float:
     if not isinstance(index, pd.DatetimeIndex) or len(index) < 2:
         return 60.0
@@ -130,6 +137,128 @@ def preprocess_well_data(
                 stats.setdefault(base_name, {})["ffill_values"] = filled
 
     return processed, stats
+
+
+def build_frequency_baseline(
+    intervals: Sequence[ReferenceInterval],
+    well_data: Dict[str, pd.DataFrame],
+    *,
+    metrics: Sequence[str],
+    bin_width: float,
+    min_points: int,
+) -> Optional[FrequencyBaseline]:
+    if not intervals or not well_data or bin_width <= 0:
+        return None
+
+    metric_buckets: Dict[str, Dict[int, List[float]]] = {
+        metric: {} for metric in metrics
+    }
+    for interval in intervals:
+        frame = well_data.get(interval.well)
+        if frame is None or "Frequency" not in frame.columns:
+            continue
+        segment = frame.loc[interval.start : interval.end]
+        if segment.empty:
+            continue
+        freq_series = pd.to_numeric(segment["Frequency"], errors="coerce")
+        if freq_series.dropna().empty:
+            continue
+        for metric in metrics:
+            if metric not in segment:
+                continue
+            values = pd.to_numeric(segment[metric], errors="coerce")
+            mask = freq_series.notna() & values.notna()
+            if not mask.any():
+                continue
+            freq_valid = freq_series[mask].to_numpy(dtype=float)
+            values_valid = values[mask].to_numpy(dtype=float)
+            bin_indices = np.floor(freq_valid / bin_width).astype(int)
+            buckets = metric_buckets[metric]
+            for bin_idx, value in zip(bin_indices, values_valid):
+                if not np.isfinite(value):
+                    continue
+                buckets.setdefault(int(bin_idx), []).append(float(value))
+
+    baseline_metrics: Dict[str, Dict[int, Dict[str, float]]] = {}
+    records: List[Dict[str, float]] = []
+    for metric, buckets in metric_buckets.items():
+        metric_model: Dict[int, Dict[str, float]] = {}
+        for bin_idx, values in buckets.items():
+            if len(values) < min_points:
+                continue
+            array = np.asarray(values, dtype=float)
+            median = float(np.median(array))
+            mad = float(np.median(np.abs(array - median)) * 1.4826)
+            if not np.isfinite(median):
+                continue
+            if not np.isfinite(mad) or mad <= 0.0:
+                mad = 1e-6
+            metric_model[bin_idx] = {"median": median, "mad": mad, "count": len(values)}
+            records.append(
+                {
+                    "metric": metric,
+                    "bin_index": bin_idx,
+                    "frequency_center": (bin_idx + 0.5) * bin_width,
+                    "count": len(values),
+                    "median": median,
+                    "mad": mad,
+                }
+            )
+        if metric_model:
+            baseline_metrics[metric] = metric_model
+
+    if not baseline_metrics:
+        return None
+
+    summary = pd.DataFrame(records)
+    summary.sort_values(["metric", "frequency_center"], inplace=True)
+    summary.reset_index(drop=True, inplace=True)
+    return FrequencyBaseline(bin_width=bin_width, metrics=baseline_metrics, summary=summary)
+
+
+def _apply_frequency_baseline(
+    metric: str,
+    series: pd.Series,
+    frequency: pd.Series,
+    baseline: Optional[FrequencyBaseline],
+) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    expected = pd.Series(np.nan, index=series.index, dtype=float)
+    residual = pd.Series(series, dtype=float)
+    scale = pd.Series(np.nan, index=series.index, dtype=float)
+    if baseline is None or metric not in baseline.metrics or frequency.dropna().empty:
+        return expected, residual, scale
+
+    models = baseline.metrics.get(metric, {})
+    if not models:
+        return expected, residual, scale
+    freq_values = pd.to_numeric(frequency, errors="coerce")
+    if freq_values.dropna().empty:
+        return expected, residual, scale
+    bin_width = baseline.bin_width
+    bin_indices = np.floor(freq_values / bin_width).astype("Int64")
+    for bin_idx, stats in models.items():
+        mask = bin_indices == bin_idx
+        if mask.any():
+            median = stats["median"]
+            mad = stats.get("mad", 1e-6)
+            if not np.isfinite(mad) or mad <= 0:
+                mad = 1e-6
+            expected.loc[mask] = median
+            scale.loc[mask] = mad
+    residual = series - expected
+    missing_expected = expected.isna()
+    if missing_expected.any():
+        residual.loc[missing_expected] = series.loc[missing_expected]
+    non_null_scale = scale.dropna()
+    if non_null_scale.empty:
+        scale = scale.fillna(1e-6)
+    else:
+        median_scale = float(non_null_scale.median())
+        if not np.isfinite(median_scale) or median_scale <= 0:
+            median_scale = 1e-6
+        scale = scale.fillna(median_scale)
+    scale[scale <= 0] = 1e-6
+    return expected, residual, scale
 
 
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -362,6 +491,7 @@ def parse_reference_intervals(
 def compute_feature_frame(
     well_df: pd.DataFrame,
     settings: DetectionSettings,
+    baseline: Optional[FrequencyBaseline] = None,
 ) -> pd.DataFrame:
     def _compute_window_params(series: pd.Series) -> Tuple[int, int, int]:
         valid = series.dropna()
@@ -382,27 +512,50 @@ def compute_feature_frame(
 
     features = pd.DataFrame(index=well_df.index)
 
-    pressure_series = pd.to_numeric(well_df["Intake_Pressure"], errors="coerce")
-    pressure_window, pressure_shift, pressure_min_periods = _compute_window_params(pressure_series)
-    rolling_pressure = pressure_series.rolling(window=pressure_window, min_periods=pressure_min_periods).mean()
+    frequency_series = (
+        pd.to_numeric(well_df["Frequency"], errors="coerce")
+        if "Frequency" in well_df
+        else pd.Series(np.nan, index=well_df.index)
+    )
+
+    pressure_raw = pd.to_numeric(well_df["Intake_Pressure"], errors="coerce")
+    pressure_expected, pressure_residual, pressure_scale = _apply_frequency_baseline(
+        "Intake_Pressure",
+        pressure_raw,
+        frequency_series,
+        baseline,
+    )
+    pressure_base = pressure_residual
+    pressure_window, pressure_shift, pressure_min_periods = _compute_window_params(pressure_base)
+    rolling_pressure = pressure_base.rolling(window=pressure_window, min_periods=pressure_min_periods).mean()
     baseline_pressure = (
-        pressure_series.shift(pressure_shift)
+        pressure_base.shift(pressure_shift)
         .rolling(window=pressure_window, min_periods=pressure_min_periods)
         .mean()
     )
     baseline_pressure = baseline_pressure.reindex(rolling_pressure.index).interpolate(method="time")
     pressure_delta = _safe_divide(rolling_pressure - baseline_pressure, baseline_pressure)
-    pressure_slope = pressure_series - pressure_series.shift(pressure_shift)
+    pressure_slope = pressure_base - pressure_base.shift(pressure_shift)
 
     features["pressure_delta"] = pressure_delta
     features["pressure_slope"] = pressure_slope
 
+    current_raw = (
+        pd.to_numeric(well_df["Current"], errors="coerce") if "Current" in well_df else pd.Series(np.nan, index=well_df.index)
+    )
+    current_expected = pd.Series(np.nan, index=well_df.index, dtype=float)
+    current_residual = current_raw
+    current_scale = pd.Series(np.nan, index=well_df.index, dtype=float)
     if "Current" in well_df.columns:
-        current_series = pd.to_numeric(well_df["Current"], errors="coerce")
-        current_window, current_shift, current_min_periods = _compute_window_params(current_series)
-        rolling_current = current_series.rolling(window=current_window, min_periods=current_min_periods).mean()
+        if baseline is not None:
+            ce, cr, cs = _apply_frequency_baseline("Current", current_raw, frequency_series, baseline)
+            current_expected = ce
+            current_residual = cr
+            current_scale = cs
+        current_window, current_shift, current_min_periods = _compute_window_params(current_residual)
+        rolling_current = current_residual.rolling(window=current_window, min_periods=current_min_periods).mean()
         baseline_current = (
-            current_series.shift(current_shift)
+            current_residual.shift(current_shift)
             .rolling(window=current_window, min_periods=current_min_periods)
             .mean()
         )
@@ -411,12 +564,24 @@ def compute_feature_frame(
     else:
         features["current_delta"] = np.nan
 
+    temperature_raw = (
+        pd.to_numeric(well_df["Motor_Temperature"], errors="coerce")
+        if "Motor_Temperature" in well_df
+        else pd.Series(np.nan, index=well_df.index)
+    )
+    temperature_expected = pd.Series(np.nan, index=well_df.index, dtype=float)
+    temperature_residual = temperature_raw
+    temperature_scale = pd.Series(np.nan, index=well_df.index, dtype=float)
     if "Motor_Temperature" in well_df.columns:
-        temp_series = pd.to_numeric(well_df["Motor_Temperature"], errors="coerce")
-        temp_window, temp_shift, temp_min_periods = _compute_window_params(temp_series)
-        rolling_temperature = temp_series.rolling(window=temp_window, min_periods=temp_min_periods).mean()
+        if baseline is not None:
+            te, tr, ts = _apply_frequency_baseline("Motor_Temperature", temperature_raw, frequency_series, baseline)
+            temperature_expected = te
+            temperature_residual = tr
+            temperature_scale = ts
+        temp_window, temp_shift, temp_min_periods = _compute_window_params(temperature_residual)
+        rolling_temperature = temperature_residual.rolling(window=temp_window, min_periods=temp_min_periods).mean()
         baseline_temperature = (
-            temp_series.shift(temp_shift)
+            temperature_residual.shift(temp_shift)
             .rolling(window=temp_window, min_periods=temp_min_periods)
             .mean()
         )
@@ -427,20 +592,19 @@ def compute_feature_frame(
     else:
         features["temperature_delta"] = np.nan
 
-    features["pressure"] = pressure_series
-    features["current"] = (
-        pd.to_numeric(well_df["Current"], errors="coerce") if "Current" in well_df else pd.Series(np.nan, index=well_df.index)
-    )
-    features["temperature"] = (
-        pd.to_numeric(well_df["Motor_Temperature"], errors="coerce")
-        if "Motor_Temperature" in well_df
-        else pd.Series(np.nan, index=well_df.index)
-    )
-    features["frequency"] = (
-        pd.to_numeric(well_df["Frequency"], errors="coerce")
-        if "Frequency" in well_df
-        else pd.Series(np.nan, index=well_df.index)
-    )
+    features["pressure"] = pressure_raw
+    features["pressure_expected"] = pressure_expected
+    features["pressure_residual"] = pressure_residual
+    features["pressure_scale"] = pressure_scale
+    features["current"] = current_raw
+    features["current_expected"] = current_expected
+    features["current_residual"] = current_residual
+    features["current_scale"] = current_scale
+    features["temperature"] = temperature_raw
+    features["temperature_expected"] = temperature_expected
+    features["temperature_residual"] = temperature_residual
+    features["temperature_scale"] = temperature_scale
+    features["frequency"] = frequency_series
     return features
 
 
@@ -825,7 +989,29 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
     normal_intervals = [interval for interval in reference_intervals if interval.label == "normal"]
 
-    features_map = {well: compute_feature_frame(df, settings) for well, df in base_well_data.items()}
+    frequency_cfg = config["anomalies"].get("frequency_baseline", {})
+    baseline: Optional[FrequencyBaseline] = None
+    if frequency_cfg.get("enabled", True):
+        metrics = frequency_cfg.get("metrics", ["Intake_Pressure", "Current", "Motor_Temperature"])
+        bin_width = float(frequency_cfg.get("bin_width_hz", 2.0))
+        min_points = int(frequency_cfg.get("min_points", 10))
+        baseline = build_frequency_baseline(
+            normal_intervals,
+            base_well_data,
+            metrics=metrics,
+            bin_width=bin_width,
+            min_points=min_points,
+        )
+        if baseline is None:
+            print("Frequency baseline: недостаточно данных для построения модели.")
+        else:
+            baseline_path = reports_dir / "frequency_baseline.parquet"
+            baseline.summary.to_parquet(baseline_path, index=False)
+            baseline.summary.to_csv(baseline_path.with_suffix(".csv"), index=False)
+
+    features_map = {
+        well: compute_feature_frame(df, settings, baseline=baseline) for well, df in base_well_data.items()
+    }
     anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
     normal_features = aggregate_feature_values(normal_intervals, features_map)
     thresholds = derive_thresholds(normal_features, anomaly_features, settings)

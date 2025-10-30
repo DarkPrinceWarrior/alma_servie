@@ -20,6 +20,7 @@ from .anomalies import (
     load_svod_sheet,
     load_well_series,
     parse_reference_intervals,
+    build_frequency_baseline,
     preprocess_well_data,
 )
 from .config import DEFAULT_CONFIG_PATH, load_config
@@ -187,7 +188,26 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
     if not reference_intervals:
         raise ValueError("В листе svod отсутствуют интервалы нормальной/аномальной работы.")
 
-    features_map = {well: compute_feature_frame(df, settings) for well, df in well_data.items()}
+    frequency_cfg = config["anomalies"].get("frequency_baseline", {})
+    baseline = None
+    if frequency_cfg.get("enabled", True):
+        metrics = frequency_cfg.get("metrics", ["Intake_Pressure", "Current", "Motor_Temperature"])
+        bin_width = float(frequency_cfg.get("bin_width_hz", 2.0))
+        min_points = int(frequency_cfg.get("min_points", 10))
+        normal_intervals = [interval for interval in reference_intervals if interval.label == "normal"]
+        baseline = build_frequency_baseline(
+            normal_intervals,
+            well_data,
+            metrics=metrics,
+            bin_width=bin_width,
+            min_points=min_points,
+        )
+        if baseline is None:
+            print("Frequency baseline (events): недостаточно данных для построения модели.")
+
+    features_map = {
+        well: compute_feature_frame(df, settings, baseline=baseline) for well, df in well_data.items()
+    }
     features_df = build_interval_records(reference_intervals, well_data, features_map, interpretation)
     if features_df.empty:
         raise ValueError("Не удалось вычислить статистики по предоставленным интервалам.")
