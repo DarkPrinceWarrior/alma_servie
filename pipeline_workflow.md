@@ -8,9 +8,10 @@
 - пути к `alma`, `reports` и прочим папкам;
 - настройки блока `anomalies`:
   - `source_workbook`, `svod_sheet`, названия причин для аномалий/нормы;
-  - параметры детекции (`window_minutes`, `shift_minutes`, `min_samples`, `min_duration_minutes`, `gap_minutes`, коэффициенты для расчёта порогов);
-  - интерпретационные пороги (какой процентный рост трактовать как `↑↑`, `↑` и т.д.);
-  - `calibration_percentiles` для отчёта `events`;
+- параметры детекции (`window_minutes`, `shift_minutes`, `min_samples`, `min_duration_minutes`, `gap_minutes`, коэффициенты для расчёта порогов);
+- интерпретационные пороги (какой процентный рост трактовать как `↑↑`, `↑` и т.д.);
+- `calibration_percentiles` для отчёта `events`;
+- секцию `alignment` с настройками частоты (`frequency`), агрегатора базового контура (`base_aggregation`) и списка быстрых каналов (`pressure_fast_metrics`);
 - пути для экспортов (parquet/json/html).
 
 Любые изменения конфигурации фиксируйте в rollout-заметках задачи.
@@ -35,7 +36,7 @@ python -m src.pipeline anomalies --config config/pipeline.yaml
 
 Что происходит:
 1. Рабочая книга читается напрямую (без промежуточных parquet).
-2. Для каждой скважины исходные ряды обрезаются по общему перекрытию и приводятся к объединённому набору меток времени (без обрезки частоты измерений).
+2. Для каждой скважины формируются два контура: базовый 15‑минутный (агрегатор из `alignment.base_aggregation` + столбцы `*_min`/`*_max` для давления) и быстрый поток давления из `alignment.pressure_fast_metrics` в исходной частоте.
 3. Для референсных аномальных/нормальных окон вычисляются скользящие средние/базовые значения и формируются пороги:
    - «аномальный» порог: max(квантиль по референсным аномалиям, коэффициент × максимум нормы);
    - «нормальный» порог: 95‑й процентиль модуля отклонения в норме.
@@ -43,7 +44,9 @@ python -m src.pipeline anomalies --config config/pipeline.yaml
 5. Если авторский интервал из `svod` не покрыт найденным сегментом, он добавляется в результат принудительно.
 
 Итог сохраняется в `reports/anomalies/`:
-- `anomaly_analysis.parquet|xlsx|json` — все найденные окна с типом (`segment_type`: `anomaly` / `normal`), медианами отклонений, направлениями `↑↓` и метками совпадения с референсом.
+- `timeseries_15min.parquet|csv` — агрегированный baseline для всех скважин;
+- `pressure_fast.parquet|csv` — быстрые ряды давления из `pressure_fast_metrics`;
+- `anomaly_analysis.parquet|xlsx|json` — все найденные окна с типом (`segment_type`: `anomaly` / `normal`), медианами отклонений, направлениями `↑↓`, метками совпадения с референсом и дополнительными агрегатами `pressure_min_15m`/`pressure_max_15m`.
 
 ## 4. Референсная статистика (events)
 
@@ -57,7 +60,7 @@ python -m src.pipeline events --config config/pipeline.yaml
 - направления `↑↑/↑/=/↓/↓↓`.
 
 Результаты:
-- `reports/anomalies/events_features.parquet|csv` — построчно по интервалам;
+- `reports/anomalies/events_features.parquet|csv` — построчно по интервалам, включая новые признаки `pressure_min_15m`/`pressure_max_15m`;
 - `events_summary.json` — агрегированные значения по классам («normal», «anomaly»).
 
 ## 5. Руководство по baseline и аномалиям

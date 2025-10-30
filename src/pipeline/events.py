@@ -62,6 +62,13 @@ def build_interval_records(
         current_delta_median = float(segment_features["current_delta"].median())
         temperature_delta_median = float(segment_features["temperature_delta"].median())
 
+        pressure_min_15m = (
+            float(segment_data["Intake_Pressure_min"].min()) if "Intake_Pressure_min" in segment_data else float("nan")
+        )
+        pressure_max_15m = (
+            float(segment_data["Intake_Pressure_max"].max()) if "Intake_Pressure_max" in segment_data else float("nan")
+        )
+
         record = {
             "well": interval.well,
             "label": interval.label,
@@ -72,6 +79,8 @@ def build_interval_records(
             "pressure_std": float(segment_data["Intake_Pressure"].std(ddof=0)),
             "pressure_min": float(segment_data["Intake_Pressure"].min()),
             "pressure_max": float(segment_data["Intake_Pressure"].max()),
+            "pressure_min_15m": pressure_min_15m,
+            "pressure_max_15m": pressure_max_15m,
             "pressure_delta_median": pressure_delta_median,
             "pressure_delta_mean": float(segment_features["pressure_delta"].mean()),
             "pressure_direction": classify_direction(pressure_delta_median, interpretation),
@@ -102,6 +111,8 @@ def compute_label_summary(
     metric_columns = [
         "pressure_mean",
         "pressure_delta_median",
+        "pressure_min_15m",
+        "pressure_max_15m",
         "current_mean",
         "current_delta_median",
         "temperature_mean",
@@ -131,7 +142,25 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
 
     xl = pd.ExcelFile(workbook_path)
     svod = load_svod_sheet(xl, svod_sheet)
-    well_data = load_well_series(xl, svod_sheet)
+    alignment_cfg = config.get("alignment", {})
+    base_frequency = alignment_cfg.get("frequency", "15T")
+    base_aggregation = alignment_cfg.get("base_aggregation", "mean")
+    pressure_metrics_cfg = alignment_cfg.get("pressure_fast_metrics", ["Intake_Pressure"])
+    if isinstance(pressure_metrics_cfg, str):
+        pressure_metrics = [pressure_metrics_cfg]
+    else:
+        pressure_metrics = list(pressure_metrics_cfg)
+
+    well_series_map = load_well_series(
+        xl,
+        svod_sheet,
+        base_frequency=base_frequency,
+        pressure_metrics=pressure_metrics,
+        base_aggregation=base_aggregation,
+    )
+    well_data: Dict[str, pd.DataFrame] = {
+        well: series.base for well, series in well_series_map.items() if series.base is not None and not series.base.empty
+    }
     if not well_data:
         raise ValueError("Не удалось загрузить временные ряды из workbook для справочного анализа.")
 

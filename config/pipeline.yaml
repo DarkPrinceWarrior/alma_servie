@@ -73,5 +73,8 @@ metadata:
 
 alignment:
   frequency: "15T"
+  base_aggregation: "mean"
+  pressure_fast_metrics:
+    - "Intake_Pressure"
   agzu_max_ffill_hours: 24
   su_max_ffill_hours: 6

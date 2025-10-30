@@ -105,11 +105,29 @@ def load_reference_anomalies(
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
 
     svod = load_svod_sheet(xl, svod_sheet)
-    full_well_data = load_well_series(xl, svod_sheet)
+    alignment_cfg = config.get("alignment", {})
+    base_frequency = alignment_cfg.get("frequency", "15T")
+    base_aggregation = alignment_cfg.get("base_aggregation", "mean")
+    pressure_metrics_cfg = alignment_cfg.get("pressure_fast_metrics", ["Intake_Pressure"])
+    if isinstance(pressure_metrics_cfg, str):
+        pressure_metrics = [pressure_metrics_cfg]
+    else:
+        pressure_metrics = list(pressure_metrics_cfg)
+
+    full_well_series = load_well_series(
+        xl,
+        svod_sheet,
+        base_frequency=base_frequency,
+        pressure_metrics=pressure_metrics,
+        base_aggregation=base_aggregation,
+    )
+    base_well_data = {
+        well: series.base for well, series in full_well_series.items() if series.base is not None and not series.base.empty
+    }
     raw_well_series = load_well_series_subset(xl, wells)
     intervals = parse_reference_intervals(
         svod=svod,
-        well_data=full_well_data,
+        well_data=base_well_data,
         anomaly_label=config["anomalies"].get("anomaly_cause", "Негерметичность НКТ"),
         normal_label=config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты"),
     )

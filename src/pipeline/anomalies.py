@@ -43,6 +43,12 @@ class InterpretationThresholds:
     strong_drop: float = -0.1
 
 
+@dataclass
+class WellTimeseries:
+    base: pd.DataFrame
+    pressure_fast: Optional[pd.DataFrame]
+
+
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     denominator = denominator.replace(0, np.nan)
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -90,8 +96,35 @@ def load_svod_sheet(xl: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
     return svod
 
 
-def load_well_series(xl: pd.ExcelFile, svod_sheet: str) -> Dict[str, pd.DataFrame]:
-    data: Dict[str, pd.DataFrame] = {}
+def load_well_series(
+    xl: pd.ExcelFile,
+    svod_sheet: str,
+    *,
+    base_frequency: str = "15T",
+    pressure_metrics: Sequence[str] = ("Intake_Pressure",),
+    base_aggregation: str = "mean",
+) -> Dict[str, WellTimeseries]:
+    data: Dict[str, WellTimeseries] = {}
+    normalized_frequency = None
+
+    def _normalize_frequency(freq: str) -> str:
+        if not isinstance(freq, str):
+            return freq
+        freq = freq.strip()
+        if freq.upper().endswith("T"):
+            magnitude = freq[:-1]
+            try:
+                value = float(magnitude)
+            except ValueError:
+                return freq
+            if value.is_integer():
+                return f"{int(value)}min"
+            return f"{value}min"
+        return freq
+
+    if base_frequency:
+        normalized_frequency = _normalize_frequency(base_frequency)
+
     for sheet_name in xl.sheet_names:
         if sheet_name == svod_sheet:
             continue
@@ -130,13 +163,55 @@ def load_well_series(xl: pd.ExcelFile, svod_sheet: str) -> Dict[str, pd.DataFram
         if not clipped_frames:
             continue
 
-        combined_index = sorted({ts for series in clipped_frames.values() for ts in series.index})
-        datetime_index = pd.DatetimeIndex(combined_index)
-
-        aligned: Dict[str, pd.Series] = {}
+        base_components: List[pd.Series] = []
+        pressure_min_components: List[pd.Series] = []
+        pressure_max_components: List[pd.Series] = []
+        aggregation = (base_aggregation or "mean").lower()
         for metric, series in clipped_frames.items():
-            aligned[metric] = series.reindex(datetime_index)
-        data[sheet_name] = pd.DataFrame(aligned, index=datetime_index)
+            resampled = series
+            if base_frequency:
+                if aggregation == "median":
+                    resampled = series.resample(normalized_frequency).median()
+                elif aggregation == "max":
+                    resampled = series.resample(normalized_frequency).max()
+                elif aggregation == "min":
+                    resampled = series.resample(normalized_frequency).min()
+                else:
+                    resampled = series.resample(normalized_frequency).mean()
+                resampled = resampled.loc[start:end]
+                if metric in pressure_metrics:
+                    pressure_min = series.resample(normalized_frequency).min().loc[start:end]
+                    pressure_min.name = f"{metric}_min"
+                    pressure_min_components.append(pressure_min)
+                    pressure_max = series.resample(normalized_frequency).max().loc[start:end]
+                    pressure_max.name = f"{metric}_max"
+                    pressure_max_components.append(pressure_max)
+            resampled.name = metric
+            base_components.append(resampled)
+
+        if not base_components:
+            continue
+
+        base_frame = pd.concat(base_components, axis=1).sort_index()
+        base_frame = base_frame.dropna(how="all")
+        if pressure_min_components or pressure_max_components:
+            extrema_components = pressure_min_components + pressure_max_components
+            extrema_frame = pd.concat(extrema_components, axis=1).sort_index()
+            base_frame = pd.concat([base_frame, extrema_frame], axis=1)
+
+        pressure_fast_components: Dict[str, pd.Series] = {}
+        for metric, series in clipped_frames.items():
+            if metric in pressure_metrics:
+                pressure_fast_components[metric] = series.sort_index()
+        fast_frame = None
+        if pressure_fast_components:
+            fast_frame = pd.concat(pressure_fast_components, axis=1).sort_index()
+            fast_frame = fast_frame.loc[start:end]
+
+        data[sheet_name] = WellTimeseries(
+            base=base_frame,
+            pressure_fast=fast_frame,
+        )
     return data
 
 
@@ -456,13 +531,16 @@ def detect_segments_for_well(
             return None
         segment_data = well_df.loc[start:end]
 
-        def _safe_mean(series: Optional[pd.Series]) -> float:
+        def _safe_stat(series: Optional[pd.Series], func) -> float:
             if series is None:
                 return float("nan")
             numeric = pd.to_numeric(series, errors="coerce").dropna()
             if numeric.empty:
                 return float("nan")
-            return float(numeric.mean())
+            return float(func(numeric))
+
+        def _safe_mean(series: Optional[pd.Series]) -> float:
+            return _safe_stat(series, np.mean)
 
         pressure_delta_series = pd.to_numeric(segment_features["pressure_delta"], errors="coerce").dropna()
         pressure_slope_series = pd.to_numeric(segment_features["pressure_slope"], errors="coerce").dropna()
@@ -484,6 +562,9 @@ def detect_segments_for_well(
         pressure_slope_median = float(pressure_slope_series.median())
         current_delta_median = float(current_delta_series.median()) if not current_delta_series.empty else float("nan")
         temperature_delta_median = float(temperature_delta_series.median()) if not temperature_delta_series.empty else float("nan")
+
+        pressure_min_15m = _safe_stat(segment_data.get("Intake_Pressure_min"), np.min)
+        pressure_max_15m = _safe_stat(segment_data.get("Intake_Pressure_max"), np.max)
 
         reference_match = "none"
         reference_notes: List[str] = []
@@ -519,6 +600,8 @@ def detect_segments_for_well(
             "current_direction": classify_direction(current_delta_median, interpretation),
             "temperature_direction": classify_direction(temperature_delta_median, interpretation),
             "pressure_mean": _safe_mean(segment_data.get("Intake_Pressure")),
+            "pressure_min_15m": pressure_min_15m,
+            "pressure_max_15m": pressure_max_15m,
             "current_mean": _safe_mean(segment_data.get("Current")),
             "temperature_mean": _safe_mean(segment_data.get("Motor_Temperature")),
             "frequency_mean": _safe_mean(segment_data.get("Frequency")),
@@ -564,23 +647,83 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     anomaly_cause = config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")
     normal_cause = config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")
 
+    alignment_cfg = config.get("alignment", {})
+    base_frequency = alignment_cfg.get("frequency", "15T")
+    base_aggregation = alignment_cfg.get("base_aggregation", "mean")
+    pressure_metrics_cfg = alignment_cfg.get("pressure_fast_metrics", ["Intake_Pressure"])
+    if isinstance(pressure_metrics_cfg, str):
+        pressure_metrics = [pressure_metrics_cfg]
+    else:
+        pressure_metrics = list(pressure_metrics_cfg)
+
     xl = pd.ExcelFile(workbook_path)
     svod = load_svod_sheet(xl, svod_sheet)
-    well_data = load_well_series(xl, svod_sheet)
-    if not well_data:
+    well_series_map = load_well_series(
+        xl,
+        svod_sheet,
+        base_frequency=base_frequency,
+        pressure_metrics=pressure_metrics,
+        base_aggregation=base_aggregation,
+    )
+    if not well_series_map:
         raise ValueError("Не удалось загрузить временные ряды из рабочего файла alma/Общая_таблица.xlsx.")
 
-    reference_intervals = parse_reference_intervals(svod, well_data, anomaly_cause, normal_cause)
+    base_well_data: Dict[str, pd.DataFrame] = {
+        well: series.base for well, series in well_series_map.items() if series.base is not None and not series.base.empty
+    }
+    pressure_fast_map: Dict[str, pd.DataFrame] = {
+        well: series.pressure_fast
+        for well, series in well_series_map.items()
+        if series.pressure_fast is not None and not series.pressure_fast.empty
+    }
+
+    if not base_well_data:
+        raise ValueError("Не удалось подготовить 15-минутный контур для анализа аномалий.")
+
+    reports_dir = Path(config["paths"]["reports_dir"]) / "anomalies"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    base_export_frames: List[pd.DataFrame] = []
+    for well, frame in base_well_data.items():
+        if frame.empty:
+            continue
+        export = frame.copy()
+        export.index.name = "timestamp"
+        export = export.reset_index()
+        export.insert(0, "well", well)
+        base_export_frames.append(export)
+    if base_export_frames:
+        base_export_df = pd.concat(base_export_frames, ignore_index=True)
+        base_export_path = reports_dir / "timeseries_15min.parquet"
+        base_export_df.to_parquet(base_export_path, index=False)
+        base_export_df.to_csv(base_export_path.with_suffix(".csv"), index=False)
+
+    pressure_export_frames: List[pd.DataFrame] = []
+    for well, frame in pressure_fast_map.items():
+        if frame.empty:
+            continue
+        export = frame.copy()
+        export.index.name = "timestamp"
+        export = export.reset_index()
+        export.insert(0, "well", well)
+        pressure_export_frames.append(export)
+    if pressure_export_frames:
+        pressure_export_df = pd.concat(pressure_export_frames, ignore_index=True)
+        pressure_export_path = reports_dir / "pressure_fast.parquet"
+        pressure_export_df.to_parquet(pressure_export_path, index=False)
+        pressure_export_df.to_csv(pressure_export_path.with_suffix(".csv"), index=False)
+
+    reference_intervals = parse_reference_intervals(svod, base_well_data, anomaly_cause, normal_cause)
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
     normal_intervals = [interval for interval in reference_intervals if interval.label == "normal"]
 
-    features_map = {well: compute_feature_frame(df, settings) for well, df in well_data.items()}
+    features_map = {well: compute_feature_frame(df, settings) for well, df in base_well_data.items()}
     anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
     normal_features = aggregate_feature_values(normal_intervals, features_map)
     thresholds = derive_thresholds(normal_features, anomaly_features, settings)
 
     detection_records: List[Dict[str, object]] = []
-    for well, well_df in well_data.items():
+    for well, well_df in base_well_data.items():
         features = features_map[well]
         detection_records.extend(
             detect_segments_for_well(
@@ -598,9 +741,6 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     if not detections.empty:
         detections.sort_values(["start", "well", "segment_type"], inplace=True)
         detections.reset_index(drop=True, inplace=True)
-
-    reports_dir = Path(config["paths"]["reports_dir"]) / "anomalies"
-    reports_dir.mkdir(parents=True, exist_ok=True)
 
     output_parquet = reports_dir / "anomaly_analysis.parquet"
     detections.to_parquet(output_parquet, index=False)
