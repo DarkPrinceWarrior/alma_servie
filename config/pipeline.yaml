@@ -37,6 +37,13 @@ anomalies:
       - "Intake_Pressure"
       - "Current"
       - "Motor_Temperature"
+  detection_residual:
+    enabled: true
+    ewma_lambda: 0.2
+    ewma_l_multiplier: 3.0
+    spike_threshold: 4.0
+    t2_alpha: 0.001
+    min_t2_points: 30
 
 alignment:
   frequency: "15T"

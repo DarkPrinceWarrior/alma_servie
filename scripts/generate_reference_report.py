@@ -101,7 +101,11 @@ def load_reference_anomalies(
     config: Dict,
     wells: List[str],
     xl: pd.ExcelFile,
-) -> Tuple[Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]], Dict[str, Dict[str, pd.Series]]]:
+) -> Tuple[
+    Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]],
+    Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]],
+    Dict[str, Dict[str, pd.Series]],
+]:
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
 
     svod = load_svod_sheet(xl, svod_sheet)
@@ -132,14 +136,16 @@ def load_reference_anomalies(
         normal_label=config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты"),
     )
 
-    mapping: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {well: [] for well in wells}
+    anomaly_mapping: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {well: [] for well in wells}
+    normal_mapping: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {well: [] for well in wells}
     for interval in intervals:
-        if interval.label != "anomaly":
+        if interval.well not in anomaly_mapping:
             continue
-        if interval.well not in mapping:
-            continue
-        mapping[interval.well].append((interval.start, interval.end))
-    return mapping, raw_well_series
+        if interval.label == "anomaly":
+            anomaly_mapping[interval.well].append((interval.start, interval.end))
+        elif interval.label == "normal":
+            normal_mapping[interval.well].append((interval.start, interval.end))
+    return anomaly_mapping, normal_mapping, raw_well_series
 
 
 def load_detected_anomalies(detections_path: Path, wells: List[str]) -> Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]]:
@@ -166,6 +172,7 @@ def build_well_figure(
     well: str,
     well_series: Dict[str, pd.Series],
     reference_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    normal_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
     detected_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
 ) -> go.Figure | None:
     if not well_series:
@@ -275,6 +282,56 @@ def build_well_figure(
             col=1,
         )
 
+    for window_idx, (start, end) in enumerate(normal_windows):
+        base_offset = 0.18 + (window_idx % 3) * 0.06
+        fig.add_vline(x=start, line=dict(color="#2ecc71", dash="dot", width=1))
+        fig.add_annotation(
+            x=start,
+            y=_y_pos(base_offset),
+            xref="x",
+            yref=yref_value,
+            text=f"Начало нормы<br>{start:%d.%m %H:%M}",
+            showarrow=True,
+            arrowhead=1,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#2ecc71",
+            ax=-80,
+            ay=0,
+            font=dict(size=8, color="#1f7a3a"),
+            bgcolor="rgba(46, 204, 113, 0.15)",
+            bordercolor="#1f7a3a",
+            borderwidth=0.5,
+        )
+        fig.add_vline(x=end, line=dict(color="#2ecc71", dash="dot", width=1))
+        fig.add_annotation(
+            x=end,
+            y=_y_pos(base_offset + 0.02),
+            xref="x",
+            yref=yref_value,
+            text=f"Конец нормы<br>{end:%d.%m %H:%M}",
+            showarrow=True,
+            arrowhead=1,
+            arrowsize=1,
+            arrowwidth=1,
+            arrowcolor="#2ecc71",
+            ax=80,
+            ay=0,
+            font=dict(size=8, color="#1f7a3a"),
+            bgcolor="rgba(46, 204, 113, 0.15)",
+            bordercolor="#1f7a3a",
+            borderwidth=0.5,
+        )
+        fig.add_vrect(
+            x0=start,
+            x1=end,
+            fillcolor="rgba(46, 204, 113, 0.2)",
+            opacity=0.2,
+            line_width=0,
+            row="all",
+            col=1,
+        )
+
     for window_idx, (start, end) in enumerate(detected_windows):
         fig.add_vrect(
             x0=start,
@@ -339,6 +396,15 @@ def build_well_figure(
             x=[None],
             y=[None],
             mode="markers",
+            marker=dict(size=10, color="#2ecc71"),
+            name="Референсная норма",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode="markers",
             marker=dict(size=10, color="#ff5733"),
             name="Аномалия (детектор)",
         )
@@ -375,7 +441,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not wells:
         raise ValueError("Не удалось определить список скважин для отчёта.")
 
-    reference_mapping, well_data = load_reference_anomalies(config, wells, xl)
+    reference_mapping, normal_mapping, well_data = load_reference_anomalies(config, wells, xl)
     detection_mapping = load_detected_anomalies(args.detections, wells)
 
     ensure_output_dir(args.output)
@@ -389,6 +455,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             well=well,
             well_series=signals,
             reference_windows=reference_mapping.get(well, []),
+            normal_windows=normal_mapping.get(well, []),
             detected_windows=detection_mapping.get(well, []),
         )
         if fig is not None:

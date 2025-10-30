@@ -13,6 +13,7 @@
 - `calibration_percentiles` для отчёта `events`;
 - секцию `preprocessing` с параметрами Hampel-фильтра и ограничением `forward-fill`;
 - секцию `frequency_baseline` (управляет биннингом `Frequency`, списком метрик и минимальным количеством точек для расчёта baseline);
+- секцию `detection_residual` с параметрами EWMA/T² (λ, мультипликатор, порог всплеска, уровень значимости, минимальное число точек);
 - секцию `alignment` с настройками частоты (`frequency`), агрегатора базового контура (`base_aggregation`) и списка быстрых каналов (`pressure_fast_metrics`);
 - пути для экспортов (parquet/json/html).
 
@@ -51,7 +52,7 @@ python -m src.pipeline anomalies --config config/pipeline.yaml
 - `timeseries_15min.parquet|csv` — агрегированный baseline для всех скважин;
 - `pressure_fast.parquet|csv` — быстрые ряды давления из `pressure_fast_metrics`;
 - `frequency_baseline.parquet|csv` — сводная таблица baseline `Frequency → (median, MAD)` по каждому параметру;
-- `anomaly_analysis.parquet|xlsx|json` — все найденные окна с типом (`segment_type`: `anomaly` / `normal`), медианами отклонений, направлениями `↑↓`, метками совпадения с референсом и дополнительными агрегатами `pressure_min_15m`/`pressure_max_15m`.
+- `anomaly_analysis.parquet|xlsx|json` — все найденные окна с типом (`segment_type`: `anomaly` / `normal`), медианами отклонений, направлениями `↑↓`, метками совпадения с референсом, дополнительными агрегатами `pressure_min_15m`/`pressure_max_15m`, статистикой residual-контроля (`t2_max`, флаги EWMA/spike/residual`).
 
 ## 4. Референсная статистика (events)
 

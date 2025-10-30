@@ -9,6 +9,7 @@ import math
 
 import numpy as np
 import pandas as pd
+from statistics import NormalDist
 
 from .config import DEFAULT_CONFIG_PATH, load_config
 
@@ -54,6 +55,25 @@ class FrequencyBaseline:
     bin_width: float
     metrics: Dict[str, Dict[int, Dict[str, float]]]
     summary: pd.DataFrame
+
+
+@dataclass
+class ResidualDetectionSettings:
+    enabled: bool = True
+    ewma_lambda: float = 0.2
+    ewma_l_multiplier: float = 3.0
+    spike_threshold: float = 4.0
+    t2_alpha: float = 0.01
+    min_t2_points: int = 30
+
+
+@dataclass
+class ResidualDetectionModel:
+    metrics: List[str]
+    covariance: np.ndarray
+    inv_covariance: np.ndarray
+    t2_threshold: float
+    settings: ResidualDetectionSettings
 
 
 def _estimate_step_seconds(index: pd.Index) -> float:
@@ -250,15 +270,151 @@ def _apply_frequency_baseline(
     if missing_expected.any():
         residual.loc[missing_expected] = series.loc[missing_expected]
     non_null_scale = scale.dropna()
+    fallback_mad = float(np.nanmedian(np.abs(series - np.nanmedian(series)))) if series.dropna().size else float("nan")
+    if not np.isfinite(fallback_mad) or fallback_mad <= 0:
+        fallback_std = float(np.nanstd(series)) if series.dropna().size else float("nan")
+        fallback_mad = fallback_std if np.isfinite(fallback_std) and fallback_std > 0 else 1.0
+    fallback_mad *= 1.4826  # consistent with MAD scale
     if non_null_scale.empty:
-        scale = scale.fillna(1e-6)
+        scale = scale.fillna(fallback_mad)
     else:
         median_scale = float(non_null_scale.median())
         if not np.isfinite(median_scale) or median_scale <= 0:
-            median_scale = 1e-6
+            median_scale = fallback_mad
         scale = scale.fillna(median_scale)
-    scale[scale <= 0] = 1e-6
+    min_scale = max(fallback_mad * 0.1, 0.05)
+    scale = scale.clip(lower=min_scale)
     return expected, residual, scale
+
+
+def _chi2_ppf(probability: float, dof: int) -> float:
+    probability = max(min(probability, 1 - 1e-9), 1e-9)
+    if dof <= 0:
+        raise ValueError("Degrees of freedom must be positive for chi-square quantile")
+    z = NormalDist().inv_cdf(probability)
+    term = 1 - (2.0 / (9.0 * dof)) + z * math.sqrt(2.0 / (9.0 * dof))
+    term = max(term, 1e-9)
+    return dof * term ** 3
+
+
+def build_residual_detection_model(
+    features_map: Dict[str, pd.DataFrame],
+    normal_intervals: Sequence[ReferenceInterval],
+    settings: ResidualDetectionSettings,
+) -> Optional[ResidualDetectionModel]:
+    if not settings.enabled or not normal_intervals:
+        return None
+
+    collected_frames: List[pd.DataFrame] = []
+    for interval in normal_intervals:
+        frame = features_map.get(interval.well)
+        if frame is None:
+            continue
+        segment = frame.loc[interval.start : interval.end]
+        if segment.empty:
+            continue
+        subset = segment[
+            [
+                "pressure_z",
+                "current_z",
+                "temperature_z",
+            ]
+        ]
+        collected_frames.append(subset)
+
+    if not collected_frames:
+        return None
+
+    combined = pd.concat(collected_frames, axis=0, ignore_index=False)
+    metric_columns = {
+        "pressure": "pressure_z",
+        "current": "current_z",
+        "temperature": "temperature_z",
+    }
+
+    active_metrics: List[str] = []
+    for metric, column in metric_columns.items():
+        if column in combined and combined[column].dropna().shape[0] >= settings.min_t2_points:
+            active_metrics.append(metric)
+
+    if not active_metrics:
+        return None
+
+    columns = [metric_columns[m] for m in active_metrics]
+    z_matrix = combined[columns].dropna()
+    if z_matrix.shape[0] < settings.min_t2_points:
+        return None
+
+    cov = np.cov(z_matrix.to_numpy().T, ddof=0)
+    if not np.isfinite(cov).all():
+        return None
+
+    # regularize covariance if needed
+    try:
+        inv_cov = np.linalg.inv(cov)
+    except np.linalg.LinAlgError:
+        epsilon = 1e-6 * np.eye(len(columns))
+        inv_cov = np.linalg.inv(cov + epsilon)
+        cov = cov + epsilon
+
+    dof = len(columns)
+    try:
+        t2_threshold = float(_chi2_ppf(1 - settings.t2_alpha, dof))
+    except Exception:
+        t2_threshold = float(_chi2_ppf(0.99, dof))
+
+    return ResidualDetectionModel(
+        metrics=active_metrics,
+        covariance=cov,
+        inv_covariance=inv_cov,
+        t2_threshold=t2_threshold,
+        settings=settings,
+    )
+
+
+def _compute_ewma_series(series: pd.Series, lambda_: float) -> pd.Series:
+    if series.dropna().empty:
+        return pd.Series(np.nan, index=series.index)
+    ewma_values = []
+    prev = 0.0
+    initialized = False
+    for value in series:
+        if not np.isfinite(value):
+            ewma_values.append(np.nan)
+            continue
+        if not initialized:
+            prev = value
+            initialized = True
+        else:
+            prev = lambda_ * value + (1 - lambda_) * prev
+        ewma_values.append(prev)
+    return pd.Series(ewma_values, index=series.index, dtype=float)
+
+
+def _compute_t2_series(
+    z_frame: pd.DataFrame,
+    model: ResidualDetectionModel,
+) -> pd.Series:
+    metrics = model.metrics
+    column_map = {
+        "pressure": "pressure_z",
+        "current": "current_z",
+        "temperature": "temperature_z",
+    }
+    columns = [column_map[m] for m in metrics]
+    if not set(columns).issubset(z_frame.columns):
+        return pd.Series(np.nan, index=z_frame.index, dtype=float)
+    subset = z_frame[columns]
+    values = subset.to_numpy(dtype=float)
+    mask = np.isfinite(values).all(axis=1)
+    t2 = pd.Series(np.nan, index=z_frame.index, dtype=float)
+    if not mask.any():
+        return t2
+    valid_values = values[mask]
+    inv = model.inv_covariance
+    t2_values = np.einsum("ij,jk,ik->i", valid_values, inv, valid_values)
+    t2.loc[mask] = t2_values
+    return t2
 
 
 def _safe_divide(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -290,6 +446,18 @@ def load_detection_settings(config: Dict) -> Tuple[DetectionSettings, Interpreta
         strong_drop=float(interpretation_cfg.get("strong_drop", -0.1)),
     )
     return settings, interpretation
+
+
+def load_residual_settings(config: Dict) -> ResidualDetectionSettings:
+    residual_cfg = config.get("anomalies", {}).get("detection_residual", {}) or {}
+    return ResidualDetectionSettings(
+        enabled=bool(residual_cfg.get("enabled", True)),
+        ewma_lambda=float(residual_cfg.get("ewma_lambda", 0.2)),
+        ewma_l_multiplier=float(residual_cfg.get("ewma_l_multiplier", 3.0)),
+        spike_threshold=float(residual_cfg.get("spike_threshold", 4.0)),
+        t2_alpha=float(residual_cfg.get("t2_alpha", 0.01)),
+        min_t2_points=int(residual_cfg.get("min_t2_points", 30)),
+    )
 
 
 def load_svod_sheet(xl: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
@@ -596,14 +764,17 @@ def compute_feature_frame(
     features["pressure_expected"] = pressure_expected
     features["pressure_residual"] = pressure_residual
     features["pressure_scale"] = pressure_scale
+    features["pressure_z"] = _safe_divide(pressure_residual, pressure_scale)
     features["current"] = current_raw
     features["current_expected"] = current_expected
     features["current_residual"] = current_residual
     features["current_scale"] = current_scale
+    features["current_z"] = _safe_divide(current_residual, current_scale)
     features["temperature"] = temperature_raw
     features["temperature_expected"] = temperature_expected
     features["temperature_residual"] = temperature_residual
     features["temperature_scale"] = temperature_scale
+    features["temperature_z"] = _safe_divide(temperature_residual, temperature_scale)
     features["frequency"] = frequency_series
     return features
 
@@ -740,6 +911,7 @@ def detect_segments_for_well(
     settings: DetectionSettings,
     interpretation: InterpretationThresholds,
     reference_intervals: List[ReferenceInterval],
+    residual_model: Optional[ResidualDetectionModel] = None,
 ) -> List[Dict[str, object]]:
     min_duration = pd.Timedelta(minutes=settings.min_duration_minutes)
     gap = pd.Timedelta(minutes=settings.gap_minutes)
@@ -758,25 +930,94 @@ def detect_segments_for_well(
         features["pressure_slope"].abs() <= normal_thresholds["pressure_slope"]
     )
     reference_anomaly_mask = pd.Series(False, index=features.index)
+    normal_refs: List[ReferenceInterval] = []
     for ref in reference_intervals:
-        if ref.label != "anomaly" or ref.well != well:
+        if ref.well != well:
             continue
-        reference_anomaly_mask.loc[ref.start:ref.end] = True
+        if ref.label == "anomaly":
+            reference_anomaly_mask.loc[ref.start:ref.end] = True
+        elif ref.label == "normal":
+            normal_refs.append(ref)
 
-    normal_mask = normal_conditions.fillna(False) & ~anomaly_mask & ~reference_anomaly_mask
+    reference_normal_mask = pd.Series(False, index=features.index)
+    for ref in normal_refs:
+        reference_normal_mask.loc[ref.start:ref.end] = True
+
+    residual_flag = pd.Series(False, index=features.index, dtype=bool)
+    ewma_flag_any = pd.Series(False, index=features.index, dtype=bool)
+    spike_flag_any = pd.Series(False, index=features.index, dtype=bool)
+    t2_flag = pd.Series(False, index=features.index, dtype=bool)
+    t2_series = pd.Series(np.nan, index=features.index, dtype=float)
+
+    metric_column_map = {
+        "pressure": "pressure_z",
+        "current": "current_z",
+        "temperature": "temperature_z",
+    }
+
+    if residual_model is not None:
+        ewma_flags: List[pd.Series] = []
+        spike_flags: List[pd.Series] = []
+        for metric in residual_model.metrics:
+            column = metric_column_map.get(metric)
+            if column is None or column not in features:
+                continue
+            z_series = pd.to_numeric(features[column], errors="coerce")
+            ewma_series = _compute_ewma_series(z_series, residual_model.settings.ewma_lambda)
+            features[f"{metric}_ewma"] = ewma_series
+            ewma_flag_metric = ewma_series.abs() > residual_model.settings.ewma_l_multiplier
+            ewma_flag_metric = ewma_flag_metric.fillna(False)
+            ewma_flags.append(ewma_flag_metric)
+            spike_flag_metric = z_series.abs() > residual_model.settings.spike_threshold
+            spike_flag_metric = spike_flag_metric.fillna(False)
+            spike_flags.append(spike_flag_metric)
+
+        if ewma_flags:
+            ewma_flag_any = ewma_flags[0].copy()
+            for flag in ewma_flags[1:]:
+                ewma_flag_any |= flag
+        if spike_flags:
+            spike_flag_any = spike_flags[0].copy()
+            for flag in spike_flags[1:]:
+                spike_flag_any |= flag
+
+        z_frame = features[[metric_column_map[m] for m in residual_model.metrics if metric_column_map[m] in features]]
+        t2_series = _compute_t2_series(z_frame, residual_model)
+        features["t2_stat"] = t2_series
+        t2_flag = t2_series > residual_model.t2_threshold
+        t2_flag = t2_flag.fillna(False)
+
+        residual_flag = t2_flag.fillna(False)
+        features["ewma_flag"] = ewma_flag_any
+        features["spike_flag"] = spike_flag_any
+        features["t2_flag"] = t2_flag
+        features["residual_flag"] = residual_flag
+    else:
+        features["t2_stat"] = t2_series
+        features["ewma_flag"] = ewma_flag_any
+        features["spike_flag"] = spike_flag_any
+        features["t2_flag"] = t2_flag
+        features["residual_flag"] = residual_flag
+
+    residual_flag = residual_flag & ~reference_normal_mask
+    anomaly_mask = anomaly_mask.fillna(False)
+    normal_mask = normal_conditions.fillna(False) & ~anomaly_mask & ~reference_anomaly_mask & ~residual_flag
 
     anomaly_segments = _extract_segments(anomaly_mask, min_duration=min_duration, gap=gap)
     normal_segments = _extract_segments(normal_mask, min_duration=min_duration, gap=gap)
 
     records: List[Dict[str, object]] = []
     anomaly_refs = [ref for ref in reference_intervals if ref.label == "anomaly" and ref.well == well]
-    normal_refs = [ref for ref in reference_intervals if ref.label == "normal" and ref.well == well]
 
     def _build_record(start: pd.Timestamp, end: pd.Timestamp, segment_type: str) -> Optional[Dict[str, object]]:
         segment_features = features.loc[start:end]
         if segment_features.empty:
             return None
         segment_data = well_df.loc[start:end]
+        if segment_type == "anomaly":
+            overlap_with_normal = reference_normal_mask.loc[start:end]
+            if overlap_with_normal.any():
+                return None
 
         def _safe_stat(series: Optional[pd.Series], func) -> float:
             if series is None:
@@ -812,6 +1053,14 @@ def detect_segments_for_well(
 
         pressure_min_15m = _safe_stat(segment_data.get("Intake_Pressure_min"), np.min)
         pressure_max_15m = _safe_stat(segment_data.get("Intake_Pressure_max"), np.max)
+        ewma_triggered = bool(segment_features.get("ewma_flag", pd.Series(dtype=bool)).any())
+        spike_triggered = bool(segment_features.get("spike_flag", pd.Series(dtype=bool)).any())
+        t2_segment = segment_features.get("t2_stat")
+        if t2_segment is None or t2_segment.dropna().empty:
+            t2_max = float("nan")
+        else:
+            t2_max = float(t2_segment.max())
+        residual_triggered = bool(segment_features.get("residual_flag", pd.Series(dtype=bool)).any())
 
         reference_match = "none"
         reference_notes: List[str] = []
@@ -849,6 +1098,10 @@ def detect_segments_for_well(
             "pressure_mean": _safe_mean(segment_data.get("Intake_Pressure")),
             "pressure_min_15m": pressure_min_15m,
             "pressure_max_15m": pressure_max_15m,
+            "ewma_triggered": ewma_triggered,
+            "spike_triggered": spike_triggered,
+            "t2_max": t2_max,
+            "residual_triggered": residual_triggered,
             "current_mean": _safe_mean(segment_data.get("Current")),
             "temperature_mean": _safe_mean(segment_data.get("Motor_Temperature")),
             "frequency_mean": _safe_mean(segment_data.get("Frequency")),
@@ -1012,6 +1265,11 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     features_map = {
         well: compute_feature_frame(df, settings, baseline=baseline) for well, df in base_well_data.items()
     }
+
+    residual_settings = load_residual_settings(config)
+    residual_model = build_residual_detection_model(features_map, normal_intervals, residual_settings)
+    if residual_settings.enabled and residual_model is None:
+        print("Residual detection: недостаточно данных для построения ковариационной модели.")
     anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
     normal_features = aggregate_feature_values(normal_intervals, features_map)
     thresholds = derive_thresholds(normal_features, anomaly_features, settings)
@@ -1028,6 +1286,7 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
                 settings=settings,
                 interpretation=interpretation,
                 reference_intervals=reference_intervals,
+                residual_model=residual_model,
             )
         )
 
