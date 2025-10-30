@@ -5,7 +5,7 @@
 ## 1. Конфигурация
 
 Файл `config/pipeline.yaml` содержит:
-- пути к `alma`, `reports` и прочим папкам;
+- директорию для отчётов (`paths.reports_dir`);
 - настройки блока `anomalies`:
   - `source_workbook`, `svod_sheet`, названия причин для аномалий/нормы;
 - параметры детекции (`window_minutes`, `shift_minutes`, `min_samples`, `min_duration_minutes`, `gap_minutes`, коэффициенты для расчёта порогов);
