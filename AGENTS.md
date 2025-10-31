@@ -2,6 +2,13 @@
 
 ## Project Structure & Module Organization
 - `src/pipeline` теперь содержит только рабочие этапы `anomalies` и `events`, которые читают `alma/Общая_таблица.xlsx`. Запуск: `python -m src.pipeline anomalies` и `python -m src.pipeline events`.
+- `src/pipeline/anomalies/` — пакет из нескольких модулей:
+  - `__init__.py` держит публичный API и CLI;
+  - `models.py` — dataclass-ы и конфигурации;
+  - `settings.py` — загрузка параметров из `config/pipeline.yaml`;
+  - `preprocessing.py` — чтение рабочей книги и санитация рядов;
+  - `detection.py` — baseline, признаки и логика детекции.
+- Соблюдаем разделение ответственности между подмодулями; новые функции помещаем в соответствующий файл, а не в `__init__.py`.
 - `config/pipeline.yaml` хранит пути (`alma`, `reports`) и параметры детектора. Любые правки конфигурации фиксируйте рядом с rollout-заметками.
 - `alma/` — актуальная рабочая книга: лист `svod` плюс отдельные листы по скважинам.
 - `reports/` — итоговые артефакты (`anomaly_analysis.*`, `events_features.*`, `reference_wells_report.html`).
