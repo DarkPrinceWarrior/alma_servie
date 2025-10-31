@@ -382,6 +382,9 @@ def build_well_figure(
             col=1,
         )
 
+    seen_end_times = set()
+    end_annotation_idx = 0
+    
     for window_idx, (start, end) in enumerate(normal_windows):
         base_offset = 0.18 + (window_idx % 5) * 0.04
         start_side = -70 if window_idx % 2 == 0 else -90
@@ -406,24 +409,32 @@ def build_well_figure(
             borderwidth=0.5,
         )
         fig.add_vline(x=end, line=dict(color="#2ecc71", dash="dot", width=1))
-        fig.add_annotation(
-            x=end,
-            y=_y_pos(base_offset + 0.01),
-            xref="x",
-            yref=yref_value,
-            text=f"Конец нормы<br>{end:%d.%m %H:%M}",
-            showarrow=True,
-            arrowhead=1,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor="#2ecc71",
-            ax=end_side,
-            ay=int(-15 * (window_idx % 3)),
-            font=dict(size=8, color="#1f7a3a"),
-            bgcolor="rgba(46, 204, 113, 0.15)",
-            bordercolor="#1f7a3a",
-            borderwidth=0.5,
-        )
+        
+        if end not in seen_end_times:
+            seen_end_times.add(end)
+            end_vertical_spacing = 0.12
+            end_y_offset = base_offset + 0.01 + (end_annotation_idx * end_vertical_spacing)
+            end_ay_offset = int(-30 - (end_annotation_idx * 35))
+            
+            fig.add_annotation(
+                x=end,
+                y=_y_pos(end_y_offset),
+                xref="x",
+                yref=yref_value,
+                text=f"Конец нормы<br>{end:%d.%m %H:%M}",
+                showarrow=True,
+                arrowhead=1,
+                arrowsize=1,
+                arrowwidth=1,
+                arrowcolor="#2ecc71",
+                ax=end_side,
+                ay=end_ay_offset,
+                font=dict(size=8, color="#1f7a3a"),
+                bgcolor="rgba(46, 204, 113, 0.15)",
+                bordercolor="#1f7a3a",
+                borderwidth=0.5,
+            )
+            end_annotation_idx += 1
         fig.add_vrect(
             x0=start,
             x1=end,
@@ -496,7 +507,7 @@ def build_well_figure(
         ),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
-        margin=dict(t=100),
+        margin=dict(t=120),
     )
 
     fig.update_xaxes(title_text="Дата/время", row=rows, col=1)
