@@ -10,12 +10,8 @@ from . import anomalies, events
 
 def cmd_anomalies(args: argparse.Namespace) -> None:
     result = anomalies.run_anomaly_analysis(Path(args.config), workbook_override=args.source)
-    anomaly_count = int((result["segment_type"] == "anomaly").sum()) if not result.empty else 0
-    normal_count = int((result["segment_type"] == "normal").sum()) if not result.empty else 0
-    print(
-        f"Detected {anomaly_count} anomaly segments and {normal_count} normal segments "
-        f"(total {len(result)})."
-    )
+    event_count = len(result)
+    print(f"Detected {event_count} anomaly events.")
 
 
 def cmd_events(args: argparse.Namespace) -> None:

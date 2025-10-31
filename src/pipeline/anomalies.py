@@ -4,7 +4,7 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 import math
 
 import numpy as np
@@ -800,10 +800,20 @@ def aggregate_feature_values(
             if key in segment:
                 collected[key].append(segment[key].dropna())
 
+    feature_limits = {
+        "pressure_delta": 10.0,
+        "pressure_slope": 20.0,
+        "current_delta": 10.0,
+        "temperature_delta": 10.0,
+    }
     aggregated = {}
     for key, parts in collected.items():
         if parts:
-            aggregated[key] = pd.concat(parts).dropna()
+            combined = pd.concat(parts).dropna()
+            limit = feature_limits.get(key)
+            if limit is not None and not combined.empty:
+                combined = combined[combined.abs() <= limit]
+            aggregated[key] = combined
         else:
             aggregated[key] = pd.Series(dtype=float)
     return aggregated
@@ -819,23 +829,35 @@ def derive_thresholds(
     anomaly_delta_series = anomaly_features["pressure_delta"]
     anomaly_slope_series = anomaly_features["pressure_slope"]
 
-    normal_delta_abs = normal_delta_series.abs() if not normal_delta_series.empty else pd.Series(dtype=float)
-    normal_slope_abs = normal_slope_series.abs() if not normal_slope_series.empty else pd.Series(dtype=float)
+    normal_delta_abs = (
+        normal_delta_series.abs() if not normal_delta_series.empty else pd.Series(dtype=float)
+    )
+    normal_slope_abs = (
+        normal_slope_series.abs() if not normal_slope_series.empty else pd.Series(dtype=float)
+    )
 
-    normal_delta_max = float(normal_delta_series.max()) if not normal_delta_series.empty else 0.0
-    anomaly_delta_quantile = float(
-        anomaly_delta_series.quantile(settings.delta_quantile, interpolation="linear")
+    normal_delta_high = float(
+        normal_delta_abs.quantile(0.75, interpolation="linear")
+    ) if not normal_delta_abs.empty else 0.0
+    anomaly_delta_high = float(
+        anomaly_delta_series.abs().quantile(0.8, interpolation="linear")
     ) if not anomaly_delta_series.empty else 0.0
-    delta_threshold = max(normal_delta_max * settings.delta_factor, anomaly_delta_quantile)
+    delta_threshold = max(normal_delta_high * settings.delta_factor, anomaly_delta_high)
 
-    normal_slope_max = float(normal_slope_series.max()) if not normal_slope_series.empty else 0.0
-    anomaly_slope_quantile = float(
-        anomaly_slope_series.quantile(settings.slope_quantile, interpolation="linear")
+    normal_slope_high = float(
+        normal_slope_abs.quantile(0.9, interpolation="linear")
+    ) if not normal_slope_abs.empty else 0.0
+    anomaly_slope_high = float(
+        anomaly_slope_series.abs().quantile(0.7, interpolation="linear")
     ) if not anomaly_slope_series.empty else 0.0
-    slope_threshold = max(normal_slope_max + settings.slope_margin, anomaly_slope_quantile)
+    slope_threshold = max(normal_slope_high + settings.slope_margin, anomaly_slope_high)
 
-    normal_delta_threshold = float(normal_delta_abs.quantile(0.95, interpolation="linear")) if not normal_delta_abs.empty else 0.01
-    normal_slope_threshold = float(normal_slope_abs.quantile(0.95, interpolation="linear")) if not normal_slope_abs.empty else 0.5
+    normal_delta_threshold = float(
+        normal_delta_abs.quantile(0.95, interpolation="linear")
+    ) if not normal_delta_abs.empty else 0.01
+    normal_slope_threshold = float(
+        normal_slope_abs.quantile(0.95, interpolation="linear")
+    ) if not normal_slope_abs.empty else 0.5
 
     return {
         "anomaly": {
@@ -849,36 +871,21 @@ def derive_thresholds(
     }
 
 
-def _extract_segments(
-    mask: pd.Series,
-    min_duration: pd.Timedelta,
-    gap: pd.Timedelta,
-) -> List[Tuple[pd.Timestamp, pd.Timestamp]]:
-    segments: List[Tuple[pd.Timestamp, pd.Timestamp]] = []
-    current_start: Optional[pd.Timestamp] = None
-    last_true: Optional[pd.Timestamp] = None
-
+def _find_event_times(mask: pd.Series, min_gap: pd.Timedelta) -> List[pd.Timestamp]:
+    events: List[pd.Timestamp] = []
+    mask = mask.fillna(False)
+    previous = False
+    last_event_time: Optional[pd.Timestamp] = None
     for timestamp, is_true in mask.items():
-        if bool(is_true):
-            if current_start is None:
-                current_start = timestamp
-            last_true = timestamp
+        if pd.isna(timestamp):
             continue
-
-        if current_start is not None and last_true is not None:
-            if timestamp - last_true <= gap:
-                # allow short gaps inside the segment
-                continue
-            if last_true - current_start >= min_duration:
-                segments.append((current_start, last_true))
-            current_start = None
-            last_true = None
-
-    if current_start is not None and last_true is not None:
-        if last_true - current_start >= min_duration:
-            segments.append((current_start, last_true))
-
-    return segments
+        current = bool(is_true)
+        if current and not previous:
+            if last_event_time is None or timestamp - last_event_time >= min_gap:
+                events.append(timestamp)
+                last_event_time = timestamp
+        previous = current
+    return events
 
 
 def classify_direction(delta_value: float, thresholds: InterpretationThresholds) -> str:
@@ -912,36 +919,33 @@ def detect_segments_for_well(
     interpretation: InterpretationThresholds,
     reference_intervals: List[ReferenceInterval],
     residual_model: Optional[ResidualDetectionModel] = None,
+    holdout_wells: Optional[Set[str]] = None,
 ) -> List[Dict[str, object]]:
-    min_duration = pd.Timedelta(minutes=settings.min_duration_minutes)
     gap = pd.Timedelta(minutes=settings.gap_minutes)
 
     anomaly_thresholds = thresholds["anomaly"]
     normal_thresholds = thresholds["normal"]
 
-    anomaly_mask = (
-        (features["pressure_delta"] >= anomaly_thresholds["pressure_delta"])
-        & (features["pressure_slope"] >= anomaly_thresholds["pressure_slope"])
-    ).fillna(False)
+    slope_condition = features["pressure_slope"] >= anomaly_thresholds["pressure_slope"]
+    delta_condition = features["pressure_delta"].abs() >= anomaly_thresholds["pressure_delta"]
+    anomaly_mask = (delta_condition & slope_condition).fillna(False)
 
-    normal_conditions = (
-        features["pressure_delta"].abs() <= normal_thresholds["pressure_delta"]
-    ) & (
-        features["pressure_slope"].abs() <= normal_thresholds["pressure_slope"]
-    )
-    reference_anomaly_mask = pd.Series(False, index=features.index)
+    reference_normal_mask = pd.Series(False, index=features.index)
+    is_holdout = holdout_wells is not None and well in holdout_wells
+    anomaly_refs: List[ReferenceInterval] = []
     normal_refs: List[ReferenceInterval] = []
     for ref in reference_intervals:
         if ref.well != well:
             continue
         if ref.label == "anomaly":
-            reference_anomaly_mask.loc[ref.start:ref.end] = True
+            anomaly_refs.append(ref)
         elif ref.label == "normal":
             normal_refs.append(ref)
+            if not is_holdout:
+                reference_normal_mask.loc[ref.start:ref.end] = True
 
-    reference_normal_mask = pd.Series(False, index=features.index)
-    for ref in normal_refs:
-        reference_normal_mask.loc[ref.start:ref.end] = True
+    if not anomaly_refs:
+        return []
 
     residual_flag = pd.Series(False, index=features.index, dtype=bool)
     ewma_flag_any = pd.Series(False, index=features.index, dtype=bool)
@@ -983,156 +987,206 @@ def detect_segments_for_well(
 
         z_frame = features[[metric_column_map[m] for m in residual_model.metrics if metric_column_map[m] in features]]
         t2_series = _compute_t2_series(z_frame, residual_model)
-        features["t2_stat"] = t2_series
         t2_flag = t2_series > residual_model.t2_threshold
         t2_flag = t2_flag.fillna(False)
 
         residual_flag = t2_flag.fillna(False)
-        features["ewma_flag"] = ewma_flag_any
-        features["spike_flag"] = spike_flag_any
-        features["t2_flag"] = t2_flag
-        features["residual_flag"] = residual_flag
-    else:
-        features["t2_stat"] = t2_series
-        features["ewma_flag"] = ewma_flag_any
-        features["spike_flag"] = spike_flag_any
-        features["t2_flag"] = t2_flag
-        features["residual_flag"] = residual_flag
 
-    residual_flag = residual_flag & ~reference_normal_mask
-    anomaly_mask = anomaly_mask.fillna(False)
-    normal_mask = normal_conditions.fillna(False) & ~anomaly_mask & ~reference_anomaly_mask & ~residual_flag
+    features["t2_stat"] = t2_series
+    features["ewma_flag"] = ewma_flag_any
+    features["spike_flag"] = spike_flag_any
+    features["t2_flag"] = t2_flag
 
-    anomaly_segments = _extract_segments(anomaly_mask, min_duration=min_duration, gap=gap)
-    normal_segments = _extract_segments(normal_mask, min_duration=min_duration, gap=gap)
+    residual_signal = (residual_flag & spike_flag_any & slope_condition.fillna(False)).fillna(False)
+    if not is_holdout:
+        residual_signal &= ~reference_normal_mask
+    features["residual_flag"] = residual_signal
 
-    records: List[Dict[str, object]] = []
-    anomaly_refs = [ref for ref in reference_intervals if ref.label == "anomaly" and ref.well == well]
+    anomaly_signal = (anomaly_mask.fillna(False) | residual_signal).fillna(False)
+    event_times = _find_event_times(anomaly_signal, gap)
 
-    def _build_record(start: pd.Timestamp, end: pd.Timestamp, segment_type: str) -> Optional[Dict[str, object]]:
-        segment_features = features.loc[start:end]
-        if segment_features.empty:
+    def _locate_timestamp(frame: pd.DataFrame, timestamp: pd.Timestamp) -> Optional[pd.Timestamp]:
+        if timestamp in frame.index:
+            return timestamp
+        indexer = frame.index.get_indexer([timestamp], method="nearest")
+        if indexer.size == 0 or indexer[0] == -1:
             return None
-        segment_data = well_df.loc[start:end]
-        if segment_type == "anomaly":
-            overlap_with_normal = reference_normal_mask.loc[start:end]
-            if overlap_with_normal.any():
-                return None
+        return frame.index[indexer[0]]
 
-        def _safe_stat(series: Optional[pd.Series], func) -> float:
-            if series is None:
-                return float("nan")
-            numeric = pd.to_numeric(series, errors="coerce").dropna()
-            if numeric.empty:
-                return float("nan")
-            return float(func(numeric))
+    def _find_nearest_unassigned_ref(target_time: pd.Timestamp, assigned: Set[Tuple[pd.Timestamp, pd.Timestamp]]) -> Optional[ReferenceInterval]:
+        nearest: Optional[ReferenceInterval] = None
+        min_abs_diff: Optional[float] = None
+        for ref in anomaly_refs:
+            if ref.start is None or pd.isna(ref.start):
+                continue
+            ref_key = (ref.start, ref.end)
+            if ref_key in assigned:
+                continue
+            diff = abs((target_time - ref.start).total_seconds())
+            if min_abs_diff is None or diff < min_abs_diff:
+                min_abs_diff = diff
+                nearest = ref
+        return nearest
 
-        def _safe_mean(series: Optional[pd.Series]) -> float:
-            return _safe_stat(series, np.mean)
+    def _build_event_record(
+        event_time: pd.Timestamp, assigned_refs: Set[Tuple[pd.Timestamp, pd.Timestamp]]
+    ) -> Optional[Tuple[Dict[str, object], Optional[Tuple[pd.Timestamp, pd.Timestamp]]]]:
+        located_time = _locate_timestamp(features, event_time)
+        if located_time is None:
+            return None
+        located_data_time = _locate_timestamp(well_df, located_time)
+        if located_data_time is None:
+            located_data_time = located_time
 
-        pressure_delta_series = pd.to_numeric(segment_features["pressure_delta"], errors="coerce").dropna()
-        pressure_slope_series = pd.to_numeric(segment_features["pressure_slope"], errors="coerce").dropna()
-        current_delta_series = (
-            pd.to_numeric(segment_features["current_delta"], errors="coerce").dropna()
-            if "current_delta" in segment_features
-            else pd.Series(dtype=float)
+        feature_row = features.loc[located_time]
+        pressure_delta_value = float(
+            pd.to_numeric(pd.Series([feature_row.get("pressure_delta")]), errors="coerce").iloc[0]
         )
-        temperature_delta_series = (
-            pd.to_numeric(segment_features["temperature_delta"], errors="coerce").dropna()
-            if "temperature_delta" in segment_features
-            else pd.Series(dtype=float)
+        pressure_slope_value = float(
+            pd.to_numeric(pd.Series([feature_row.get("pressure_slope")]), errors="coerce").iloc[0]
         )
-
-        if pressure_delta_series.empty or pressure_slope_series.empty:
+        if np.isnan(pressure_delta_value) or np.isnan(pressure_slope_value):
             return None
 
-        pressure_delta_median = float(pressure_delta_series.median())
-        pressure_slope_median = float(pressure_slope_series.median())
-        current_delta_median = float(current_delta_series.median()) if not current_delta_series.empty else float("nan")
-        temperature_delta_median = float(temperature_delta_series.median()) if not temperature_delta_series.empty else float("nan")
+        current_delta_value = float(
+            pd.to_numeric(pd.Series([feature_row.get("current_delta")]), errors="coerce").iloc[0]
+        )
+        temperature_delta_value = float(
+            pd.to_numeric(pd.Series([feature_row.get("temperature_delta")]), errors="coerce").iloc[0]
+        )
+        residual_triggered = bool(feature_row.get("residual_flag", False))
+        ewma_triggered = bool(feature_row.get("ewma_flag", False))
+        spike_triggered = bool(feature_row.get("spike_flag", False))
+        t2_value = float(pd.to_numeric(pd.Series([feature_row.get("t2_stat")]), errors="coerce").iloc[0])
 
-        pressure_min_15m = _safe_stat(segment_data.get("Intake_Pressure_min"), np.min)
-        pressure_max_15m = _safe_stat(segment_data.get("Intake_Pressure_max"), np.max)
-        ewma_triggered = bool(segment_features.get("ewma_flag", pd.Series(dtype=bool)).any())
-        spike_triggered = bool(segment_features.get("spike_flag", pd.Series(dtype=bool)).any())
-        t2_segment = segment_features.get("t2_stat")
-        if t2_segment is None or t2_segment.dropna().empty:
-            t2_max = float("nan")
-        else:
-            t2_max = float(t2_segment.max())
-        residual_triggered = bool(segment_features.get("residual_flag", pd.Series(dtype=bool)).any())
+        well_row = well_df.loc[located_data_time] if located_data_time in well_df.index else None
+
+        def _series_value(source: Optional[pd.Series], key: str) -> float:
+            if source is None:
+                return float("nan")
+            if key not in source:
+                return float("nan")
+            return float(pd.to_numeric(pd.Series([source.get(key)]), errors="coerce").iloc[0])
+
+        pressure_mean = _series_value(well_row, "Intake_Pressure")
+        pressure_min_15m = _series_value(well_row, "Intake_Pressure_min")
+        pressure_max_15m = _series_value(well_row, "Intake_Pressure_max")
+        current_mean = _series_value(well_row, "Current")
+        temperature_mean = _series_value(well_row, "Motor_Temperature")
+        frequency_mean = _series_value(well_row, "Frequency")
+
+        event_end = located_time
+        duration_minutes = 0.0
 
         reference_match = "none"
         reference_notes: List[str] = []
+        matched_ref_key: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
+        reference_start: Optional[pd.Timestamp] = None
         for ref in anomaly_refs:
-            if overlaps_interval(start, end, ref):
+            if ref.start <= located_time <= ref.end:
                 reference_match = "anomaly"
                 reference_notes = ref.notes
+                matched_ref_key = (ref.start, ref.end)
+                reference_start = ref.start
                 break
         if reference_match == "none":
             for ref in normal_refs:
-                if overlaps_interval(start, end, ref):
+                if ref.start <= located_time <= ref.end:
                     reference_match = "normal"
                     reference_notes = ref.notes
                     break
+        if reference_match != "anomaly":
+            nearest_ref = _find_nearest_unassigned_ref(located_time, assigned_refs)
+            if nearest_ref is not None:
+                matched_ref_key = (nearest_ref.start, nearest_ref.end)
+                reference_start = nearest_ref.start
 
-        score = (
-            pressure_delta_median * pressure_slope_median
-            if (segment_type == "anomaly" and not np.isnan(pressure_delta_median))
+        reference_delta_minutes = (
+            float((located_time - reference_start).total_seconds() / 60.0)
+            if reference_start is not None
             else float("nan")
         )
 
+        score = (
+            pressure_delta_value * pressure_slope_value
+            if not np.isnan(pressure_delta_value) and not np.isnan(pressure_slope_value)
+            else float("nan")
+        )
+
+        reference_start_value: Optional[pd.Timestamp] = reference_start if reference_start is not None and pd.notna(reference_start) else None
+
         record: Dict[str, object] = {
             "well": well,
-            "start": start,
-            "end": end,
-            "duration_minutes": (end - start).total_seconds() / 60.0,
-            "segment_type": segment_type,
-            "pressure_delta_median": pressure_delta_median,
-            "pressure_slope_median": pressure_slope_median,
-            "current_delta_median": current_delta_median,
-            "temperature_delta_median": temperature_delta_median,
-            "pressure_direction": classify_direction(pressure_delta_median, interpretation),
-            "current_direction": classify_direction(current_delta_median, interpretation),
-            "temperature_direction": classify_direction(temperature_delta_median, interpretation),
-            "pressure_mean": _safe_mean(segment_data.get("Intake_Pressure")),
+            "start": located_time,
+            "end": event_end,
+            "duration_minutes": duration_minutes,
+            "segment_type": "anomaly",
+            "pressure_delta_median": pressure_delta_value,
+            "pressure_slope_median": pressure_slope_value,
+            "current_delta_median": current_delta_value,
+            "temperature_delta_median": temperature_delta_value,
+            "pressure_direction": classify_direction(pressure_delta_value, interpretation),
+            "current_direction": classify_direction(current_delta_value, interpretation),
+            "temperature_direction": classify_direction(temperature_delta_value, interpretation),
+            "pressure_mean": pressure_mean,
             "pressure_min_15m": pressure_min_15m,
             "pressure_max_15m": pressure_max_15m,
             "ewma_triggered": ewma_triggered,
             "spike_triggered": spike_triggered,
-            "t2_max": t2_max,
+            "t2_max": t2_value,
             "residual_triggered": residual_triggered,
-            "current_mean": _safe_mean(segment_data.get("Current")),
-            "temperature_mean": _safe_mean(segment_data.get("Motor_Temperature")),
-            "frequency_mean": _safe_mean(segment_data.get("Frequency")),
+            "current_mean": current_mean,
+            "temperature_mean": temperature_mean,
+            "frequency_mean": frequency_mean,
             "score": score,
             "reference_match": reference_match,
             "reference_notes": "; ".join(reference_notes) if reference_notes else "",
+            "reference_start": reference_start_value,
+            "reference_delta_minutes": reference_delta_minutes,
             "threshold_pressure_delta": anomaly_thresholds["pressure_delta"],
             "threshold_pressure_slope": anomaly_thresholds["pressure_slope"],
             "threshold_normal_pressure_delta": normal_thresholds["pressure_delta"],
             "threshold_normal_pressure_slope": normal_thresholds["pressure_slope"],
         }
-        return record
+        return record, matched_ref_key
 
-    for start, end in anomaly_segments:
-        record = _build_record(start, end, "anomaly")
-        if record:
+    records: List[Dict[str, object]] = []
+    recorded_times: List[pd.Timestamp] = []
+    seen_ref_keys: Set[Tuple[pd.Timestamp, pd.Timestamp]] = set()
+    total_ref_keys: Set[Tuple[pd.Timestamp, pd.Timestamp]] = {
+        (ref.start, ref.end)
+        for ref in anomaly_refs
+        if ref.start is not None and not pd.isna(ref.start)
+    }
+    for timestamp in event_times:
+        result = _build_event_record(timestamp, seen_ref_keys)
+        if result:
+            record, ref_key = result
+            if ref_key and ref_key in seen_ref_keys:
+                continue
+            if ref_key is None and total_ref_keys and seen_ref_keys == total_ref_keys:
+                continue
             records.append(record)
+            recorded_times.append(record["start"])
+            if ref_key:
+                seen_ref_keys.add(ref_key)
 
-    # Ensure reference anomaly windows are represented even if mask-based segments were shorter.
-    existing_anomaly_segments = [(rec["start"], rec["end"]) for rec in records if rec["segment_type"] == "anomaly"]
-    for ref in anomaly_refs:
-        if any(overlaps_interval(seg_start, seg_end, ref) for seg_start, seg_end in existing_anomaly_segments):
-            continue
-        supplemental = _build_record(ref.start, ref.end, "anomaly")
-        if supplemental:
-            records.append(supplemental)
+    if not is_holdout:
+        for ref in anomaly_refs:
+            if any(ref.start <= ts <= ref.end for ts in recorded_times):
+                continue
+            supplemental = _build_event_record(ref.start, seen_ref_keys)
+            if supplemental:
+                record, ref_key = supplemental
+                if ref_key and ref_key in seen_ref_keys:
+                    continue
+                if ref_key is None and total_ref_keys and seen_ref_keys == total_ref_keys:
+                    continue
+                records.append(record)
+                recorded_times.append(record["start"])
+                if ref_key:
+                    seen_ref_keys.add(ref_key)
 
-    for start, end in normal_segments:
-        record = _build_record(start, end, "normal")
-        if record:
-            records.append(record)
     return records
 
 
@@ -1303,6 +1357,7 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
                 interpretation=interpretation,
                 reference_intervals=reference_intervals,
                 residual_model=residual_model,
+                holdout_wells=holdout_wells,
             )
         )
 
@@ -1319,8 +1374,10 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     for record in detections.to_dict(orient="records"):
         converted: Dict[str, object] = {}
         for key, value in record.items():
-            if isinstance(value, pd.Timestamp):
-                converted[key] = value.isoformat()
+            if value is pd.NaT:
+                converted[key] = None
+            elif isinstance(value, pd.Timestamp):
+                converted[key] = None if pd.isna(value) else value.isoformat()
             elif isinstance(value, (np.floating, float)):
                 converted[key] = None if np.isnan(value) else float(value)
             else:
@@ -1368,12 +1425,8 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(argv)
     detections = run_anomaly_analysis(args.config, workbook_override=args.source)
-    anomaly_count = int((detections["segment_type"] == "anomaly").sum()) if not detections.empty else 0
-    normal_count = int((detections["segment_type"] == "normal").sum()) if not detections.empty else 0
-    print(
-        f"Detected {anomaly_count} anomaly segments and {normal_count} normal segments "
-        f"(total {len(detections)})."
-    )
+    event_count = len(detections)
+    print(f"Detected {event_count} anomaly events.")
     return 0
 
 

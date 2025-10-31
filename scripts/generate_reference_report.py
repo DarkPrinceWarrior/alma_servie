@@ -148,19 +148,18 @@ def load_reference_anomalies(
     return anomaly_mapping, normal_mapping, raw_well_series
 
 
-def load_detected_anomalies(detections_path: Path, wells: List[str]) -> Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]]:
+def load_detected_anomalies(detections_path: Path, wells: List[str]) -> Dict[str, List[pd.Timestamp]]:
     detections_df = pd.read_parquet(detections_path)
     detections_df["well"] = detections_df["well"].astype(str)
     detections_df = detections_df[detections_df["segment_type"] == "anomaly"]
 
-    mapping: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {well: [] for well in wells}
+    mapping: Dict[str, List[pd.Timestamp]] = {well: [] for well in wells}
     for _, row in detections_df.iterrows():
         well = row["well"]
         if well not in mapping:
             continue
         start = pd.to_datetime(row["start"])
-        end = pd.to_datetime(row["end"])
-        mapping[well].append((start, end))
+        mapping[well].append(start)
     return mapping
 
 
@@ -173,7 +172,7 @@ def build_well_figure(
     well_series: Dict[str, pd.Series],
     reference_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
     normal_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
-    detected_windows: List[Tuple[pd.Timestamp, pd.Timestamp]],
+    detected_events: List[pd.Timestamp],
 ) -> go.Figure | None:
     if not well_series:
         return None
@@ -332,49 +331,21 @@ def build_well_figure(
             col=1,
         )
 
-    for window_idx, (start, end) in enumerate(detected_windows):
-        fig.add_vrect(
-            x0=start,
-            x1=end,
-            fillcolor="#ff5733",
-            opacity=0.2,
-            line_width=0,
-            row="all",
-            col=1,
-        )
-        det_offset = (window_idx % 3) * 0.05
-        fig.add_vline(x=start, line=dict(color="#ff5733", dash="dot", width=1))
+    for event_idx, event_time in enumerate(detected_events):
+        det_offset = (event_idx % 3) * 0.05
+        fig.add_vline(x=event_time, line=dict(color="#ff5733", dash="dot", width=1))
         fig.add_annotation(
-            x=start,
+            x=event_time,
             y=_y_pos(0.25 + det_offset),
             xref="x",
             yref=yref_value,
-            text=f"Детектор: старт<br>{start:%d.%m %H:%M}",
+            text=f"Детектор: старт<br>{event_time:%d.%m %H:%M}",
             showarrow=True,
             arrowhead=1,
             arrowsize=1,
             arrowwidth=1,
             arrowcolor="#ff5733",
             ax=-80,
-            ay=0,
-            font=dict(size=9, color="#ff5733"),
-            bgcolor="rgba(255, 87, 51, 0.15)",
-            bordercolor="#ff5733",
-            borderwidth=0.5,
-        )
-        fig.add_vline(x=end, line=dict(color="#ff5733", dash="dot", width=1))
-        fig.add_annotation(
-            x=end,
-            y=_y_pos(0.3 + det_offset),
-            xref="x",
-            yref=yref_value,
-            text=f"Детектор: стоп<br>{end:%d.%m %H:%M}",
-            showarrow=True,
-            arrowhead=1,
-            arrowsize=1,
-            arrowwidth=1,
-            arrowcolor="#ff5733",
-            ax=80,
             ay=0,
             font=dict(size=9, color="#ff5733"),
             bgcolor="rgba(255, 87, 51, 0.15)",
@@ -456,7 +427,7 @@ def main(argv: Iterable[str] | None = None) -> int:
             well_series=signals,
             reference_windows=reference_mapping.get(well, []),
             normal_windows=normal_mapping.get(well, []),
-            detected_windows=detection_mapping.get(well, []),
+            detected_events=detection_mapping.get(well, []),
         )
         if fig is not None:
             figures.append(fig)
