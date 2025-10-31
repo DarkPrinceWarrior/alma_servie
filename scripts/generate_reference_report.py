@@ -237,6 +237,18 @@ def render_stepwise_section(results: Sequence[StepwiseResult]) -> str:
         "<h2>Пошаговая проверка holdout-скважин</h2>"
         "<p>Для скважин из holdout-набора данные подавались пошагово с шагом базовой частоты. "
         "Фиксируется момент первой сработки детектора и отставание от референсного интервала.</p>"
+        "<p><strong>Пояснения к колонкам:</strong><br>"
+        "• <em>Точек рассмотрено</em> — количество временных точек, обработанных алгоритмом до момента первого срабатывания детектора.<br>"
+        "• <em>Активные признаки</em> — параметры, вызвавшие срабатывание: "
+        "ΔP (относительное изменение давления), "
+        "slope (скорость роста давления), "
+        "ΔI (относительное изменение тока), "
+        "ΔT (относительное изменение температуры), "
+        "residual (остаточная аномалия по T²), "
+        "ewma (EWMA-аномалия), "
+        "spike (резкий выброс), "
+        "lag (задержка уведомления, мин)."
+        "</p>"
         "<table border='1' cellpadding='6' cellspacing='0'>"
         "<thead>"
         "<tr>"
@@ -371,7 +383,9 @@ def build_well_figure(
         )
 
     for window_idx, (start, end) in enumerate(normal_windows):
-        base_offset = 0.18 + (window_idx % 3) * 0.06
+        base_offset = 0.18 + (window_idx % 5) * 0.04
+        start_side = -70 if window_idx % 2 == 0 else -90
+        end_side = 70 if window_idx % 2 == 0 else 90
         fig.add_vline(x=start, line=dict(color="#2ecc71", dash="dot", width=1))
         fig.add_annotation(
             x=start,
@@ -384,8 +398,8 @@ def build_well_figure(
             arrowsize=1,
             arrowwidth=1,
             arrowcolor="#2ecc71",
-            ax=-80,
-            ay=0,
+            ax=start_side,
+            ay=int(-15 * (window_idx % 3)),
             font=dict(size=8, color="#1f7a3a"),
             bgcolor="rgba(46, 204, 113, 0.15)",
             bordercolor="#1f7a3a",
@@ -394,7 +408,7 @@ def build_well_figure(
         fig.add_vline(x=end, line=dict(color="#2ecc71", dash="dot", width=1))
         fig.add_annotation(
             x=end,
-            y=_y_pos(base_offset + 0.02),
+            y=_y_pos(base_offset + 0.01),
             xref="x",
             yref=yref_value,
             text=f"Конец нормы<br>{end:%d.%m %H:%M}",
@@ -403,8 +417,8 @@ def build_well_figure(
             arrowsize=1,
             arrowwidth=1,
             arrowcolor="#2ecc71",
-            ax=80,
-            ay=0,
+            ax=end_side,
+            ay=int(-15 * (window_idx % 3)),
             font=dict(size=8, color="#1f7a3a"),
             bgcolor="rgba(46, 204, 113, 0.15)",
             bordercolor="#1f7a3a",
@@ -473,9 +487,16 @@ def build_well_figure(
     fig.update_layout(
         height=300 * rows,
         width=1200,
-        title=f"Скважина {well}: сравнение аномалий",
+        title=dict(
+            text=f"Скважина {well}: сравнение аномалий",
+            x=0.5,
+            xanchor="center",
+            y=0.98,
+            yanchor="top",
+        ),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(t=100),
     )
 
     fig.update_xaxes(title_text="Дата/время", row=rows, col=1)
@@ -518,7 +539,10 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     ensure_output_dir(args.output)
 
-    figures: List[go.Figure] = []
+    holdout_wells_set = set(context.holdout_wells)
+    holdout_figures: List[Tuple[str, go.Figure]] = []
+    training_figures: List[Tuple[str, go.Figure]] = []
+    
     for well in wells:
         signals = well_data.get(well)
         if not signals:
@@ -531,20 +555,38 @@ def main(argv: Iterable[str] | None = None) -> int:
             detected_events=detection_mapping.get(well, []),
         )
         if fig is not None:
-            figures.append(fig)
+            if well in holdout_wells_set:
+                holdout_figures.append((well, fig))
+            else:
+                training_figures.append((well, fig))
 
-    if not figures:
+    if not holdout_figures and not training_figures:
         raise ValueError("Не удалось построить ни одного графика — проверьте входные данные.")
 
     html_sections: List[str] = []
     stepwise_section = render_stepwise_section(stepwise_results)
     if stepwise_section:
         html_sections.append(stepwise_section)
-    for idx, fig in enumerate(figures):
-        include_js = "cdn" if idx == 0 else False
-        html_sections.append(
-            pio.to_html(fig, include_plotlyjs=include_js, full_html=False, auto_play=False)
-        )
+    
+    plotly_js_loaded = False
+    
+    if holdout_figures:
+        html_sections.append("<section><h2>Тестовые скважины (holdout)</h2></section>")
+        for well, fig in sorted(holdout_figures, key=lambda x: x[0]):
+            include_js = "cdn" if not plotly_js_loaded else False
+            plotly_js_loaded = True
+            html_sections.append(
+                pio.to_html(fig, include_plotlyjs=include_js, full_html=False, auto_play=False)
+            )
+    
+    if training_figures:
+        html_sections.append("<section><h2>Тренировочные скважины</h2></section>")
+        for well, fig in sorted(training_figures, key=lambda x: x[0]):
+            include_js = "cdn" if not plotly_js_loaded else False
+            plotly_js_loaded = True
+            html_sections.append(
+                pio.to_html(fig, include_plotlyjs=include_js, full_html=False, auto_play=False)
+            )
 
     html_content = "<html><head><meta charset='utf-8'></head><body>" + "<hr>".join(html_sections) + "</body></html>"
     ensure_output_dir(args.output)
