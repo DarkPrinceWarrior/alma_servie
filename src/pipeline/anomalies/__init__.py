@@ -46,6 +46,7 @@ from .preprocessing import (
     preprocess_well_data,
 )
 from .settings import load_detection_settings, load_residual_settings
+from .simulation import DetectionContext, StepwiseResult, run_stepwise_evaluation
 
 
 def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> pd.DataFrame:
@@ -298,6 +299,8 @@ __all__ = [
     "ResidualDetectionModel",
     "ResidualDetectionSettings",
     "WellTimeseries",
+    "DetectionContext",
+    "StepwiseResult",
     "aggregate_feature_values",
     "build_frequency_baseline",
     "build_residual_detection_model",
@@ -315,5 +318,6 @@ __all__ = [
     "parse_reference_intervals",
     "preprocess_well_data",
     "run_anomaly_analysis",
+    "run_stepwise_evaluation",
     "main",
 ]

@@ -16,6 +16,8 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from pipeline.anomalies import (
+    StepwiseResult,
+    run_stepwise_evaluation,
     load_svod_sheet,
     load_well_series,
     parse_reference_intervals,
@@ -29,6 +31,8 @@ METRICS_TO_PLOT = [
     ("Motor_Temperature", "Температура масла ПЭД"),
     ("Frequency", "Частота"),
 ]
+
+STEPWISE_WELLS = ["1128г", "4651"]
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -165,6 +169,86 @@ def load_detected_anomalies(detections_path: Path, wells: List[str]) -> Dict[str
 
 def ensure_output_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _format_timestamp(ts: Optional[pd.Timestamp]) -> str:
+    if ts is None or pd.isna(ts):
+        return "—"
+    return ts.strftime("%d.%m.%Y %H:%M")
+
+
+def _format_number(value: Optional[float], precision: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{value:.{precision}f}"
+
+
+def _describe_triggers(result: StepwiseResult) -> str:
+    if not result.triggers:
+        return "—"
+    parts: List[str] = []
+    delta = result.triggers.get("pressure_delta")
+    if delta is not None and not pd.isna(delta):
+        parts.append(f"ΔP={delta:.3f}")
+    slope = result.triggers.get("pressure_slope")
+    if slope is not None and not pd.isna(slope):
+        parts.append(f"slope={slope:.3f}")
+    current_delta = result.triggers.get("current_delta")
+    if current_delta is not None and not pd.isna(current_delta):
+        parts.append(f"ΔI={current_delta:.3f}")
+    temp_delta = result.triggers.get("temperature_delta")
+    if temp_delta is not None and not pd.isna(temp_delta):
+        parts.append(f"ΔT={temp_delta:.3f}")
+    for key in ("residual", "ewma", "spike"):
+        if result.triggers.get(key):
+            parts.append(key)
+    lag = result.triggers.get("notification_lag_minutes")
+    if lag is not None and not pd.isna(lag):
+        parts.append(f"lag={lag:.1f} мин")
+    return ", ".join(parts) if parts else "—"
+
+
+def render_stepwise_section(results: Dict[str, StepwiseResult]) -> str:
+    if not results:
+        return ""
+
+    rows: List[str] = []
+    for well in sorted(results):
+        res = results[well]
+        rows.append(
+            "<tr>"
+            f"<td>{well}</td>"
+            f"<td>{_format_timestamp(res.reference_start)}</td>"
+            f"<td>{_format_timestamp(res.detection_start)}</td>"
+            f"<td>{_format_timestamp(res.notification_time)}</td>"
+            f"<td>{_format_number(res.delay_minutes, precision=1)}</td>"
+            f"<td>{res.evaluated_points}</td>"
+            f"<td>{_describe_triggers(res)}</td>"
+            "</tr>"
+        )
+
+    table = (
+        "<section>"
+        "<h2>Пошаговая проверка holdout-скважин</h2>"
+        "<p>Для скважин из holdout-набора данные подавались пошагово с шагом базовой частоты. "
+        "Фиксируется момент первой сработки детектора и отставание от референсного интервала.</p>"
+        "<table border='1' cellpadding='6' cellspacing='0'>"
+        "<thead>"
+        "<tr>"
+        "<th>Скважина</th>"
+        "<th>Старт референса</th>"
+        "<th>Старт детекции</th>"
+        "<th>Момент уведомления</th>"
+        "<th>Задержка, мин</th>"
+        "<th>Точек рассмотрено</th>"
+        "<th>Активные признаки</th>"
+        "</tr>"
+        "</thead>"
+        "<tbody>"
+        + "".join(rows)
+        + "</tbody></table></section>"
+    )
+    return table
 
 
 def build_well_figure(
@@ -415,6 +499,11 @@ def main(argv: Iterable[str] | None = None) -> int:
     reference_mapping, normal_mapping, well_data = load_reference_anomalies(config, wells, xl)
     detection_mapping = load_detected_anomalies(args.detections, wells)
 
+    stepwise_targets = [well for well in STEPWISE_WELLS if well in wells]
+    stepwise_results = (
+        run_stepwise_evaluation(config, xl, stepwise_targets) if stepwise_targets else {}
+    )
+
     ensure_output_dir(args.output)
 
     figures: List[go.Figure] = []
@@ -436,6 +525,9 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise ValueError("Не удалось построить ни одного графика — проверьте входные данные.")
 
     html_sections: List[str] = []
+    stepwise_section = render_stepwise_section(stepwise_results)
+    if stepwise_section:
+        html_sections.append(stepwise_section)
     for idx, fig in enumerate(figures):
         include_js = "cdn" if idx == 0 else False
         html_sections.append(
