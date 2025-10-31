@@ -7,8 +7,9 @@
   - `models.py` — dataclass-ы и конфигурации;
   - `settings.py` — загрузка параметров из `config/pipeline.yaml`;
   - `preprocessing.py` — чтение рабочей книги и санитация рядов;
-  - `detection.py` — baseline, признаки и логика детекции.
-- Соблюдаем разделение ответственности между подмодулями; новые функции помещаем в соответствующий файл, а не в `__init__.py`.
+  - `detection.py` — baseline, признаки и логика детекции;
+  - `simulation.py` — стриминговая калибровка, построение `DetectionContext` и пошаговые проверки (`run_stepwise_evaluation`).
+- Соблюдаем разделение ответственности между подмодулями; новые функции помещаем в соответствующий файл, а не в `__init__.py`. Для стриминговых сценариев переиспользуем `DetectionContext`/`evaluate_stepwise_for_intervals` вместо копирования логики.
 - `config/pipeline.yaml` хранит пути (`alma`, `reports`) и параметры детектора. Любые правки конфигурации фиксируйте рядом с rollout-заметками.
 - `alma/` — актуальная рабочая книга: лист `svod` плюс отдельные листы по скважинам.
 - `reports/` — итоговые артефакты (`anomaly_analysis.*`, `events_features.*`, `reference_wells_report.html`).
@@ -17,9 +18,9 @@
 ## Build, Test, and Development Commands
 - Создать среду: `python -m venv venv && source venv/bin/activate`.
 - Установить зависимости: `pip install -r requirements.txt`.
-- Пересчитать детектор: `python -m src.pipeline anomalies --config config/pipeline.yaml`.
+- Пересчитать детектор (стриминговые пороги и резюме сохраняются автоматически): `python -m src.pipeline anomalies --config config/pipeline.yaml`.
 - Обновить справочную статистику: `python -m src.pipeline events --config config/pipeline.yaml`.
-- Сформировать интерактивный отчёт по всем скважинам (по умолчанию): `python scripts/generate_reference_report.py --config config/pipeline.yaml`. Ограничить набор можно опцией `--wells 5271г,1123л`.
+- Сформировать интерактивный отчёт (блок по holdout берёт список из `config/pipeline.yaml`): `python scripts/generate_reference_report.py --config config/pipeline.yaml`. Ограничить набор можно опцией `--wells 5271г,1123л`.
 
 ## Coding Style & Naming Conventions
 - Follow PEP 8 (4 spaces), придерживайтесь существующих type hints и коротких docstring’ов.

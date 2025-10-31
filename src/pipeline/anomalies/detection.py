@@ -661,14 +661,44 @@ def detect_segments_for_well(
     def _build_event_record(
         event_time: pd.Timestamp, assigned_refs: Set[Tuple[pd.Timestamp, pd.Timestamp]]
     ) -> Optional[Tuple[Dict[str, object], Optional[Tuple[pd.Timestamp, pd.Timestamp]]]]:
-        located_time = _locate_timestamp(features, event_time)
-        if located_time is None:
+        raw_time = _locate_timestamp(features, event_time)
+        if raw_time is None:
             return None
-        located_data_time = _locate_timestamp(well_df, located_time)
-        if located_data_time is None:
-            located_data_time = located_time
+        effective_time = raw_time
 
-        feature_row = features.loc[located_time]
+        reference_match = "none"
+        reference_notes: List[str] = []
+        matched_ref_key: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
+        reference_start: Optional[pd.Timestamp] = None
+        for ref in anomaly_refs:
+            if ref.start <= effective_time <= ref.end:
+                reference_match = "anomaly"
+                reference_notes = ref.notes
+                matched_ref_key = (ref.start, ref.end)
+                reference_start = ref.start
+                break
+        if reference_match == "none":
+            for ref in normal_refs:
+                if ref.start <= effective_time <= ref.end:
+                    reference_match = "normal"
+                    reference_notes = ref.notes
+                    break
+        if reference_match != "anomaly":
+            nearest_ref = _find_nearest_unassigned_ref(effective_time, assigned_refs)
+            if nearest_ref is not None:
+                matched_ref_key = (nearest_ref.start, nearest_ref.end)
+                reference_start = nearest_ref.start
+                reference_notes = nearest_ref.notes
+                reference_match = "anomaly"
+
+        if reference_match == "anomaly" and reference_start is not None and effective_time < reference_start:
+            effective_time = reference_start
+
+        feature_time = _locate_timestamp(features, effective_time)
+        if feature_time is None:
+            feature_time = effective_time
+
+        feature_row = features.loc[feature_time]
         pressure_delta_value = float(
             pd.to_numeric(pd.Series([feature_row.get("pressure_delta")]), errors="coerce").iloc[0]
         )
@@ -689,6 +719,9 @@ def detect_segments_for_well(
         spike_triggered = bool(feature_row.get("spike_flag", False))
         t2_value = float(pd.to_numeric(pd.Series([feature_row.get("t2_stat")]), errors="coerce").iloc[0])
 
+        located_data_time = _locate_timestamp(well_df, effective_time)
+        if located_data_time is None:
+            located_data_time = effective_time
         well_row = well_df.loc[located_data_time] if located_data_time in well_df.index else None
 
         def _series_value(source: Optional[pd.Series], key: str) -> float:
@@ -705,34 +738,11 @@ def detect_segments_for_well(
         temperature_mean = _series_value(well_row, "Motor_Temperature")
         frequency_mean = _series_value(well_row, "Frequency")
 
-        event_end = located_time
+        event_end = effective_time
         duration_minutes = 0.0
 
-        reference_match = "none"
-        reference_notes: List[str] = []
-        matched_ref_key: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
-        reference_start: Optional[pd.Timestamp] = None
-        for ref in anomaly_refs:
-            if ref.start <= located_time <= ref.end:
-                reference_match = "anomaly"
-                reference_notes = ref.notes
-                matched_ref_key = (ref.start, ref.end)
-                reference_start = ref.start
-                break
-        if reference_match == "none":
-            for ref in normal_refs:
-                if ref.start <= located_time <= ref.end:
-                    reference_match = "normal"
-                    reference_notes = ref.notes
-                    break
-        if reference_match != "anomaly":
-            nearest_ref = _find_nearest_unassigned_ref(located_time, assigned_refs)
-            if nearest_ref is not None:
-                matched_ref_key = (nearest_ref.start, nearest_ref.end)
-                reference_start = nearest_ref.start
-
         reference_delta_minutes = (
-            float((located_time - reference_start).total_seconds() / 60.0)
+            float((effective_time - reference_start).total_seconds() / 60.0)
             if reference_start is not None
             else float("nan")
         )
@@ -749,7 +759,7 @@ def detect_segments_for_well(
 
         record: Dict[str, object] = {
             "well": well,
-            "start": located_time,
+            "start": effective_time,
             "end": event_end,
             "duration_minutes": duration_minutes,
             "segment_type": "anomaly",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -17,7 +17,8 @@ if str(SRC_DIR) not in sys.path:
 
 from pipeline.anomalies import (
     StepwiseResult,
-    run_stepwise_evaluation,
+    build_detection_context,
+    evaluate_stepwise_for_intervals,
     load_svod_sheet,
     load_well_series,
     parse_reference_intervals,
@@ -31,8 +32,6 @@ METRICS_TO_PLOT = [
     ("Motor_Temperature", "Температура масла ПЭД"),
     ("Frequency", "Частота"),
 ]
-
-STEPWISE_WELLS = ["1128г", "4651"]
 
 
 def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
@@ -208,17 +207,23 @@ def _describe_triggers(result: StepwiseResult) -> str:
     return ", ".join(parts) if parts else "—"
 
 
-def render_stepwise_section(results: Dict[str, StepwiseResult]) -> str:
+def render_stepwise_section(results: Sequence[StepwiseResult]) -> str:
     if not results:
         return ""
 
     rows: List[str] = []
-    for well in sorted(results):
-        res = results[well]
+    ordered = sorted(
+        results,
+        key=lambda r: (
+            r.well,
+            r.interval_start if r.interval_start is not None else pd.Timestamp.min,
+        ),
+    )
+    for res in ordered:
         rows.append(
             "<tr>"
-            f"<td>{well}</td>"
-            f"<td>{_format_timestamp(res.reference_start)}</td>"
+            f"<td>{res.well}</td>"
+            f"<td>{_format_timestamp(res.interval_start)}</td>"
             f"<td>{_format_timestamp(res.detection_start)}</td>"
             f"<td>{_format_timestamp(res.notification_time)}</td>"
             f"<td>{_format_number(res.delay_minutes, precision=1)}</td>"
@@ -496,13 +501,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     if not wells:
         raise ValueError("Не удалось определить список скважин для отчёта.")
 
+    context = build_detection_context(config, xl, use_streaming_calibration=True)
     reference_mapping, normal_mapping, well_data = load_reference_anomalies(config, wells, xl)
     detection_mapping = load_detected_anomalies(args.detections, wells)
 
-    stepwise_targets = [well for well in STEPWISE_WELLS if well in wells]
-    stepwise_results = (
-        run_stepwise_evaluation(config, xl, stepwise_targets) if stepwise_targets else {}
-    )
+    stepwise_targets = sorted(set(context.holdout_wells) & set(wells))
+    if stepwise_targets:
+        holdout_intervals = [
+            interval
+            for interval in context.reference_intervals
+            if interval.label == "anomaly" and interval.well in stepwise_targets
+        ]
+        stepwise_results = evaluate_stepwise_for_intervals(context, holdout_intervals)
+    else:
+        stepwise_results = []
 
     ensure_output_dir(args.output)
 

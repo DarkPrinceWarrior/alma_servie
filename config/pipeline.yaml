@@ -8,7 +8,7 @@ anomalies:
   normal_cause: "Нормальная работа при изменении частоты"
   holdout_wells:
     - "1128г"
-    - "4651"
+    - "5271г"
   detection:
     window_minutes: 30
     shift_minutes: 15
