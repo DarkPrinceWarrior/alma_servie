@@ -17,7 +17,11 @@
 
 ### Структура входных данных
 
-Система работает с Excel-файлом `alma/Общая_таблица.xlsx`, содержащим:
+По умолчанию система читает рабочую книгу Excel `alma/Общая_таблица.xlsx`, однако те же данные можно
+передать через HTTP API (см. раздел «Конфигурация», ключ `anomalies.input`). Клиенту достаточно вернуть
+JSON с наборами строк для листа `svod` и листов по скважинам — пайплайн преобразует его во внутренний формат.
+
+Схема Excel-книги (и ожидаемый API-пейлоад) включает:
 
 **1. Лист `svod` (сводная таблица экспертной разметки):**
 - `Скв` — номер скважины
@@ -40,6 +44,23 @@
 | `Frequency` | Частота ПЧ (частотного преобразователя), Гц | 15 минут | `timestamp_Frequency`, `Frequency` |
 
 **Важно:** У каждого параметра свой столбец `timestamp_*`, так как данные могут приходить с разной частотой и иметь разные пропуски.
+
+**Формат API-ответа (минимальный пример):**
+
+```json
+{
+  "svod": [
+    {"Скв": "1128г", "ПричОст": "Негерметичность НКТ", "Время возникновения аномалии": "2024-05-01T03:00:00"}
+  ],
+  "1128г": [
+    {"timestamp_Intake_Pressure": "2024-05-01T00:00:00", "Intake_Pressure": 35.1},
+    {"timestamp_Intake_Pressure": "2024-05-01T00:15:00", "Intake_Pressure": 35.6}
+  ]
+}
+```
+
+Также поддерживается структура вида `{"sheets": [{"name": "svod", "records": [...]}, ...]}`. Если формат отличается, параметры
+`sheets_key`, `name_key`, `records_key` и `payload_path` в `anomalies.input.api` позволяют указать нужные ключи.
 
 ### Обработка данных
 
@@ -394,7 +415,8 @@ alma_servie/
 │   │   ├── __init__.py         # Публичный API, CLI, оркестрация
 │   │   ├── models.py           # Dataclass-структуры данных
 │   │   ├── settings.py         # Загрузка настроек из конфига
-│   │   ├── preprocessing.py    # Hampel-фильтр, forward-fill, загрузка Excel
+│   │   ├── workbook.py         # Адаптер источников данных (Excel/API)
+│   │   ├── preprocessing.py    # Hampel-фильтр, forward-fill, загрузка рабочей книги
 │   │   ├── detection.py        # Baseline, признаки, пороги, детекция сегментов
 │   │   └── simulation.py       # Стриминговая калибровка, пошаговая проверка
 │   └── events.py               # Статистики референсных интервалов
@@ -407,7 +429,8 @@ alma_servie/
 Модульная структура (src/pipeline/anomalies/):
 - models.py      — Структуры данных (ReferenceInterval, DetectionSettings, FrequencyBaseline, ResidualDetectionModel)
 - settings.py    — Загрузка конфигурации из YAML в dataclass-ы
-- preprocessing.py — Hampel-фильтр, forward-fill, загрузка Excel, формирование WellTimeseries
+- workbook.py    — Унифицированный доступ к листам рабочей книги (Excel или API)
+- preprocessing.py — Hampel-фильтр, forward-fill, формирование WellTimeseries
 - detection.py   — Частотный baseline, вычисление признаков, пороги, детекция сегментов, остаточная модель
 - simulation.py  — Стриминговая калибровка, пошаговая проверка, DetectionContext
 - __init__.py    — Публичный API, CLI, оркестрация всего пайплайна
@@ -448,6 +471,18 @@ anomalies:
   holdout_wells:  # Скважины для валидации (не используются при обучении)
     - "1128г"
     - "5271г"
+  input:
+    mode: "excel"            # Переключить на "api", чтобы тянуть данные по HTTP
+    api:
+      url: "https://example.com/api/workbook"  # Endpoint, который вернёт JSON с листами
+      method: "GET"
+      headers: {}
+      params: {}
+      timeout: 30
+      sheets_key: "sheets"   # Переопределите, если структура ответа отличается
+      name_key: "name"
+      records_key: "records"
+      payload_path: []       # Список ключей для прохода по вложенным объектам (опционально)
 ```
 
 **Параметры детекции:**

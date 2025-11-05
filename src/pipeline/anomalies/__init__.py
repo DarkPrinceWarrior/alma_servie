@@ -45,7 +45,6 @@ from .preprocessing import (
     parse_reference_intervals,
     preprocess_well_data,
 )
-from .settings import load_detection_settings, load_residual_settings
 from .simulation import (
     DetectionContext,
     StepwiseResult,
@@ -53,16 +52,15 @@ from .simulation import (
     evaluate_stepwise_for_intervals,
     run_stepwise_evaluation,
 )
+from .workbook import resolve_workbook_source
 
 
 def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> pd.DataFrame:
     config = load_config(config_path)
-    workbook_path = workbook_override or Path(config["anomalies"]["source_workbook"])
-    if not workbook_path.exists():
-        raise FileNotFoundError(f"Workbook with well data not found: {workbook_path}")
+    workbook_spec = resolve_workbook_source(config, workbook_override=workbook_override)
+    print(f"Using workbook source: {workbook_spec.description}")
 
-    xl = pd.ExcelFile(workbook_path)
-    context = build_detection_context(config, xl, use_streaming_calibration=True)
+    context = build_detection_context(config, workbook_spec.source, use_streaming_calibration=True)
 
     reports_dir = Path(config["paths"]["reports_dir"]) / "anomalies"
     reports_dir.mkdir(parents=True, exist_ok=True)
@@ -255,4 +253,5 @@ __all__ = [
     "run_anomaly_analysis",
     "run_stepwise_evaluation",
     "main",
+    "resolve_workbook_source",
 ]

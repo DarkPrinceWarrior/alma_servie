@@ -22,7 +22,9 @@ from pipeline.anomalies import (
     load_svod_sheet,
     load_well_series,
     parse_reference_intervals,
+    resolve_workbook_source,
 )
+from pipeline.anomalies.workbook import WorkbookSource
 from pipeline.config import DEFAULT_CONFIG_PATH, load_config
 
 
@@ -60,13 +62,13 @@ def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(list(argv) if argv is not None else None)
 
 
-def load_well_series_subset(xl: pd.ExcelFile, wells: List[str]) -> Dict[str, Dict[str, pd.Series]]:
+def load_well_series_subset(workbook: WorkbookSource, wells: List[str]) -> Dict[str, Dict[str, pd.Series]]:
     data: Dict[str, Dict[str, pd.Series]] = {}
     requested = set(wells)
-    for sheet_name in xl.sheet_names:
+    for sheet_name in workbook.sheet_names:
         if sheet_name == "svod" or sheet_name not in requested:
             continue
-        df = xl.parse(sheet_name)
+        df = workbook.parse(sheet_name)
         metric_frames: Dict[str, pd.Series] = {}
         for column in df.columns:
             if not str(column).startswith("timestamp_"):
@@ -103,7 +105,7 @@ def load_well_series_subset(xl: pd.ExcelFile, wells: List[str]) -> Dict[str, Dic
 def load_reference_anomalies(
     config: Dict,
     wells: List[str],
-    xl: pd.ExcelFile,
+    workbook: WorkbookSource,
 ) -> Tuple[
     Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]],
     Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]],
@@ -111,7 +113,7 @@ def load_reference_anomalies(
 ]:
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
 
-    svod = load_svod_sheet(xl, svod_sheet)
+    svod = load_svod_sheet(workbook, svod_sheet)
     alignment_cfg = config.get("alignment", {})
     base_frequency = alignment_cfg.get("frequency", "15T")
     base_aggregation = alignment_cfg.get("base_aggregation", "mean")
@@ -122,7 +124,7 @@ def load_reference_anomalies(
         pressure_metrics = list(pressure_metrics_cfg)
 
     full_well_series = load_well_series(
-        xl,
+        workbook,
         svod_sheet,
         base_frequency=base_frequency,
         pressure_metrics=pressure_metrics,
@@ -131,7 +133,7 @@ def load_reference_anomalies(
     base_well_data = {
         well: series.base for well, series in full_well_series.items() if series.base is not None and not series.base.empty
     }
-    raw_well_series = load_well_series_subset(xl, wells)
+    raw_well_series = load_well_series_subset(workbook, wells)
     intervals = parse_reference_intervals(
         svod=svod,
         well_data=base_well_data,
@@ -519,22 +521,21 @@ def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     config = load_config(args.config)
 
-    workbook_path = Path(config["anomalies"]["source_workbook"])
-    if not workbook_path.exists():
-        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
-    xl = pd.ExcelFile(workbook_path)
+    workbook_spec = resolve_workbook_source(config)
+    print(f"Using workbook source: {workbook_spec.description}")
+    workbook = workbook_spec.source
 
     if args.wells:
         wells = [w.strip() for w in args.wells.split(",") if w.strip()]
     else:
         svod_sheet = config["anomalies"].get("svod_sheet", "svod")
-        wells = sorted(sheet for sheet in xl.sheet_names if sheet != svod_sheet)
+        wells = sorted(sheet for sheet in workbook.sheet_names if sheet != svod_sheet)
 
     if not wells:
         raise ValueError("Не удалось определить список скважин для отчёта.")
 
-    context = build_detection_context(config, xl, use_streaming_calibration=True)
-    reference_mapping, normal_mapping, well_data = load_reference_anomalies(config, wells, xl)
+    context = build_detection_context(config, workbook, use_streaming_calibration=True)
+    reference_mapping, normal_mapping, well_data = load_reference_anomalies(config, wells, workbook)
     detection_mapping = load_detected_anomalies(args.detections, wells)
 
     stepwise_targets = sorted(set(context.holdout_wells) & set(wells))

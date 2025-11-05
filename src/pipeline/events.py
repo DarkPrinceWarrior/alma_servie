@@ -22,6 +22,7 @@ from .anomalies import (
     parse_reference_intervals,
     build_frequency_baseline,
     preprocess_well_data,
+    resolve_workbook_source,
 )
 from .config import DEFAULT_CONFIG_PATH, load_config
 
@@ -132,9 +133,8 @@ def compute_label_summary(
 
 def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> Dict:
     config = load_config(config_path)
-    workbook_path = workbook_override or Path(config["anomalies"]["source_workbook"])
-    if not workbook_path.exists():
-        raise FileNotFoundError(f"Workbook not found: {workbook_path}")
+    workbook_spec = resolve_workbook_source(config, workbook_override=workbook_override)
+    print(f"Using workbook source: {workbook_spec.description}")
 
     settings, interpretation = load_detection_settings(config)
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
@@ -142,8 +142,8 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
     normal_cause = config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")
     percentiles = config["anomalies"].get("calibration_percentiles", [0.1, 0.5, 0.9])
 
-    xl = pd.ExcelFile(workbook_path)
-    svod = load_svod_sheet(xl, svod_sheet)
+    workbook = workbook_spec.source
+    svod = load_svod_sheet(workbook, svod_sheet)
     alignment_cfg = config.get("alignment", {})
     base_frequency = alignment_cfg.get("frequency", "15T")
     base_aggregation = alignment_cfg.get("base_aggregation", "mean")
@@ -154,7 +154,7 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
         pressure_metrics = list(pressure_metrics_cfg)
 
     well_series_map = load_well_series(
-        xl,
+        workbook,
         svod_sheet,
         base_frequency=base_frequency,
         pressure_metrics=pressure_metrics,

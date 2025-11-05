@@ -9,6 +9,18 @@ anomalies:
   holdout_wells:
     - "1128г"
     - "5271г"
+  input:
+    mode: "excel"  # Переключите на "api", чтобы загружать данные по HTTP
+    api:
+      url: ""  # endpoint, который возвращает JSON с листами рабочей книги
+      method: "GET"
+      headers: {}
+      params: {}
+      timeout: 30
+      sheets_key: "sheets"
+      name_key: "name"
+      records_key: "records"
+      payload_path: []
   detection:
     window_minutes: 30
     shift_minutes: 15

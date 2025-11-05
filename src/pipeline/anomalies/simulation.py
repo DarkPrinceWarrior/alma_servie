@@ -29,6 +29,7 @@ from .preprocessing import (
     preprocess_well_data,
 )
 from .settings import load_detection_settings, load_residual_settings
+from .workbook import WorkbookSource
 
 
 @dataclass
@@ -60,7 +61,7 @@ class StepwiseResult:
 
 def build_detection_context(
     config: Dict,
-    xl: pd.ExcelFile,
+    workbook: WorkbookSource,
     *,
     use_streaming_calibration: bool = False,
 ) -> DetectionContext:
@@ -68,7 +69,7 @@ def build_detection_context(
     holdout_wells = set(config["anomalies"].get("holdout_wells", []) or [])
 
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
-    svod = load_svod_sheet(xl, svod_sheet)
+    svod = load_svod_sheet(workbook, svod_sheet)
 
     alignment_cfg = config.get("alignment", {})
     base_frequency = alignment_cfg.get("frequency", "15T")
@@ -80,7 +81,7 @@ def build_detection_context(
         pressure_metrics = list(pressure_metrics_cfg)
 
     well_series_map: Dict[str, WellTimeseries] = load_well_series(
-        xl,
+        workbook,
         svod_sheet,
         base_frequency=base_frequency,
         pressure_metrics=pressure_metrics,
@@ -337,13 +338,13 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
 
 def run_stepwise_evaluation(
     config: Dict,
-    xl: pd.ExcelFile,
+    workbook: WorkbookSource,
     wells: Sequence[str],
 ) -> List[StepwiseResult]:
     if not wells:
         return []
 
-    context = build_detection_context(config, xl, use_streaming_calibration=True)
+    context = build_detection_context(config, workbook, use_streaming_calibration=True)
     target_intervals = [
         interval
         for interval in context.reference_intervals

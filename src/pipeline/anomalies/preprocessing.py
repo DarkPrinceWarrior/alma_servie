@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 
 from .models import ReferenceInterval, WellTimeseries
+from .workbook import WorkbookSource
 
 
 def _estimate_step_seconds(index: pd.Index) -> float:
@@ -90,8 +91,8 @@ def preprocess_well_data(
     return processed, stats
 
 
-def load_svod_sheet(xl: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
-    svod = xl.parse(sheet_name, header=2)
+def load_svod_sheet(workbook: WorkbookSource, sheet_name: str) -> pd.DataFrame:
+    svod = workbook.parse(sheet_name, header=2)
     svod = svod.copy()
     svod["Скв"] = svod["Скв"].ffill()
     svod["ПричОст"] = svod["ПричОст"].ffill()
@@ -107,7 +108,7 @@ def load_svod_sheet(xl: pd.ExcelFile, sheet_name: str) -> pd.DataFrame:
 
 
 def load_well_series(
-    xl: pd.ExcelFile,
+    workbook: WorkbookSource,
     svod_sheet: str,
     *,
     base_frequency: str = "15T",
@@ -135,10 +136,10 @@ def load_well_series(
     if base_frequency:
         normalized_frequency = _normalize_frequency(base_frequency)
 
-    for sheet_name in xl.sheet_names:
+    for sheet_name in workbook.sheet_names:
         if sheet_name == svod_sheet:
             continue
-        df = xl.parse(sheet_name)
+        df = workbook.parse(sheet_name)
         metric_frames: Dict[str, pd.Series] = {}
         for column in df.columns:
             if not str(column).startswith("timestamp_"):
