@@ -32,17 +32,56 @@ from .settings import load_detection_settings, load_residual_settings
 from .workbook import WorkbookSource
 
 
+def _normalize_label_set(value, default: Optional[Sequence[str]] = None) -> Set[str]:
+    if value is None:
+        value = default or []
+    if isinstance(value, str):
+        labels = [value]
+    else:
+        try:
+            labels = list(value)
+        except TypeError:
+            labels = [value]
+    normalized: Set[str] = set()
+    for item in labels:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.add(text)
+    return normalized
+
+
+def _load_cause_profiles(config: Dict) -> Dict[str, Dict[str, object]]:
+    profiles_cfg = config.get("anomalies", {}).get("cause_profiles", [])
+    profiles: Dict[str, Dict[str, object]] = {}
+    for entry in profiles_cfg or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            continue
+        profiles[name] = {
+            "include_normal": bool(entry.get("include_normal", True)),
+            "group": str(entry.get("group", name)).strip() or name,
+        }
+    return profiles
+
+
 @dataclass
 class DetectionContext:
     settings: DetectionSettings
     interpretation: InterpretationThresholds
     reference_intervals: List[ReferenceInterval]
     holdout_wells: Set[str]
+    well_causes: Dict[str, str]
+    cause_groups: Dict[str, str]
+    default_anomaly_cause: str
     base_well_data: Dict[str, pd.DataFrame]
     pressure_fast_data: Dict[str, pd.DataFrame]
     preprocess_summary: Dict[str, Dict[str, Dict[str, int]]]
     features_map: Dict[str, pd.DataFrame]
-    thresholds: Dict[str, Dict[str, float]]
+    thresholds: Dict[str, Dict[str, Dict[str, float]]]
     residual_model: Optional[ResidualDetectionModel]
     frequency_baseline: Optional[FrequencyBaseline]
 
@@ -67,6 +106,7 @@ def build_detection_context(
 ) -> DetectionContext:
     settings, interpretation = load_detection_settings(config)
     holdout_wells = set(config["anomalies"].get("holdout_wells", []) or [])
+    cause_profiles = _load_cause_profiles(config)
 
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
     svod = load_svod_sheet(workbook, svod_sheet)
@@ -119,17 +159,45 @@ def build_detection_context(
             if stats:
                 preprocess_summary[well] = stats
 
+    anomaly_labels = _normalize_label_set(
+        config["anomalies"].get("anomaly_causes"),
+        default=[config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")],
+    )
+    if not anomaly_labels:
+        anomaly_labels = {"Негерметичность НКТ"}
+    normal_labels = _normalize_label_set(
+        config["anomalies"].get("normal_causes"),
+        default=[config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")],
+    )
+    if not normal_labels:
+        normal_labels = {"Нормальная работа при изменении частоты"}
+
     reference_intervals = parse_reference_intervals(
         svod=svod,
         well_data=base_well_data,
-        anomaly_label=config["anomalies"].get("anomaly_cause", "Негерметичность НКТ"),
-        normal_label=config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты"),
+        anomaly_labels=anomaly_labels,
+        normal_labels=normal_labels,
     )
 
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
-    anomaly_intervals_train = [interval for interval in anomaly_intervals if interval.well not in holdout_wells]
     normal_intervals_full = [interval for interval in reference_intervals if interval.label == "normal"]
+    anomaly_intervals_train = [interval for interval in anomaly_intervals if interval.well not in holdout_wells]
     normal_intervals_train = [interval for interval in normal_intervals_full if interval.well not in holdout_wells]
+    anomalies_by_cause: Dict[str, List[ReferenceInterval]] = {}
+    well_causes: Dict[str, str] = {}
+    for interval in anomaly_intervals:
+        cause = interval.cause
+        if cause:
+            well_causes.setdefault(interval.well, cause)
+            anomalies_by_cause.setdefault(cause, []).append(interval)
+
+    cause_groups = {name: profile.get("group", name) for name, profile in cause_profiles.items()}
+    grouped_intervals: Dict[str, List[ReferenceInterval]] = {}
+    for cause, intervals in anomalies_by_cause.items():
+        group = cause_groups.get(cause, cause)
+        grouped_intervals.setdefault(group, []).extend(intervals)
+
+    default_anomaly_cause = next(iter(grouped_intervals.keys()), next(iter(anomaly_labels), "anomaly"))
 
     frequency_cfg = config["anomalies"].get("frequency_baseline", {})
     baseline: Optional[FrequencyBaseline] = None
@@ -152,58 +220,93 @@ def build_detection_context(
     residual_settings = load_residual_settings(config)
     residual_model = build_residual_detection_model(features_map, normal_intervals_train, residual_settings)
 
-    if not anomaly_intervals_train:
-        anomaly_features = aggregate_feature_values(anomaly_intervals, features_map)
-        training_anomaly_intervals = anomaly_intervals
-    else:
-        anomaly_features = aggregate_feature_values(anomaly_intervals_train, features_map)
-        training_anomaly_intervals = anomaly_intervals_train
+    normal_features_full = aggregate_feature_values(normal_intervals_full, features_map) if normal_intervals_full else {
+        "pressure_delta": pd.Series(dtype=float),
+        "pressure_slope": pd.Series(dtype=float),
+        "current_delta": pd.Series(dtype=float),
+        "temperature_delta": pd.Series(dtype=float),
+    }
+    normal_features_train = (
+        aggregate_feature_values(normal_intervals_train, features_map) if normal_intervals_train else normal_features_full
+    )
 
-    if normal_intervals_train:
-        normal_features_train = aggregate_feature_values(normal_intervals_train, features_map)
-    else:
-        normal_features_train = aggregate_feature_values(normal_intervals_full, features_map)
+    group_causes: Dict[str, Set[str]] = {}
+    for cause in anomalies_by_cause:
+        group = cause_groups.get(cause, cause)
+        group_causes.setdefault(group, set()).add(cause)
 
-    thresholds = derive_thresholds(normal_features_train, anomaly_features, settings)
+    thresholds_by_group: Dict[str, Dict[str, Dict[str, float]]] = {}
+    for group, intervals in grouped_intervals.items():
+        train_intervals = [interval for interval in intervals if interval.well not in holdout_wells] or intervals
+        anomaly_features = aggregate_feature_values(train_intervals, features_map)
+        include_normal = True
+        for cause in group_causes.get(group, set()):
+            include_normal = cause_profiles.get(cause, {}).get("include_normal", include_normal)
+        normal_features_for_cause = normal_features_train if include_normal else {
+            "pressure_delta": pd.Series(dtype=float),
+            "pressure_slope": pd.Series(dtype=float),
+            "current_delta": pd.Series(dtype=float),
+            "temperature_delta": pd.Series(dtype=float),
+        }
+        thresholds_by_group[group] = derive_thresholds(normal_features_for_cause, anomaly_features, settings)
 
     context = DetectionContext(
         settings=settings,
         interpretation=interpretation,
         reference_intervals=reference_intervals,
         holdout_wells=holdout_wells,
+        well_causes=well_causes,
+        cause_groups=cause_groups,
+        default_anomaly_cause=default_anomaly_cause,
         base_well_data=base_well_data,
         pressure_fast_data=pressure_fast_map,
         preprocess_summary=preprocess_summary,
         features_map=features_map,
-        thresholds=thresholds,
+        thresholds=thresholds_by_group,
         residual_model=residual_model,
         frequency_baseline=baseline,
     )
 
     if use_streaming_calibration and anomaly_intervals_train:
-        streaming_results = evaluate_stepwise_for_intervals(context, anomaly_intervals_train)
-        anomaly_delta_values = [
-            result.triggers.get("pressure_delta")
-            for result in streaming_results
-            if result.detection_start is not None
-            and result.triggers
-            and result.triggers.get("pressure_delta") is not None
-            and not pd.isna(result.triggers.get("pressure_delta"))
-        ]
-        anomaly_slope_values = [
-            result.triggers.get("pressure_slope")
-            for result in streaming_results
-            if result.detection_start is not None
-            and result.triggers
-            and result.triggers.get("pressure_slope") is not None
-            and not pd.isna(result.triggers.get("pressure_slope"))
-        ]
-        if anomaly_delta_values and anomaly_slope_values:
-            anomaly_features_stream = {
-                "pressure_delta": pd.Series(anomaly_delta_values, dtype=float),
-                "pressure_slope": pd.Series(anomaly_slope_values, dtype=float),
-            }
-            context.thresholds = derive_thresholds(normal_features_train, anomaly_features_stream, settings)
+        for group, intervals in grouped_intervals.items():
+            train_intervals = [interval for interval in intervals if interval.well not in holdout_wells] or intervals
+            if not train_intervals:
+                continue
+            streaming_results = evaluate_stepwise_for_intervals(context, train_intervals)
+            anomaly_delta_values = [
+                result.triggers.get("pressure_delta")
+                for result in streaming_results
+                if result.detection_start is not None
+                and result.triggers
+                and result.triggers.get("pressure_delta") is not None
+                and not pd.isna(result.triggers.get("pressure_delta"))
+            ]
+            anomaly_slope_values = [
+                result.triggers.get("pressure_slope")
+                for result in streaming_results
+                if result.detection_start is not None
+                and result.triggers
+                and result.triggers.get("pressure_slope") is not None
+                and not pd.isna(result.triggers.get("pressure_slope"))
+            ]
+            if anomaly_delta_values and anomaly_slope_values:
+                anomaly_features_stream = {
+                    "pressure_delta": pd.Series(anomaly_delta_values, dtype=float),
+                    "pressure_slope": pd.Series(anomaly_slope_values, dtype=float),
+                }
+                include_normal = True
+                for cause in group_causes.get(group, set()):
+                    include_normal = cause_profiles.get(cause, {}).get("include_normal", include_normal)
+                normal_features_for_cause = normal_features_train if include_normal else {
+                    "pressure_delta": pd.Series(dtype=float),
+                    "pressure_slope": pd.Series(dtype=float),
+                    "current_delta": pd.Series(dtype=float),
+                    "temperature_delta": pd.Series(dtype=float),
+                }
+                thresholds_by_group[group] = derive_thresholds(
+                    normal_features_for_cause, anomaly_features_stream, settings
+                )
+        context.thresholds = thresholds_by_group
 
     return context
 
@@ -218,6 +321,15 @@ def evaluate_stepwise_for_intervals(
     for interval in sorted(intervals, key=lambda it: (it.well, it.start)):
         results.append(_simulate_interval(context, interval))
     return results
+
+
+def _get_thresholds_for_well(context: DetectionContext, well: str) -> Optional[Dict[str, Dict[str, float]]]:
+    cause = context.well_causes.get(well, context.default_anomaly_cause)
+    group = context.cause_groups.get(cause, cause)
+    thresholds = context.thresholds.get(group)
+    if thresholds is None and context.thresholds:
+        thresholds = next(iter(context.thresholds.values()))
+    return thresholds
 
 
 def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -> StepwiseResult:
@@ -263,16 +375,20 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
     for evaluated_points, ts in enumerate(feature_slice.index, start=1):
         current_features = feature_slice.loc[:ts].copy()
         current_base = base_slice.loc[:ts].copy()
+        thresholds = _get_thresholds_for_well(context, well)
+        if thresholds is None:
+            continue
         records = detect_segments_for_well(
             well=well,
             well_df=current_base,
             features=current_features,
-            thresholds=context.thresholds,
+            thresholds=thresholds,
             settings=context.settings,
             interpretation=context.interpretation,
             reference_intervals=context.reference_intervals,
             residual_model=context.residual_model,
             holdout_wells=context.holdout_wells,
+            cause=context.well_causes.get(well, context.default_anomaly_cause),
         )
         if not records:
             continue

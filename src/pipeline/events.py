@@ -1,6 +1,6 @@
 """
 Generate summary statistics for reference intervals (нормальная/аномальная работа)
-using the new alma/Общая_таблица.xlsx workbook.
+using the new alma/Общая_таблица_новая.xlsx workbook.
 """
 
 from __future__ import annotations
@@ -25,6 +25,26 @@ from .anomalies import (
     resolve_workbook_source,
 )
 from .config import DEFAULT_CONFIG_PATH, load_config
+
+
+def _normalize_label_set(value, default: Optional[List[str]] = None) -> set[str]:
+    if value is None:
+        value = default or []
+    if isinstance(value, str):
+        labels = [value]
+    else:
+        try:
+            labels = list(value)
+        except TypeError:
+            labels = [value]
+    normalized = set()
+    for item in labels:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if text:
+            normalized.add(text)
+    return normalized
 
 
 def summarise_series(series: pd.Series, percentiles: List[float]) -> Dict[str, float]:
@@ -138,8 +158,14 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
 
     settings, interpretation = load_detection_settings(config)
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
-    anomaly_cause = config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")
-    normal_cause = config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")
+    anomaly_labels = _normalize_label_set(
+        config["anomalies"].get("anomaly_causes"),
+        default=[config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")],
+    ) or {"Негерметичность НКТ"}
+    normal_labels = _normalize_label_set(
+        config["anomalies"].get("normal_causes"),
+        default=[config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")],
+    ) or {"Нормальная работа при изменении частоты"}
     percentiles = config["anomalies"].get("calibration_percentiles", [0.1, 0.5, 0.9])
 
     workbook = workbook_spec.source
@@ -184,7 +210,12 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
             if stats:
                 preprocess_summary[well] = stats
 
-    reference_intervals = parse_reference_intervals(svod, well_data, anomaly_cause, normal_cause)
+    reference_intervals = parse_reference_intervals(
+        svod,
+        well_data,
+        anomaly_labels,
+        normal_labels,
+    )
     if not reference_intervals:
         raise ValueError("В листе svod отсутствуют интервалы нормальной/аномальной работы.")
 
@@ -240,7 +271,7 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
 
 
 def parse_args(args: Iterable[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Summarise reference intervals from alma/Общая_таблица.xlsx.")
+    parser = argparse.ArgumentParser(description="Summarise reference intervals from alma/Общая_таблица_новая.xlsx.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--source", type=Path, help="Override workbook path.")
     return parser.parse_args(list(args) if args is not None else None)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -245,8 +245,8 @@ def clip_interval_to_data(
 def parse_reference_intervals(
     svod: pd.DataFrame,
     well_data: Dict[str, pd.DataFrame],
-    anomaly_label: str,
-    normal_label: str,
+    anomaly_labels: Set[str],
+    normal_labels: Set[str],
 ) -> List[ReferenceInterval]:
     intervals: List[ReferenceInterval] = []
     comment_columns = [col for col in svod.columns if col.startswith("Unnamed")]
@@ -261,7 +261,7 @@ def parse_reference_intervals(
         label_raw = str(row.get("ПричОст", "")).strip()
         if not label_raw:
             continue
-        if label_raw not in {anomaly_label, normal_label}:
+        if label_raw not in anomaly_labels and label_raw not in normal_labels:
             continue
 
         start = row.get("Время возникновения аномалии")
@@ -280,7 +280,8 @@ def parse_reference_intervals(
                 well=well,
                 start=clipped[0],
                 end=clipped[1],
-                label="anomaly" if label_raw == anomaly_label else "normal",
+                label="anomaly" if label_raw in anomaly_labels else "normal",
+                cause=label_raw,
                 notes=notes,
             )
         )

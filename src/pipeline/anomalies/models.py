@@ -13,6 +13,7 @@ class ReferenceInterval:
     start: pd.Timestamp
     end: pd.Timestamp
     label: str  # "anomaly" or "normal"
+    cause: str
     notes: List[str]
 
 

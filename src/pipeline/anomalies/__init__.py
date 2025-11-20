@@ -114,10 +114,25 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
     reference_intervals = context.reference_intervals
     holdout_wells = context.holdout_wells
 
+    cause_profiles_cfg = config["anomalies"].get("cause_profiles", [])
+    cause_group_map: Dict[str, str] = {}
+    for entry in cause_profiles_cfg or []:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name", "")).strip()
+        if not name:
+            continue
+        group = str(entry.get("group", name)).strip() or name
+        cause_group_map[name] = group
+
     anomaly_intervals = [interval for interval in reference_intervals if interval.label == "anomaly"]
     anomaly_intervals_train = [interval for interval in anomaly_intervals if interval.well not in holdout_wells]
     normal_intervals_full = [interval for interval in reference_intervals if interval.label == "normal"]
     normal_intervals_train = [interval for interval in normal_intervals_full if interval.well not in holdout_wells]
+    anomalies_by_group: Dict[str, List[ReferenceInterval]] = {}
+    for interval in anomaly_intervals:
+        group = cause_group_map.get(interval.cause, interval.cause)
+        anomalies_by_group.setdefault(group, []).append(interval)
 
     if anomaly_intervals_train:
         anomaly_features = aggregate_feature_values(anomaly_intervals_train, features_map)
@@ -138,17 +153,25 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         features = features_map.get(well)
         if features is None or features.empty:
             continue
+        cause = context.well_causes.get(well, context.default_anomaly_cause)
+        group = context.cause_groups.get(cause, cause)
+        thresholds = context.thresholds.get(group)
+        if thresholds is None and context.thresholds:
+            thresholds = next(iter(context.thresholds.values()))
+        if thresholds is None:
+            continue
         detection_records.extend(
             detect_segments_for_well(
                 well=well,
                 well_df=well_df,
                 features=features,
-                thresholds=context.thresholds,
+                thresholds=thresholds,
                 settings=context.settings,
                 interpretation=context.interpretation,
                 reference_intervals=reference_intervals,
                 residual_model=context.residual_model,
                 holdout_wells=holdout_wells,
+                cause=cause,
             )
         )
 
@@ -176,12 +199,21 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         json_records.append(converted)
 
     summary_path = output_parquet.with_suffix(".json")
+    per_cause_training: Dict[str, Dict[str, object]] = {}
+    for group, intervals in anomalies_by_group.items():
+        train_intervals = [interval for interval in intervals if interval.well not in holdout_wells] or intervals
+        features_cause = aggregate_feature_values(train_intervals, features_map)
+        per_cause_training[group] = {
+            "anomaly_points": int(len(features_cause["pressure_delta"])),
+            "anomaly_wells": sorted({interval.well for interval in train_intervals}),
+            "causes": sorted({interval.cause for interval in intervals}),
+        }
+
     summary_payload = {
         "thresholds": context.thresholds,
         "training": {
-            "anomaly_points": int(len(anomaly_features["pressure_delta"])),
+            "causes": per_cause_training,
             "normal_points": int(len(normal_features_train["pressure_delta"])),
-            "anomaly_wells": sorted({interval.well for interval in training_anomaly_intervals}),
             "normal_wells": sorted({interval.well for interval in normal_training_intervals}),
         },
         "settings": {
@@ -204,13 +236,13 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Detect anomalies based on alma/Общая_таблица.xlsx reference data."
+        description="Detect anomalies based on alma/Общая_таблица_новая.xlsx reference data."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH, help="Path to pipeline configuration.")
     parser.add_argument(
         "--source",
         type=Path,
-        help="Override path to workbook (по умолчанию -- alma/Общая_таблица.xlsx из конфигурации).",
+        help="Override path to workbook (по умолчанию -- alma/Общая_таблица_новая.xlsx из конфигурации).",
     )
     return parser.parse_args(list(argv) if argv is not None else None)
 

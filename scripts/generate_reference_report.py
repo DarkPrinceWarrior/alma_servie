@@ -134,11 +134,17 @@ def load_reference_anomalies(
         well: series.base for well, series in full_well_series.items() if series.base is not None and not series.base.empty
     }
     raw_well_series = load_well_series_subset(workbook, wells)
+    anomaly_labels = set(config["anomalies"].get("anomaly_causes") or [])
+    if not anomaly_labels:
+        anomaly_labels = {config["anomalies"].get("anomaly_cause", "Негерметичность НКТ")}
+    normal_labels = set(config["anomalies"].get("normal_causes") or [])
+    if not normal_labels:
+        normal_labels = {config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты")}
     intervals = parse_reference_intervals(
         svod=svod,
         well_data=base_well_data,
-        anomaly_label=config["anomalies"].get("anomaly_cause", "Негерметичность НКТ"),
-        normal_label=config["anomalies"].get("normal_cause", "Нормальная работа при изменении частоты"),
+        anomaly_labels=anomaly_labels,
+        normal_labels=normal_labels,
     )
 
     anomaly_mapping: Dict[str, List[Tuple[pd.Timestamp, pd.Timestamp]]] = {well: [] for well in wells}

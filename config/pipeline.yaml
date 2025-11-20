@@ -2,13 +2,31 @@ paths:
   reports_dir: reports
 
 anomalies:
-  source_workbook: "./alma/Общая_таблица.xlsx"
+  source_workbook: "./alma/Общая_таблица_новая.xlsx"
   svod_sheet: "svod"
-  anomaly_cause: "Негерметичность НКТ"
-  normal_cause: "Нормальная работа при изменении частоты"
+  anomaly_causes:
+    - "Негерметичность НКТ"
+    - "Уменьшение Рпл / Кпрод"
+    - "Уменьшение Рпл / Кпрод (приток)"
+    - "Увеличение Рпл / Кпрод"
+  normal_causes:
+    - "Нормальная работа при изменении частоты"
+  cause_profiles:
+    - name: "Негерметичность НКТ"
+      group: "Негерметичность НКТ"
+      include_normal: true
+    - name: "Уменьшение Рпл / Кпрод"
+      group: "Приток"
+      include_normal: false
+    - name: "Уменьшение Рпл / Кпрод (приток)"
+      group: "Приток"
+      include_normal: false
+    - name: "Увеличение Рпл / Кпрод"
+      group: "Приток"
+      include_normal: false
   holdout_wells:
-    - "1128г"
-    - "5271г"
+    - "3261"
+    - "495"
   input:
     mode: "excel"  # Переключите на "api", чтобы загружать данные по HTTP
     api:

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/pipeline` теперь содержит только рабочие этапы `anomalies` и `events`, которые читают `alma/Общая_таблица.xlsx`. Запуск: `python -m src.pipeline anomalies` и `python -m src.pipeline events`.
+- `src/pipeline` теперь содержит только рабочие этапы `anomalies` и `events`, которые читают `alma/Общая_таблица_новая.xlsx`. Запуск: `python -m src.pipeline anomalies` и `python -m src.pipeline events`.
 - `src/pipeline/anomalies/` — пакет из нескольких модулей:
   - `__init__.py` держит публичный API и CLI;
   - `models.py` — dataclass-ы и конфигурации;
@@ -41,4 +41,4 @@
 
 ## Configuration & Data Handling
 - Не добавляем исходные Excel в git; путь до них задаём через `config/pipeline.yaml`.
-- Любые обновления `alma/Общая_таблица.xlsx` или схемы фиксируем в комментариях к задаче/PR вместе с датой выгрузки.
+- Любые обновления `alma/Общая_таблица_новая.xlsx` или схемы фиксируем в комментариях к задаче/PR вместе с датой выгрузки.

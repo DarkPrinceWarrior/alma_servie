@@ -23,7 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Utilities for anomaly detection based on alma workbook.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    anomaly_parser = subparsers.add_parser("anomalies", help="Detect anomalies from alma/Общая_таблица.xlsx.")
+    anomaly_parser = subparsers.add_parser("anomalies", help="Detect anomalies from alma/Общая_таблица_новая.xlsx.")
     anomaly_parser.add_argument("--config", default="config/pipeline.yaml")
     anomaly_parser.add_argument("--source", type=Path, help="Override path to workbook.")
     anomaly_parser.set_defaults(func=cmd_anomalies)

@@ -546,13 +546,14 @@ def detect_segments_for_well(
     reference_intervals: List[ReferenceInterval],
     residual_model: Optional[ResidualDetectionModel] = None,
     holdout_wells: Optional[Set[str]] = None,
+    cause: Optional[str] = None,
 ) -> List[Dict[str, object]]:
     gap = pd.Timedelta(minutes=settings.gap_minutes)
 
     anomaly_thresholds = thresholds["anomaly"]
     normal_thresholds = thresholds["normal"]
 
-    slope_condition = features["pressure_slope"] >= anomaly_thresholds["pressure_slope"]
+    slope_condition = features["pressure_slope"].abs() >= anomaly_thresholds["pressure_slope"]
     delta_condition = features["pressure_delta"].abs() >= anomaly_thresholds["pressure_delta"]
     anomaly_mask = (delta_condition & slope_condition).fillna(False)
 
@@ -564,6 +565,8 @@ def detect_segments_for_well(
         if ref.well != well:
             continue
         if ref.label == "anomaly":
+            if cause is not None and ref.cause != cause:
+                continue
             anomaly_refs.append(ref)
         elif ref.label == "normal":
             normal_refs.append(ref)
@@ -759,6 +762,7 @@ def detect_segments_for_well(
 
         record: Dict[str, object] = {
             "well": well,
+            "cause": cause,
             "start": effective_time,
             "end": event_end,
             "duration_minutes": duration_minutes,
