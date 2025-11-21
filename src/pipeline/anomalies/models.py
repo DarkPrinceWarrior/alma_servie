@@ -23,6 +23,7 @@ class DetectionSettings:
     shift_minutes: int = 60
     min_samples: int = 30
     delta_factor: float = 0.6
+    threshold_clip_quantile: float = 0.9
     delta_quantile: float = 0.1
     slope_margin: float = 0.03
     slope_quantile: float = 0.15

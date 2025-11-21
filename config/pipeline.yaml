@@ -43,7 +43,8 @@ anomalies:
     window_minutes: 30
     shift_minutes: 15
     min_samples: 30
-    delta_factor: 0.2
+    delta_factor: 0.05
+    threshold_clip_quantile: 0.55
     delta_quantile: 0.1
     slope_margin: 0.03
     slope_quantile: 0.15

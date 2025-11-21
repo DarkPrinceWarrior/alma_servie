@@ -13,6 +13,7 @@ def load_detection_settings(config: Dict) -> Tuple[DetectionSettings, Interpreta
         shift_minutes=int(detection_cfg.get("shift_minutes", 60)),
         min_samples=int(detection_cfg.get("min_samples", 30)),
         delta_factor=float(detection_cfg.get("delta_factor", 0.6)),
+        threshold_clip_quantile=float(detection_cfg.get("threshold_clip_quantile", 0.9)),
         delta_quantile=float(detection_cfg.get("delta_quantile", 0.1)),
         slope_margin=float(detection_cfg.get("slope_margin", 0.03)),
         slope_quantile=float(detection_cfg.get("slope_quantile", 0.15)),

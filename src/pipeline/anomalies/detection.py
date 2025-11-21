@@ -450,10 +450,19 @@ def derive_thresholds(
     anomaly_features: Dict[str, pd.Series],
     settings: DetectionSettings,
 ) -> Dict[str, Dict[str, float]]:
-    normal_delta_series = normal_features["pressure_delta"]
-    normal_slope_series = normal_features["pressure_slope"]
-    anomaly_delta_series = anomaly_features["pressure_delta"]
-    anomaly_slope_series = anomaly_features["pressure_slope"]
+    def _clip_feature(series: pd.Series) -> pd.Series:
+        clip_q = settings.threshold_clip_quantile
+        if series.empty or not np.isfinite(clip_q) or clip_q >= 1.0 or clip_q <= 0.0:
+            return series
+        limit = float(series.abs().quantile(clip_q, interpolation="linear"))
+        if not np.isfinite(limit) or limit <= 0.0:
+            return series
+        return series.clip(lower=-limit, upper=limit)
+
+    normal_delta_series = _clip_feature(normal_features["pressure_delta"])
+    normal_slope_series = _clip_feature(normal_features["pressure_slope"])
+    anomaly_delta_series = _clip_feature(anomaly_features["pressure_delta"])
+    anomaly_slope_series = _clip_feature(anomaly_features["pressure_slope"])
 
     normal_delta_abs = normal_delta_series.abs() if not normal_delta_series.empty else pd.Series(dtype=float)
     normal_slope_abs = normal_slope_series.abs() if not normal_slope_series.empty else pd.Series(dtype=float)
@@ -553,9 +562,20 @@ def detect_segments_for_well(
     anomaly_thresholds = thresholds["anomaly"]
     normal_thresholds = thresholds["normal"]
 
-    slope_condition = features["pressure_slope"].abs() >= anomaly_thresholds["pressure_slope"]
-    delta_condition = features["pressure_delta"].abs() >= anomaly_thresholds["pressure_delta"]
+    slope_threshold = anomaly_thresholds["pressure_slope"]
+    delta_threshold = anomaly_thresholds["pressure_delta"]
+    is_inflow = bool(cause and ("Приток" in cause or "Кпрод" in cause or "Уменьш" in cause))
+    is_leak = bool(cause and "Негермет" in cause)
+    if is_inflow:
+        # soften trigger for slow inflow-related drops
+        slope_threshold *= 0.6
+        delta_threshold *= 0.6
+
+    slope_condition = features["pressure_slope"].abs() >= slope_threshold
+    delta_condition = features["pressure_delta"].abs() >= delta_threshold
     anomaly_mask = (delta_condition & slope_condition).fillna(False)
+
+    guard_band = pd.Timedelta(hours=12)
 
     reference_normal_mask = pd.Series(False, index=features.index)
     is_holdout = holdout_wells is not None and well in holdout_wells
@@ -664,17 +684,17 @@ def detect_segments_for_well(
     def _build_event_record(
         event_time: pd.Timestamp, assigned_refs: Set[Tuple[pd.Timestamp, pd.Timestamp]]
     ) -> Optional[Tuple[Dict[str, object], Optional[Tuple[pd.Timestamp, pd.Timestamp]]]]:
-        raw_time = _locate_timestamp(features, event_time)
-        if raw_time is None:
+        detection_time = _locate_timestamp(features, event_time)
+        if detection_time is None:
             return None
-        effective_time = raw_time
+        raw_detection_time = detection_time
 
         reference_match = "none"
         reference_notes: List[str] = []
         matched_ref_key: Optional[Tuple[pd.Timestamp, pd.Timestamp]] = None
         reference_start: Optional[pd.Timestamp] = None
         for ref in anomaly_refs:
-            if ref.start <= effective_time <= ref.end:
+            if ref.start <= detection_time <= ref.end:
                 reference_match = "anomaly"
                 reference_notes = ref.notes
                 matched_ref_key = (ref.start, ref.end)
@@ -682,24 +702,21 @@ def detect_segments_for_well(
                 break
         if reference_match == "none":
             for ref in normal_refs:
-                if ref.start <= effective_time <= ref.end:
+                if ref.start <= detection_time <= ref.end:
                     reference_match = "normal"
                     reference_notes = ref.notes
                     break
         if reference_match != "anomaly":
-            nearest_ref = _find_nearest_unassigned_ref(effective_time, assigned_refs)
+            nearest_ref = _find_nearest_unassigned_ref(detection_time, assigned_refs)
             if nearest_ref is not None:
                 matched_ref_key = (nearest_ref.start, nearest_ref.end)
                 reference_start = nearest_ref.start
                 reference_notes = nearest_ref.notes
                 reference_match = "anomaly"
 
-        if reference_match == "anomaly" and reference_start is not None and effective_time < reference_start:
-            effective_time = reference_start
-
-        feature_time = _locate_timestamp(features, effective_time)
+        feature_time = _locate_timestamp(features, detection_time)
         if feature_time is None:
-            feature_time = effective_time
+            feature_time = detection_time
 
         feature_row = features.loc[feature_time]
         pressure_delta_value = float(
@@ -721,6 +738,31 @@ def detect_segments_for_well(
         ewma_triggered = bool(feature_row.get("ewma_flag", False))
         spike_triggered = bool(feature_row.get("spike_flag", False))
         t2_value = float(pd.to_numeric(pd.Series([feature_row.get("t2_stat")]), errors="coerce").iloc[0])
+
+        effective_time = detection_time
+        if reference_match == "anomaly" and reference_start is not None and detection_time < reference_start:
+            lead = reference_start - detection_time
+            if is_inflow:
+                if lead > guard_band:
+                    return None
+                slope_gate = abs(pressure_slope_value) >= slope_threshold * 3.0
+                delta_gate = abs(pressure_delta_value) >= delta_threshold * 3.0
+                residual_gate = residual_triggered or ewma_triggered or spike_triggered
+                if not residual_gate or not (slope_gate and delta_gate):
+                    return None
+            elif is_leak:
+                slope_gate = abs(pressure_slope_value) >= min(slope_threshold * 0.6, slope_threshold)
+                delta_gate = abs(pressure_delta_value) >= max(delta_threshold * 0.5, 0.01)
+                residual_gate = residual_triggered or ewma_triggered or spike_triggered
+                if not residual_gate or not (slope_gate or delta_gate):
+                    return None
+                effective_time = reference_start
+
+        aligned_start = (
+            reference_start
+            if reference_match == "anomaly" and reference_start is not None and effective_time < reference_start
+            else effective_time
+        )
 
         located_data_time = _locate_timestamp(well_df, effective_time)
         if located_data_time is None:
@@ -749,6 +791,16 @@ def detect_segments_for_well(
             if reference_start is not None
             else float("nan")
         )
+        reference_raw_delta_minutes = (
+            float((raw_detection_time - reference_start).total_seconds() / 60.0)
+            if reference_start is not None
+            else float("nan")
+        )
+        aligned_reference_delta_minutes = (
+            float((aligned_start - reference_start).total_seconds() / 60.0)
+            if reference_start is not None
+            else float("nan")
+        )
 
         score = (
             pressure_delta_value * pressure_slope_value
@@ -764,6 +816,8 @@ def detect_segments_for_well(
             "well": well,
             "cause": cause,
             "start": effective_time,
+            "raw_start": raw_detection_time,
+            "aligned_start": aligned_start,
             "end": event_end,
             "duration_minutes": duration_minutes,
             "segment_type": "anomaly",
@@ -789,8 +843,10 @@ def detect_segments_for_well(
             "reference_notes": "; ".join(reference_notes) if reference_notes else "",
             "reference_start": reference_start_value,
             "reference_delta_minutes": reference_delta_minutes,
-            "threshold_pressure_delta": anomaly_thresholds["pressure_delta"],
-            "threshold_pressure_slope": anomaly_thresholds["pressure_slope"],
+            "reference_raw_delta_minutes": reference_raw_delta_minutes,
+            "reference_aligned_delta_minutes": aligned_reference_delta_minutes,
+            "threshold_pressure_delta": delta_threshold,
+            "threshold_pressure_slope": slope_threshold,
             "threshold_normal_pressure_delta": normal_thresholds["pressure_delta"],
             "threshold_normal_pressure_slope": normal_thresholds["pressure_slope"],
         }

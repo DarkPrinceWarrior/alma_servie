@@ -92,9 +92,11 @@ class StepwiseResult:
     interval_start: Optional[pd.Timestamp]
     interval_end: Optional[pd.Timestamp]
     detection_start: Optional[pd.Timestamp]
+    aligned_detection_start: Optional[pd.Timestamp]
     notification_time: Optional[pd.Timestamp]
     evaluated_points: int
     delay_minutes: Optional[float]
+    aligned_delay_minutes: Optional[float]
     triggers: Dict[str, object]
 
 
@@ -342,9 +344,11 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
             interval_start=interval.start,
             interval_end=interval.end,
             detection_start=None,
+            aligned_detection_start=None,
             notification_time=None,
             evaluated_points=0,
             delay_minutes=None,
+            aligned_delay_minutes=None,
             triggers={},
         )
 
@@ -361,9 +365,11 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
             interval_start=interval.start,
             interval_end=interval.end,
             detection_start=None,
+            aligned_detection_start=None,
             notification_time=None,
             evaluated_points=0,
             delay_minutes=None,
+            aligned_delay_minutes=None,
             triggers={},
         )
 
@@ -417,14 +423,17 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
             break
 
     detection_start = None
+    aligned_detection_start: Optional[pd.Timestamp] = None
     delay_minutes: Optional[float] = None
+    aligned_delay_minutes: Optional[float] = None
     triggers: Dict[str, object] = {}
     if detection_record is not None:
         detection_start = detection_record.get("start")
-        if interval.start is not None and detection_start is not None and detection_start < interval.start:
-            detection_start = interval.start
+        aligned_detection_start = detection_record.get("aligned_start", detection_start)
         if detection_start is not None and interval.start is not None:
-            delay_minutes = max(0.0, (detection_start - interval.start).total_seconds() / 60.0)
+            delay_minutes = (detection_start - interval.start).total_seconds() / 60.0
+        if aligned_detection_start is not None and interval.start is not None:
+            aligned_delay_minutes = (aligned_detection_start - interval.start).total_seconds() / 60.0
         triggers = {
             "pressure_delta": float(detection_record.get("pressure_delta_median", float("nan"))),
             "pressure_slope": float(detection_record.get("pressure_slope_median", float("nan"))),
@@ -445,9 +454,11 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
         interval_start=interval.start,
         interval_end=interval.end,
         detection_start=detection_start,
+        aligned_detection_start=aligned_detection_start,
         notification_time=notification_time,
         evaluated_points=evaluated_points,
         delay_minutes=delay_minutes,
+        aligned_delay_minutes=aligned_delay_minutes,
         triggers=triggers,
     )
 
