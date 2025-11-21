@@ -149,6 +149,10 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         normal_features_train = aggregate_feature_values(normal_intervals_full, features_map)
         normal_training_intervals = normal_intervals_full
 
+    # Note: Thresholds are calculated inside build_detection_context (in simulation.py)
+    # which now includes the fixed threshold logic for "Приток".
+    # We don't need to re-calculate here.
+
     detection_records: List[Dict[str, object]] = []
     for well, well_df in context.base_well_data.items():
         features = features_map.get(well)

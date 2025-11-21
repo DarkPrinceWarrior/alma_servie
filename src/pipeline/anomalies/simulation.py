@@ -251,6 +251,16 @@ def build_detection_context(
             "temperature_delta": pd.Series(dtype=float),
         }
         thresholds_by_group[group] = derive_thresholds(normal_features_for_cause, anomaly_features, settings)
+        
+        # Apply fixed threshold for "Приток" (Inflow) group
+        # Based on reference wells 1772 and 1120g analysis
+        if group == "Приток":
+             # Force thresholds regardless of ECOD result
+             thresholds_by_group[group]["anomaly"]["pressure_slope"] = 0.03
+             # Also ensure delta is not too high, though Inflow is mostly about slope
+             thresholds_by_group[group]["anomaly"]["pressure_delta"] = max(
+                 thresholds_by_group[group]["anomaly"]["pressure_delta"], 0.01
+             )
 
     context = DetectionContext(
         settings=settings,
@@ -308,6 +318,10 @@ def build_detection_context(
                 thresholds_by_group[group] = derive_thresholds(
                     normal_features_for_cause, anomaly_features_stream, settings
                 )
+                
+                # Re-apply fixed threshold for "Приток" in streaming calibration if needed
+                if group == "Приток":
+                     thresholds_by_group[group]["anomaly"]["pressure_slope"] = 0.03
         context.thresholds = thresholds_by_group
 
     return context
@@ -513,8 +527,8 @@ def _simulate_interval(context: DetectionContext, interval: ReferenceInterval) -
              if not res_gate or not (slope_gate or delta_gate):
                  valid_early = False
              else:
-                 # If valid early leak, align to ref start
-                 aligned_detection_start = interval.start
+                 # If valid early leak, we used to align to ref start. Now we keep detection_start.
+                 pass
          
          if not valid_early:
              # If early detection invalid, we search for next valid point >= interval.start

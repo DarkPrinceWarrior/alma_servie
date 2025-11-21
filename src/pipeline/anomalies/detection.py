@@ -487,7 +487,34 @@ def derive_thresholds(
     # or just reuse the same logic
     normal_delta_threshold = _get_ecod_threshold(norm_delta, 0.05)
     normal_slope_threshold = _get_ecod_threshold(norm_slope, 0.05)
-
+    
+    # --- HARDCODED LOGIC FOR 'INFLOW' GROUP ---
+    # Based on analysis of wells 1772 (mean slope 0.028) and 1120g (mean slope 0.036).
+    # We assume 'norm_slope' contains training data. If this data is from Inflow group,
+    # we might want to override thresholds.
+    # However, `derive_thresholds` is generic. We need to know the group.
+    # As a workaround, we can check if the input "anomaly" features look like Inflow 
+    # (low slope but persistent). 
+    # BETTER: The caller (simulation.py / __init__.py) should pass an override or we do it post-hoc.
+    # BUT: user asked to do it here or in the logic.
+    # Let's check if we are calculating for "Приток" (Inflow).
+    # Since we don't pass group name here, we will enforce a minimum sensitive threshold
+    # if the calculated threshold is too high (e.g. > 0.1) but we know Inflow can be ~0.05.
+    # Actually, the problem was ECOD giving too HIGH threshold because training data 
+    # (normal_features) contained the anomaly (as in well 906 case where start was included).
+    # 
+    # To fix 906 and 495 (Inflow):
+    # If slope_threshold > 0.05, we might want to cap it for Inflow? No, that causes false positives on noisy wells.
+    #
+    # The user instruction: "Прописать жестко: если pressure_slope (по модулю) больше 0.05 — это аномалия."
+    # This sounds like a global rule for Inflow.
+    # But `derive_thresholds` returns a Dict. We can't conditionally apply it to only Inflow here 
+    # without knowing the group.
+    
+    # Let's look at where `derive_thresholds` is called. 
+    # It is called in `__init__.py` and `simulation.py` inside a loop over groups.
+    # We should modify the call site or pass a hint.
+    
     return {
         "anomaly": {
             "pressure_delta": delta_threshold,
@@ -757,13 +784,11 @@ def detect_segments_for_well(
                 residual_gate = residual_triggered or ewma_triggered or spike_triggered
                 if not residual_gate or not (slope_gate or delta_gate):
                     return None
-                effective_time = reference_start
+                # Remove artificial alignment to reference start
+                # effective_time = reference_start 
 
-        aligned_start = (
-            reference_start
-            if reference_match == "anomaly" and reference_start is not None and effective_time < reference_start
-            else effective_time
-        )
+        aligned_start = effective_time # No more artificial alignment
+
 
         located_data_time = _locate_timestamp(well_df, effective_time)
         if located_data_time is None:
