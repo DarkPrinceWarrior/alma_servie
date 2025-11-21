@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from statistics import NormalDist
 from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -144,16 +143,6 @@ def _apply_frequency_baseline(
     min_scale = max(fallback_mad * 0.1, 0.05)
     scale = scale.clip(lower=min_scale)
     return expected, residual, scale
-
-
-def _chi2_ppf(probability: float, dof: int) -> float:
-    probability = max(min(probability, 1 - 1e-9), 1e-9)
-    if dof <= 0:
-        raise ValueError("Degrees of freedom must be positive for chi-square quantile")
-    z = NormalDist().inv_cdf(probability)
-    term = 1 - (2.0 / (9.0 * dof)) + z * math.sqrt(2.0 / (9.0 * dof))
-    term = max(term, 1e-9)
-    return dof * term**3
 
 
 def build_residual_detection_model(

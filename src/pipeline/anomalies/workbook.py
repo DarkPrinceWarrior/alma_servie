@@ -34,7 +34,14 @@ class WorkbookSource:
 
     @classmethod
     def from_excel(cls, path: Path | str) -> "WorkbookSource":
-        excel_file = pd.ExcelFile(path)
+        # Try using calamine engine if available for performance
+        try:
+            import python_calamine  # noqa
+            engine = "calamine"
+        except ImportError:
+            engine = None
+
+        excel_file = pd.ExcelFile(path, engine=engine)
 
         def _parse(sheet: str, kwargs: Dict[str, Any]) -> pd.DataFrame:
             return excel_file.parse(sheet, **kwargs)
