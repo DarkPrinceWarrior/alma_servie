@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
-import pandera as pa
+import pandera.pandas as pa
 
 from ..logger import logger
 from .models import ReferenceInterval, WellTimeseries
@@ -103,15 +103,8 @@ def preprocess_well_data(
 def load_svod_sheet(workbook: WorkbookSource, sheet_name: str) -> pd.DataFrame:
     svod = workbook.parse(sheet_name, header=2)
     
-    try:
-        SvodSchema.validate(svod, lazy=True)
-    except pa.errors.SchemaErrors as err:
-        logger.error(f"Validation errors in '{sheet_name}':\n{err.failure_cases}")
-        # We warn but proceed, as ffill might fix some missing values
-    
+    # Pre-process dates to avoid Pandera warning about dayfirst default
     svod = svod.copy()
-    svod["Скв"] = svod["Скв"].ffill()
-    svod["ПричОст"] = svod["ПричОст"].ffill()
     if "Время возникновения аномалии" in svod.columns:
         svod["Время возникновения аномалии"] = pd.to_datetime(
             svod["Время возникновения аномалии"], errors="coerce", dayfirst=True
@@ -120,6 +113,15 @@ def load_svod_sheet(workbook: WorkbookSource, sheet_name: str) -> pd.DataFrame:
         svod["Время остановки скважины"] = pd.to_datetime(
             svod["Время остановки скважины"], errors="coerce", dayfirst=True
         )
+    
+    try:
+        SvodSchema.validate(svod, lazy=True)
+    except pa.errors.SchemaErrors as err:
+        logger.error(f"Validation errors in '{sheet_name}':\n{err.failure_cases}")
+        # We warn but proceed, as ffill might fix some missing values
+    
+    svod["Скв"] = svod["Скв"].ffill()
+    svod["ПричОст"] = svod["ПричОст"].ffill()
     return svod
 
 
@@ -164,6 +166,13 @@ def load_well_series(
             if metric not in df.columns:
                 continue
             
+            timestamps = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
+            values = pd.to_numeric(df[metric], errors="coerce")
+            
+            # Update dataframe with parsed values to pass schema check without warning
+            df[column] = timestamps
+            df[metric] = values
+            
             try:
                 # Validate minimal schema for this metric pair
                 WellMetricSchema.create(metric).validate(df[[column, metric]], lazy=True)
@@ -171,8 +180,6 @@ def load_well_series(
                 logger.warning(f"Validation warning for metric '{metric}' in sheet '{sheet_name}': {err.failure_cases}")
                 # We continue, as the parsing logic below is robust enough to handle some NaNs
 
-            timestamps = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
-            values = pd.to_numeric(df[metric], errors="coerce")
             mask = timestamps.notna() & values.notna()
             if not mask.any():
                 continue
