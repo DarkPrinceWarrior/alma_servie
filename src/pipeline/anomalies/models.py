@@ -28,6 +28,7 @@ class DetectionSettings:
     delta_quantile: float = 0.1
     slope_margin: float = 0.03
     slope_quantile: float = 0.15
+    contamination: float = 0.01
     min_duration_minutes: int = 60
     gap_minutes: int = 10
 

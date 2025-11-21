@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from pyod.models.ecod import ECOD
 from pyod.models.mcd import MCD
 
 from .models import (
@@ -445,49 +446,47 @@ def derive_thresholds(
     anomaly_features: Dict[str, pd.Series],
     settings: DetectionSettings,
 ) -> Dict[str, Dict[str, float]]:
-    def _clip_feature(series: pd.Series) -> pd.Series:
-        clip_q = settings.threshold_clip_quantile
-        if series.empty or not np.isfinite(clip_q) or clip_q >= 1.0 or clip_q <= 0.0:
-            return series
-        limit = float(series.abs().quantile(clip_q, interpolation="linear"))
-        if not np.isfinite(limit) or limit <= 0.0:
-            return series
-        return series.clip(lower=-limit, upper=limit)
+    def _get_ecod_threshold(series: pd.Series, contamination: float) -> float:
+        # ECOD is parameter-free but requires a contamination estimate (default 0.1)
+        # We fit it on the magnitude to match the usage (abs(feature) >= threshold)
+        clean = series.dropna()
+        if clean.empty:
+            return 0.0
+        
+        # Reshape for PyOD
+        X = clean.values.reshape(-1, 1)
+        
+        try:
+            clf = ECOD(contamination=contamination)
+            clf.fit(X)
+            # We want the feature value threshold, not the score threshold.
+            labels = clf.labels_
+            if np.sum(labels) == 0:
+                # If no outliers detected (e.g. uniform data), return max magnitude
+                return float(np.max(np.abs(X)))
+            
+            outlier_values = X[labels == 1]
+            return float(np.min(np.abs(outlier_values)))
+        except Exception:
+            # Fallback to simple quantile if ECOD fails
+            return float(clean.abs().quantile(1.0 - contamination))
 
-    normal_delta_series = _clip_feature(normal_features["pressure_delta"])
-    normal_slope_series = _clip_feature(normal_features["pressure_slope"])
-    anomaly_delta_series = _clip_feature(anomaly_features["pressure_delta"])
-    anomaly_slope_series = _clip_feature(anomaly_features["pressure_slope"])
+    # Use ECOD for 'anomaly' trigger thresholds
+    # We fit on normal_features to define the boundary of normality
+    norm_delta = normal_features.get("pressure_delta", pd.Series(dtype=float))
+    norm_slope = normal_features.get("pressure_slope", pd.Series(dtype=float))
+    
+    delta_threshold = _get_ecod_threshold(norm_delta, settings.contamination)
+    slope_threshold = _get_ecod_threshold(norm_slope, settings.contamination)
+    
+    # Ensure reasonable minimums (from original logic fallbacks/heuristics)
+    delta_threshold = max(delta_threshold, 0.01)
+    slope_threshold = max(slope_threshold, 0.01)
 
-    normal_delta_abs = normal_delta_series.abs() if not normal_delta_series.empty else pd.Series(dtype=float)
-    normal_slope_abs = normal_slope_series.abs() if not normal_slope_series.empty else pd.Series(dtype=float)
-
-    normal_delta_high = (
-        float(normal_delta_abs.quantile(0.75, interpolation="linear")) if not normal_delta_abs.empty else 0.0
-    )
-    anomaly_delta_high = (
-        float(anomaly_delta_series.abs().quantile(0.8, interpolation="linear"))
-        if not anomaly_delta_series.empty
-        else 0.0
-    )
-    delta_threshold = max(normal_delta_high * settings.delta_factor, anomaly_delta_high)
-
-    normal_slope_high = (
-        float(normal_slope_abs.quantile(0.9, interpolation="linear")) if not normal_slope_abs.empty else 0.0
-    )
-    anomaly_slope_high = (
-        float(anomaly_slope_series.abs().quantile(0.7, interpolation="linear"))
-        if not anomaly_slope_series.empty
-        else 0.0
-    )
-    slope_threshold = max(normal_slope_high + settings.slope_margin, anomaly_slope_high)
-
-    normal_delta_threshold = (
-        float(normal_delta_abs.quantile(0.95, interpolation="linear")) if not normal_delta_abs.empty else 0.01
-    )
-    normal_slope_threshold = (
-        float(normal_slope_abs.quantile(0.95, interpolation="linear")) if not normal_slope_abs.empty else 0.5
-    )
+    # For 'normal' thresholds (used for reference), we can use a looser contamination (e.g. 0.05 -> 95%)
+    # or just reuse the same logic
+    normal_delta_threshold = _get_ecod_threshold(norm_delta, 0.05)
+    normal_slope_threshold = _get_ecod_threshold(norm_slope, 0.05)
 
     return {
         "anomaly": {
