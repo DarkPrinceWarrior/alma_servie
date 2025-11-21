@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+from pyod.models.mcd import MCD
 
 from .models import (
     DetectionSettings,
@@ -203,28 +204,24 @@ def build_residual_detection_model(
     if z_matrix.shape[0] < settings.min_t2_points:
         return None
 
-    cov = np.cov(z_matrix.to_numpy().T, ddof=0)
-    if not np.isfinite(cov).all():
+    # Use PyOD's MCD detector
+    # support_fraction determines the proportion of points included in the support of the raw MCD estimate
+    # Default is None, which implies that the support fraction is between 0.5 and 1
+    detector = MCD(
+        contamination=settings.t2_alpha,
+        support_fraction=None, 
+        random_state=42
+    )
+    
+    try:
+        detector.fit(z_matrix)
+    except ValueError:
+        # Fallback if fitting fails (e.g. singular matrix)
         return None
-
-    try:
-        inv_cov = np.linalg.inv(cov)
-    except np.linalg.LinAlgError:
-        epsilon = 1e-6 * np.eye(len(columns))
-        inv_cov = np.linalg.inv(cov + epsilon)
-        cov = cov + epsilon
-
-    dof = len(columns)
-    try:
-        t2_threshold = float(_chi2_ppf(1 - settings.t2_alpha, dof))
-    except Exception:
-        t2_threshold = float(_chi2_ppf(0.99, dof))
 
     return ResidualDetectionModel(
         metrics=active_metrics,
-        covariance=cov,
-        inv_covariance=inv_cov,
-        t2_threshold=t2_threshold,
+        detector=detector,
         settings=settings,
     )
 
@@ -261,16 +258,25 @@ def _compute_t2_series(
     columns = [column_map[m] for m in metrics]
     if not set(columns).issubset(z_frame.columns):
         return pd.Series(np.nan, index=z_frame.index, dtype=float)
+    
     subset = z_frame[columns]
     values = subset.to_numpy(dtype=float)
     mask = np.isfinite(values).all(axis=1)
+    
     t2 = pd.Series(np.nan, index=z_frame.index, dtype=float)
     if not mask.any():
         return t2
+        
     valid_values = values[mask]
-    inv = model.inv_covariance
-    t2_values = np.einsum("ij,jk,ik->i", valid_values, inv, valid_values)
-    t2.loc[mask] = t2_values
+    
+    # Use PyOD decision_function (raw anomaly scores)
+    # For MCD, this is the Mahalanobis distance (similar to T2)
+    try:
+        scores = model.detector.decision_function(valid_values)
+        t2.loc[mask] = scores
+    except Exception:
+        pass
+        
     return t2
 
 
@@ -638,7 +644,14 @@ def detect_segments_for_well(
             [metric_column_map[m] for m in residual_model.metrics if metric_column_map[m] in features]
         ]
         t2_series = _compute_t2_series(z_frame, residual_model)
-        t2_flag = t2_series > residual_model.t2_threshold
+        
+        # Use PyOD's internal threshold if available, or simple logic
+        # Note: PyOD decision_function returns distance, predict returns 0/1
+        # We can use predict() directly for boolean flag if needed, but we want score + threshold logic
+        # For MCD, threshold_ attribute is available after fit
+        
+        threshold = getattr(residual_model.detector, "threshold_", float("inf"))
+        t2_flag = t2_series > threshold
         t2_flag = t2_flag.fillna(False)
 
         residual_flag = t2_flag.fillna(False)

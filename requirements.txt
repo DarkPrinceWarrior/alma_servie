@@ -7,3 +7,5 @@ plotly>=5.0.0
 requests>=2.32.3
 loguru>=0.7.2
 pandera>=0.18.0
+pyod>=1.1.0
+scikit-learn>=1.4.0

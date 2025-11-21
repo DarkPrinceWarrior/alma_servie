@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+from pyod.models.base import BaseDetector
 
 
 @dataclass
@@ -65,9 +66,7 @@ class ResidualDetectionSettings:
 @dataclass
 class ResidualDetectionModel:
     metrics: List[str]
-    covariance: np.ndarray
-    inv_covariance: np.ndarray
-    t2_threshold: float
+    detector: BaseDetector
     settings: ResidualDetectionSettings
 
 
