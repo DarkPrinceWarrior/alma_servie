@@ -18,6 +18,7 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
+from ..logger import logger
 from ..config import DEFAULT_CONFIG_PATH, load_config
 from .detection import (
     aggregate_feature_values,
@@ -59,7 +60,7 @@ from .workbook import resolve_workbook_source
 def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> pd.DataFrame:
     config = load_config(config_path)
     workbook_spec = resolve_workbook_source(config, workbook_override=workbook_override)
-    print(f"Using workbook source: {workbook_spec.description}")
+    logger.info(f"Using workbook source: {workbook_spec.description}")
 
     context = build_detection_context(config, workbook_spec.source, use_streaming_calibration=True)
 
@@ -97,14 +98,14 @@ def run_anomaly_analysis(config_path: Path, workbook_override: Optional[Path] = 
         pressure_export_df.to_csv(pressure_export_path.with_suffix(".csv"), index=False)
 
     if context.preprocess_summary:
-        print("Preprocessing summary (anomalies):")
+        logger.info("Preprocessing summary (anomalies):")
         for well, stats in sorted(context.preprocess_summary.items()):
             removed_total = sum(values.get("removed_outliers", 0) for values in stats.values())
             filled_total = sum(values.get("ffill_values", 0) for values in stats.values())
-            print(f"  {well}: removed={removed_total}, ffilled={filled_total}")
+            logger.info(f"  {well}: removed={removed_total}, ffilled={filled_total}")
 
     if context.frequency_baseline is None:
-        print("Frequency baseline: недостаточно данных для построения модели.")
+        logger.warning("Frequency baseline: недостаточно данных для построения модели.")
     else:
         baseline_path = reports_dir / "frequency_baseline.parquet"
         context.frequency_baseline.summary.to_parquet(baseline_path, index=False)
@@ -251,7 +252,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     args = parse_args(argv)
     detections = run_anomaly_analysis(args.config, workbook_override=args.source)
     event_count = len(detections)
-    print(f"Detected {event_count} anomaly events.")
+    logger.info(f"Detected {event_count} anomaly events.")
     return 0
 
 

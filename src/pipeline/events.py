@@ -12,6 +12,7 @@ from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
+from .logger import logger
 from .anomalies import (
     InterpretationThresholds,
     classify_direction,
@@ -154,7 +155,7 @@ def compute_label_summary(
 def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] = None) -> Dict:
     config = load_config(config_path)
     workbook_spec = resolve_workbook_source(config, workbook_override=workbook_override)
-    print(f"Using workbook source: {workbook_spec.description}")
+    logger.info(f"Using workbook source: {workbook_spec.description}")
 
     settings, interpretation = load_detection_settings(config)
     svod_sheet = config["anomalies"].get("svod_sheet", "svod")
@@ -234,7 +235,7 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
             min_points=min_points,
         )
         if baseline is None:
-            print("Frequency baseline (events): недостаточно данных для построения модели.")
+            logger.warning("Frequency baseline (events): недостаточно данных для построения модели.")
 
     features_map = {
         well: compute_feature_frame(df, settings, baseline=baseline) for well, df in well_data.items()
@@ -261,11 +262,11 @@ def run_reference_analysis(config_path: Path, workbook_override: Optional[Path] 
     summary_path.write_text(json.dumps(summary_payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if preprocess_summary:
-        print("Preprocessing summary (events):")
+        logger.info("Preprocessing summary (events):")
         for well, stats in sorted(preprocess_summary.items()):
             removed_total = sum(values.get("removed_outliers", 0) for values in stats.values())
             filled_total = sum(values.get("ffill_values", 0) for values in stats.values())
-            print(f"  {well}: removed={removed_total}, ffilled={filled_total}")
+            logger.info(f"  {well}: removed={removed_total}, ffilled={filled_total}")
 
     return summary_payload
 
@@ -280,7 +281,7 @@ def parse_args(args: Iterable[str] | None) -> argparse.Namespace:
 def main(argv: Iterable[str] | None = None) -> int:
     args = parse_args(argv)
     summary = run_reference_analysis(args.config, workbook_override=args.source)
-    print(f"Reference analysis completed. Records: {summary['records']}")
+    logger.info(f"Reference analysis completed. Records: {summary['records']}")
     return 0
 
 

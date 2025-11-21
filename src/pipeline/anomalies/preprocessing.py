@@ -4,8 +4,11 @@ from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
+import pandera as pa
 
+from ..logger import logger
 from .models import ReferenceInterval, WellTimeseries
+from .schemas import SvodSchema, WellMetricSchema
 from .workbook import WorkbookSource
 
 
@@ -33,12 +36,18 @@ def _derive_window_points(index: pd.Index, window_minutes: float) -> int:
 def _hampel_filter(series: pd.Series, window_points: int, n_sigma: float) -> Tuple[pd.Series, pd.Series]:
     if series.empty or window_points < 3:
         return series.copy(), pd.Series(False, index=series.index)
+    
     rolling = series.rolling(window=window_points, center=True, min_periods=1)
     median = rolling.median()
-    diff = (series - median).abs()
-    mad = rolling.apply(lambda x: np.median(np.abs(x - np.median(x))), raw=True)
+    
+    # Calculate MAD using rolling median of absolute deviations
+    # This is an approximation where we use the deviation from the central median
+    deviation = (series - median).abs()
+    mad = deviation.rolling(window=window_points, center=True, min_periods=1).median()
+    
     threshold = n_sigma * 1.4826 * mad
-    mask = diff > threshold
+    mask = deviation > threshold
+    
     filtered = series.copy()
     filtered[mask] = np.nan
     return filtered, mask.fillna(False)
@@ -93,6 +102,13 @@ def preprocess_well_data(
 
 def load_svod_sheet(workbook: WorkbookSource, sheet_name: str) -> pd.DataFrame:
     svod = workbook.parse(sheet_name, header=2)
+    
+    try:
+        SvodSchema.validate(svod, lazy=True)
+    except pa.errors.SchemaErrors as err:
+        logger.error(f"Validation errors in '{sheet_name}':\n{err.failure_cases}")
+        # We warn but proceed, as ffill might fix some missing values
+    
     svod = svod.copy()
     svod["Скв"] = svod["Скв"].ffill()
     svod["ПричОст"] = svod["ПричОст"].ffill()
@@ -147,6 +163,14 @@ def load_well_series(
             metric = column.replace("timestamp_", "")
             if metric not in df.columns:
                 continue
+            
+            try:
+                # Validate minimal schema for this metric pair
+                WellMetricSchema.create(metric).validate(df[[column, metric]], lazy=True)
+            except pa.errors.SchemaErrors as err:
+                logger.warning(f"Validation warning for metric '{metric}' in sheet '{sheet_name}': {err.failure_cases}")
+                # We continue, as the parsing logic below is robust enough to handle some NaNs
+
             timestamps = pd.to_datetime(df[column], errors="coerce", dayfirst=True)
             values = pd.to_numeric(df[metric], errors="coerce")
             mask = timestamps.notna() & values.notna()

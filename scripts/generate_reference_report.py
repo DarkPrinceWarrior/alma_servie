@@ -15,6 +15,7 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
+from pipeline.logger import logger
 from pipeline.anomalies import (
     StepwiseResult,
     build_detection_context,
@@ -536,7 +537,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     config = load_config(args.config)
 
     workbook_spec = resolve_workbook_source(config)
-    print(f"Using workbook source: {workbook_spec.description}")
+    logger.info(f"Using workbook source: {workbook_spec.description}")
     workbook = workbook_spec.source
 
     if args.wells:
@@ -618,7 +619,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     ensure_output_dir(args.output)
     args.output.write_text(html_content, encoding="utf-8")
 
-    print(f"HTML report saved to {args.output.resolve()}")
+    logger.info(f"HTML report saved to {args.output.resolve()}")
     return 0
 
 

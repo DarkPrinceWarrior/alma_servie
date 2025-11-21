@@ -5,18 +5,19 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from .logger import logger
 from . import anomalies, events
 
 
 def cmd_anomalies(args: argparse.Namespace) -> None:
     result = anomalies.run_anomaly_analysis(Path(args.config), workbook_override=args.source)
     event_count = len(result)
-    print(f"Detected {event_count} anomaly events.")
+    logger.info(f"Detected {event_count} anomaly events.")
 
 
 def cmd_events(args: argparse.Namespace) -> None:
     summary = events.run_reference_analysis(Path(args.config), workbook_override=args.source)
-    print(f"Reference analysis completed. Records: {summary['records']}")
+    logger.info(f"Reference analysis completed. Records: {summary['records']}")
 
 
 def build_parser() -> argparse.ArgumentParser:
