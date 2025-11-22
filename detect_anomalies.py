@@ -281,6 +281,36 @@ def detect_pritok(df, well_id, rules=None):
                      if convexity < -conv_thresh:
                          continue
             
+            # ACCELERATION CHECK: Is this just a slow precursor to a major event?
+            # Look ahead up to 96 hours. If we find a window with Slope > 3x current_slope,
+            # we assume the current one is too early (precursor) and skip it.
+            is_precursor = False
+            lookahead_limit = 96
+            current_mag = abs(slope)
+            
+            # Scan future windows
+            for offset in range(4, lookahead_limit, 4): # Check every 4 hours
+                 idx_future = i + offset
+                 if idx_future + window_size >= len(pressures):
+                     break
+                 
+                 y_fut = pressures[idx_future : idx_future + window_size]
+                 x_fut = np.arange(window_size)
+                 s_fut, _, _, _, _ = linregress(x_fut, y_fut)
+                 
+                 # Must match direction
+                 match_dir_fut = (s_fut > 0) if expect_positive else (s_fut < 0)
+                 if not match_dir_fut:
+                     continue
+                     
+                 if abs(s_fut) > 3.0 * current_mag:
+                      # Found a much steeper trend later!
+                      is_precursor = True
+                      break
+            
+            if is_precursor:
+                 continue
+
             anomaly_start = dates[i]
             
             # VALIDATE WITH SVOD RULES
