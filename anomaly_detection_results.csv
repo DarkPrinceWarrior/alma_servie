@@ -1,0 +1,11 @@
+well_id,type,detected_time,actual_time,status
+5271г,Negermet,2025-08-15 00:39:52,2025-08-15 00:37:00,Detected
+1123л,Negermet,2025-06-21 08:35:19,2025-06-21 08:32:00,Detected
+524,Negermet,2025-06-09 19:51:30,2025-06-09 19:40:00,Detected
+1128г,Negermet,2025-03-16 19:01:02,2025-03-16 17:47:00,Detected
+3509г,Negermet,2025-08-10 10:15:53,2025-08-10 09:51:00,Detected
+4651,Negermet,2025-01-28 16:00:44,2025-01-28 15:48:00,Detected
+495,Pritok,2025-10-07 08:00:00,2025-10-08 00:00:00,"Negative Trend found (Slope: -0.0187, R2: 0.62)"
+3261,Pritok,2025-11-11 05:00:00,2025-10-21 00:00:00,"Positive Trend found (Slope: 0.0120, R2: 0.76)"
+902,Pritok,2025-10-16 08:00:00,2025-10-22 00:00:00,"Negative Trend found (Slope: -0.0079, R2: 0.63)"
+906,Pritok,2025-11-07 14:00:00,2025-10-22 00:00:00,"Negative Trend found (Slope: -0.0346, R2: 0.66)"
