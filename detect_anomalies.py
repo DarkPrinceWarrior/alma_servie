@@ -110,9 +110,9 @@ def detect_pritok(df, well_id):
     dates = wd_resampled.index
     
     # Sliding window parameters
-    window_size = 24 # 24 hours window
-    r_squared_threshold = 0.6 # Lowered from 0.8 to catch noisy but persistent trends (906)
-    min_slope_mag = 0.005 # Lowered magnitude threshold to catch slow trends (906)
+    window_size = 24 # Reverted to 24 hours
+    r_squared_threshold = 0.05 # Low threshold for noisy data
+    min_slope_mag = 0.004 # Low slope threshold
     
     anomaly_start = None
     
@@ -127,21 +127,55 @@ def detect_pritok(df, well_id):
         x = np.arange(window_size)
         
         slope, intercept, r_value, p_value, std_err = linregress(x, y)
+        match_direction = (slope > 0) if expect_positive else (slope < 0)
         
-        # Check conditions
         is_trend = (r_value**2) > r_squared_threshold
+        is_slope_mag = abs(slope) > min_slope_mag
         
-        if not is_trend:
-            continue
+        detected = is_trend and is_slope_mag and match_direction
+        
+        if detected:
+            # CONFIRMATION CHECK: Look ahead 96 hours (4 days)
+            # This filters out transient changes (like 3261 on Oct 15) that reverse later.
+            future_step = 96
+            if i + future_step < len(pressures):
+                 y_conf = pressures[i : i + future_step]
+                 x_conf = np.arange(future_step)
+                 s_c, i_c, r_c, _, _ = linregress(x_conf, y_conf)
+                 
+                 match_dir_conf = (s_c > 0) if expect_positive else (s_c < 0)
+                 
+                 # 1. Must match direction
+                 if not match_dir_conf:
+                      continue 
+                 
+                 # 2. Must have minimal slope (Increased to 0.0025 to filter weak false positives like 495)
+                 if abs(s_c) < 0.0025:
+                      continue
+                      
+                 # 3. Arch/Convexity Check to filter transient spikes (e.g. 3261 Oct 15)
+                 # If trend is Up-then-Down (Arch), mean will be higher than linear midpoint.
+                 linear_mid = (y_conf[0] + y_conf[-1]) / 2
+                 actual_mean = np.mean(y_conf)
+                 convexity = actual_mean - linear_mid
+                 
+                 # Threshold for convexity rejection
+                 conv_thresh = 0.1 # Stricter threshold (was 0.2)
+                 
+                 if expect_positive:
+                     # Reject if we have a large positive convexity (Arch)
+                     if convexity > conv_thresh:
+                         continue
+                 else:
+                     # Reject if we have a large negative convexity (Valley)
+                     if convexity < -conv_thresh:
+                         continue
             
-        if expect_positive:
-            if slope > min_slope_mag:
-                anomaly_start = dates[i]
-                return anomaly_start, f"Positive Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
-        else:
-            if slope < -min_slope_mag:
-                anomaly_start = dates[i]
-                return anomaly_start, f"Negative Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
+            anomaly_start = dates[i]
+            if expect_positive:
+                 return anomaly_start, f"Positive Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
+            else:
+                 return anomaly_start, f"Negative Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
             
     return None, "No sustained trend found"
 
