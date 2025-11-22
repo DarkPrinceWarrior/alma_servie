@@ -149,8 +149,13 @@ def detect_pritok(df, well_id):
                  if not match_dir_conf:
                       continue 
                  
-                 # 2. Must have minimal slope (Increased to 0.0025 to filter weak false positives like 495)
-                 if abs(s_c) < 0.0025:
+                 # 2. Adaptive Slope Threshold based on R2
+                 # If the trend is very clean (High R2), we expect a steeper slope to call it an anomaly (ignore slow linear drifts).
+                 # If the trend is noisy (Low R2), we accept shallower slopes (like Well 906).
+                 r2_conf = r_c**2
+                 slope_thresh = 0.005 if r2_conf > 0.2 else 0.0025
+                 
+                 if abs(s_c) < slope_thresh:
                       continue
                       
                  # 3. Arch/Convexity Check to filter transient spikes (e.g. 3261 Oct 15)
