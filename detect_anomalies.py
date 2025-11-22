@@ -7,16 +7,114 @@ import warnings
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
 
+def parse_trend_rule(text):
+    """
+    Parses text like '↑↑ Давление', '↓ Ток', '= Температура' into expected direction.
+    Returns: 1 (Increase), -1 (Decrease), 0 (Stable), None (Unknown/Ambiguous)
+    """
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if '↑' in text and '↓' in text: # Ambiguous '↓↑'
+        return None 
+    if '↑' in text:
+        return 1
+    if '↓' in text:
+        return -1
+    if '=' in text:
+        return 0
+    return None
+
+def load_validation_rules():
+    """
+    Loads trend rules from wells_svod.csv.
+    Returns: dict {well_id: {'pressure': rule, 'current': rule, 'temp': rule}}
+    """
+    svod = pd.read_csv('db/wells_svod.csv')
+    rules = {}
+    for _, row in svod.iterrows():
+        wid = str(row['well_id'])
+        rules[wid] = {
+            'pressure': parse_trend_rule(row.get('pressure_info')),
+            'current': parse_trend_rule(row.get('current_info')),
+            'temp': parse_trend_rule(row.get('temperature_info'))
+        }
+    return rules
+
+def calculate_slope(series):
+    """Calculates linear regression slope for a series."""
+    if len(series) < 2:
+        return 0
+    y = series.values
+    x = np.arange(len(y))
+    slope, _, _, _, _ = linregress(x, y)
+    return slope
+
+def validate_anomaly(well_data, anomaly_time, rules, window_hours=3):
+    """
+    Validates an anomaly candidate by checking trends of auxiliary parameters.
+    """
+    start_dt = pd.to_datetime(anomaly_time)
+    end_dt = start_dt + pd.Timedelta(hours=window_hours)
+    
+    # Extract validation window
+    window = well_data[(well_data['timestamp'] >= start_dt) & (well_data['timestamp'] <= end_dt)]
+    if len(window) < 2:
+        return True # Not enough data to invalidate
+        
+    # Resample to ensure consistent slope calculation (e.g. 1h) if data is high freq
+    # Assuming well_data is raw, we resample to 10T or 1H?
+    # For slope calculation, it's safer to use resampled data to avoid noise.
+    # Let's use the raw data but simple slope or mean-resampled.
+    # Using 10T resampling seems appropriate for validation.
+    window_res = window.set_index('timestamp').resample('10min').mean(numeric_only=True).interpolate()
+    
+    # Check Pressure
+    if rules['pressure'] is not None:
+        p_slope = calculate_slope(window_res['intake_pressure'])
+        if rules['pressure'] == 1 and p_slope < -0.01: # Expected Increase, but Decreasing
+            return False
+        if rules['pressure'] == -1 and p_slope > 0.01: # Expected Decrease, but Increasing
+            return False
+        # Note: We treat Stable (=) loosely for pressure since main algo handles it.
+        
+    # Check Current
+    if rules['current'] is not None and 'current' in window_res:
+        c_slope = calculate_slope(window_res['current'])
+        # Current stability threshold? 
+        # Stable means slope is near 0.
+        # Increase means slope > 0.
+        if rules['current'] == 0:
+             if abs(c_slope) > 0.5: # Arbitrary threshold for "Significant Current Change"
+                 return False
+        elif rules['current'] == 1 and c_slope < -0.1:
+             return False
+        elif rules['current'] == -1 and c_slope > 0.1:
+             return False
+             
+    # Check Temperature
+    if rules['temp'] is not None and 'motor_temperature' in window_res:
+        t_slope = calculate_slope(window_res['motor_temperature'])
+        if rules['temp'] == 0:
+             if abs(t_slope) > 0.5: # Significant Temp Change
+                 return False
+        elif rules['temp'] == 1 and t_slope < -0.1:
+             return False
+        elif rules['temp'] == -1 and t_slope > 0.1:
+             return False
+             
+    return True
+
 def load_data():
     print("Loading data...")
     df = pd.read_csv('db/wells_database.csv')
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     return df
 
-def detect_negermet(df, well_id):
+def detect_negermet(df, well_id, rules=None):
     """
     Detects Leakage (Negermet) start time.
-    Logic: Ruptures to find pressure jumps -> Filter by Frequency Stability.
+    Logic: Ruptures to find pressure jumps -> Filter by Frequency Stability -> Validate with Rules.
     """
     well_data = df[df['well_id'] == str(well_id)].sort_values('timestamp').copy()
     if well_data.empty:
@@ -75,6 +173,13 @@ def detect_negermet(df, well_id):
             
         # If we are here: Pressure changed, Freq did not. Candidate!
         timestamp = well_data.iloc[cp_idx]['timestamp']
+        
+        # VALIDATE WITH SVOD RULES (e.g. Check Current Direction)
+        if rules:
+            # Use a short window (1h) for Negermet validation as jumps are sharp
+            if not validate_anomaly(well_data, timestamp, rules.get(str(well_id)), window_hours=1):
+                continue
+
         candidates.append((timestamp, abs(diff)))
         
     if not candidates:
@@ -87,10 +192,10 @@ def detect_negermet(df, well_id):
     
     return candidates[0][0], "Detected"
 
-def detect_pritok(df, well_id):
+def detect_pritok(df, well_id, rules=None):
     """
     Detects Inflow (Pritok) start time.
-    Logic: Rolling Linear Regression to find sustained negative trend.
+    Logic: Rolling Linear Regression to find sustained negative trend -> Validate with Rules.
     """
     well_data = df[df['well_id'] == str(well_id)].sort_values('timestamp').copy()
     if well_data.empty:
@@ -177,6 +282,13 @@ def detect_pritok(df, well_id):
                          continue
             
             anomaly_start = dates[i]
+            
+            # VALIDATE WITH SVOD RULES
+            if rules:
+                # Pritok is slow, so use 24h window for validation
+                if not validate_anomaly(well_data, anomaly_start, rules.get(str(well_id)), window_hours=24):
+                    continue
+
             if expect_positive:
                  return anomaly_start, f"Positive Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
             else:
@@ -196,6 +308,7 @@ def load_ground_truth():
 def main():
     df = load_data()
     gt_map = load_ground_truth()
+    validation_rules = load_validation_rules()
     
     negermet_wells = ['5271г', '1123л', '524', '1128г', '3509г', '4651']
     pritok_wells = ['495', '3261', '902', '906']
@@ -205,7 +318,7 @@ def main():
     print("\n--- Processing Negermet (Leakage) Wells ---")
     for well in negermet_wells:
         print(f"Analyzing {well}...")
-        dt, status = detect_negermet(df, well)
+        dt, status = detect_negermet(df, well, validation_rules)
         actual_time = gt_map.get(well, "Not found")
         results.append({
             'well_id': well, 
@@ -219,7 +332,7 @@ def main():
     print("\n--- Processing Pritok (Inflow) Wells ---")
     for well in pritok_wells:
         print(f"Analyzing {well}...")
-        dt, status = detect_pritok(df, well)
+        dt, status = detect_pritok(df, well, validation_rules)
         actual_time = gt_map.get(well, "Not found")
         results.append({
             'well_id': well, 
