@@ -192,20 +192,54 @@ def median_abs_deviation(series):
     med = np.nanmedian(values)
     return np.nanmedian(np.abs(values - med))
 
-def rolling_sawtooth(series, window):
+def clip_series(series, mask=None, lower_q=0.01, upper_q=0.99):
+    if mask is not None:
+        valid = series[mask]
+    else:
+        valid = series
+    valid = valid.dropna()
+    if valid.empty:
+        return series
+    low, high = valid.quantile([lower_q, upper_q])
+    if pd.isna(low) or pd.isna(high) or low == high:
+        return series
+    return series.clip(lower=low, upper=high)
+
+def choose_resample_rule(timestamps):
+    deltas = timestamps.sort_values().diff().dropna()
+    if deltas.empty:
+        return '1h'
+    median_delta = deltas.median()
+    if median_delta <= pd.Timedelta(minutes=5):
+        return '15min'
+    if median_delta <= pd.Timedelta(minutes=15):
+        return '30min'
+    return '1h'
+
+def compute_window_points(resample_rule, window_hours):
+    resample_td = pd.to_timedelta(resample_rule)
+    points = int(pd.Timedelta(hours=window_hours) / resample_td)
+    return max(points, 3)
+
+def rolling_sawtooth(series, window, min_periods=None):
+    if min_periods is None:
+        min_periods = window
     diff = series.diff()
     sign = np.sign(diff)
     sign_change = (sign != sign.shift(1)) & (sign != 0) & (sign.shift(1) != 0)
-    sign_rate = sign_change.rolling(window, min_periods=window).mean()
-    mean_abs_diff = diff.abs().rolling(window, min_periods=window).mean()
-    std = series.rolling(window, min_periods=window).std()
+    sign_rate = sign_change.rolling(window, min_periods=min_periods).mean()
+    mean_abs_diff = diff.abs().rolling(window, min_periods=min_periods).mean()
+    std = series.rolling(window, min_periods=min_periods).std()
     return sign_rate * (mean_abs_diff / (std + 1e-6))
 
 def normalize_positive(series):
-    mad = median_abs_deviation(series)
+    values = series.dropna()
+    if values.empty:
+        return series * 0
+    mad = median_abs_deviation(values)
     if mad == 0 or np.isnan(mad):
-        mad = np.nanstd(series) or 1.0
-    median = np.nanmedian(series)
+        mad = np.nanstd(values) or 1.0
+    median = np.nanmedian(values)
     return ((series - median) / mad).clip(lower=0)
 
 def find_longest_true_segment(mask):
@@ -255,47 +289,111 @@ def detect_meha(
     min_run_days=5,
     baseline_days=30,
     baseline_k=3.0,
+    stop_weight=0.3,
+    daily_quantile=0.75,
+    min_pump_on_fraction=0.2,
+    pump_off_ratio=0.2,
+    baseline_trim_quantile=0.6,
 ):
     well_data = well_data.sort_values('timestamp')
-    resampled = well_data.set_index('timestamp').resample('1h').mean(numeric_only=True).dropna()
-    if len(resampled) < window_hours:
+    resample_rule = choose_resample_rule(well_data['timestamp'])
+    window_points = compute_window_points(resample_rule, window_hours)
+    resampled = well_data.set_index('timestamp').resample(resample_rule).mean(numeric_only=True)
+    resampled = resampled.dropna(how='all')
+    if len(resampled) < window_points:
         return None, "Not enough data"
 
-    saw_scores = [rolling_sawtooth(resampled[col], window_hours) for col in MEHA_SAW_COLS]
-    saw_mean = pd.concat(saw_scores, axis=1).mean(axis=1)
+    freq_med = np.nanmedian(resampled['frequency'])
+    current_med = np.nanmedian(resampled['current'])
+    load_med = np.nanmedian(resampled['load_coef'])
+    if np.isnan(freq_med):
+        freq_med = 0.0
+    if np.isnan(current_med):
+        current_med = 0.0
+    if np.isnan(load_med):
+        load_med = 0.0
 
-    temp = resampled[MEHA_TEMP_COL]
-    temp_slope = (temp - temp.shift(window_hours - 1)) / float(window_hours - 1)
-    temp_norm = normalize_positive(temp_slope)
+    freq_thr = max(1.0, freq_med * pump_off_ratio)
+    current_thr = max(0.1, current_med * pump_off_ratio)
+    load_thr = max(0.05, load_med * pump_off_ratio)
+    pump_off = (
+        (resampled['frequency'] <= freq_thr)
+        | ((resampled['current'] <= current_thr) & (resampled['load_coef'] <= load_thr))
+    )
 
-    score = saw_mean + temp_weight * temp_norm
-    daily = score.resample('D').median()
+    cleaned = resampled.copy()
+    for col in MEHA_SAW_COLS + [MEHA_TEMP_COL]:
+        cleaned[col] = clip_series(cleaned[col], mask=~pump_off)
+        cleaned.loc[pump_off, col] = np.nan
+
+    min_periods = max(3, int(window_points * 0.7))
+    saw_scores = [
+        rolling_sawtooth(cleaned[col], window_points, min_periods=min_periods)
+        for col in MEHA_SAW_COLS
+    ]
+    saw_mean = pd.concat(saw_scores, axis=1).mean(axis=1, skipna=True)
+
+    stop_rate = pump_off.astype(float).rolling(window_points, min_periods=min_periods).mean()
+
+    temp = cleaned[MEHA_TEMP_COL]
+    temp_slope = (temp - temp.shift(window_points - 1)) / float(window_points - 1)
+
+    score = (
+        normalize_positive(saw_mean)
+        + temp_weight * normalize_positive(temp_slope)
+        + stop_weight * normalize_positive(stop_rate)
+    )
+
+    daily_score = score.resample('D').quantile(daily_quantile)
+    daily_on = (~pump_off).astype(float).resample('D').mean()
+    daily_score = daily_score[daily_on >= min_pump_on_fraction]
 
     if interval_start is not None:
         baseline_start = interval_start - pd.Timedelta(days=baseline_days)
-        baseline = daily[(daily.index >= baseline_start) & (daily.index < interval_start)]
+        baseline = daily_score[(daily_score.index >= baseline_start) & (daily_score.index < interval_start)]
         if baseline.empty:
-            baseline = daily[daily > 0]
+            baseline = daily_score[daily_score > 0]
         if baseline.empty:
             return None, "No baseline for threshold"
-        mad = median_abs_deviation(baseline)
-        if mad == 0 or np.isnan(mad):
-            mad = np.nanstd(baseline) or 1.0
-        threshold = np.nanmedian(baseline) + baseline_k * mad
-        search = daily[daily.index >= interval_start]
-        detail_prefix = f"baseline_days={baseline_days}, k={baseline_k}"
+        cutoff = baseline.quantile(baseline_trim_quantile)
+        trimmed = baseline[baseline <= cutoff]
+        if len(trimmed) >= max(5, int(len(baseline) * 0.3)):
+            baseline = trimmed
+
+        base_med = np.nanmedian(baseline)
+        base_mad = median_abs_deviation(baseline)
+        if base_mad == 0 or np.isnan(base_mad):
+            base_mad = np.nanstd(baseline) or 1.0
+
+        noise_ratio = base_mad / (abs(base_med) + 1e-6)
+        run_days = min_run_days
+        k = baseline_k
+        if noise_ratio < 0.3:
+            k *= 0.8
+            run_days = max(3, min_run_days - 2)
+        elif noise_ratio > 0.8:
+            k *= 1.2
+            run_days = min_run_days + 2
+
+        threshold = base_med + k * base_mad
+        search = daily_score[daily_score.index >= interval_start]
+        detail_prefix = (
+            f"baseline_days={baseline_days}, k={round(k,2)}, run_days={run_days}, "
+            f"resample={resample_rule}, trim_q={baseline_trim_quantile}"
+        )
     else:
-        nonzero = daily[daily > 0]
+        nonzero = daily_score[daily_score > 0]
         if nonzero.empty:
             return None, "No anomaly score"
         threshold = np.quantile(nonzero.values, score_quantile)
-        search = daily
-        detail_prefix = f"quantile={score_quantile}"
+        search = daily_score
+        run_days = min_run_days
+        detail_prefix = f"quantile={score_quantile}, run_days={run_days}, resample={resample_rule}"
 
     high = search >= threshold
-    start = find_first_true_run(high, min_run_days)
+    start = find_first_true_run(high, run_days)
     if start is not None:
-        return start, f"Detected (first run days: {min_run_days}, {detail_prefix})"
+        return start, f"Detected (first run days: {run_days}, {detail_prefix})"
 
     start, seg_len = find_longest_true_segment(high)
     if start is None:
