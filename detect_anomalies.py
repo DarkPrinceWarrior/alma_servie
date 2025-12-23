@@ -1,11 +1,41 @@
 import pandas as pd
 import numpy as np
-import ruptures as rpt
-from scipy.stats import linregress
+try:
+    import ruptures as rpt
+except ImportError:
+    rpt = None
+try:
+    from scipy.stats import linregress
+except ImportError:
+    linregress = None
 import warnings
+from pathlib import Path
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore')
+
+MEHA_COLUMN_MAP = {
+    'Затрубное давление': 'annulus_pressure',
+    'Линейное давление': 'line_pressure',
+    'Давление на приеме насоса': 'intake_pressure',
+    'Объемный дебит жидкости, м3/сут': 'flow_rate',
+    'Ток фазы A': 'current',
+    'Коэффициент загрузки': 'load_coef',
+    'Температура двигателя': 'motor_temperature',
+    'Рабочая частота': 'frequency',
+}
+
+MEHA_SAW_COLS = [
+    'annulus_pressure',
+    'line_pressure',
+    'intake_pressure',
+    'flow_rate',
+    'current',
+    'load_coef',
+    'frequency',
+]
+
+MEHA_TEMP_COL = 'motor_temperature'
 
 def parse_trend_rule(text):
     """
@@ -47,8 +77,29 @@ def calculate_slope(series):
         return 0
     y = series.values
     x = np.arange(len(y))
-    slope, _, _, _, _ = linregress(x, y)
+    slope, _, _, _, _ = safe_linregress(x, y)
     return slope
+
+def safe_linregress(x, y):
+    if linregress is not None:
+        return linregress(x, y)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 2:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    x_mean = x.mean()
+    y_mean = y.mean()
+    x_dev = x - x_mean
+    y_dev = y - y_mean
+    var = np.sum(x_dev ** 2)
+    if var == 0:
+        return 0.0, y_mean, 0.0, 0.0, 0.0
+    cov = np.sum(x_dev * y_dev)
+    slope = cov / var
+    intercept = y_mean - slope * x_mean
+    denom = np.sqrt(var * np.sum(y_dev ** 2))
+    r_value = cov / denom if denom else 0.0
+    return slope, intercept, r_value, 0.0, 0.0
 
 def validate_anomaly(well_data, anomaly_time, rules, window_hours=3):
     """
@@ -111,11 +162,109 @@ def load_data():
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     return df
 
+def load_meha_data():
+    print("Loading Meha data from feather...")
+    frames = []
+    for path in sorted(Path('db').glob('*_МЕХА.feather')):
+        well_id = path.stem.split('_')[0]
+        df = pd.read_feather(path)
+        df = df.rename(columns={'index': 'timestamp', **MEHA_COLUMN_MAP})
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['well_id'] = str(well_id)
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+def load_meha_intervals():
+    print("Loading Meha ground truth intervals...")
+    intervals = pd.read_csv('db/meha_intervals.csv')
+    intervals['well_id'] = intervals['well_id'].astype(str)
+    intervals['start_date'] = pd.to_datetime(intervals['start_date'])
+    intervals['end_date'] = pd.to_datetime(intervals['end_date']) + pd.Timedelta(hours=23, minutes=59, seconds=59)
+    return dict(
+        (row['well_id'], (row['start_date'], row['end_date']))
+        for _, row in intervals.iterrows()
+    )
+
+def median_abs_deviation(series):
+    values = np.asarray(series, dtype=float)
+    med = np.nanmedian(values)
+    return np.nanmedian(np.abs(values - med))
+
+def rolling_sawtooth(series, window):
+    diff = series.diff()
+    sign = np.sign(diff)
+    sign_change = (sign != sign.shift(1)) & (sign != 0) & (sign.shift(1) != 0)
+    sign_rate = sign_change.rolling(window, min_periods=window).mean()
+    mean_abs_diff = diff.abs().rolling(window, min_periods=window).mean()
+    std = series.rolling(window, min_periods=window).std()
+    return sign_rate * (mean_abs_diff / (std + 1e-6))
+
+def normalize_positive(series):
+    mad = median_abs_deviation(series)
+    if mad == 0 or np.isnan(mad):
+        mad = np.nanstd(series) or 1.0
+    median = np.nanmedian(series)
+    return ((series - median) / mad).clip(lower=0)
+
+def find_longest_true_segment(mask):
+    best_start = None
+    best_len = 0
+    current_start = None
+    current_len = 0
+    for timestamp, flag in mask.items():
+        if flag:
+            if current_start is None:
+                current_start = timestamp
+                current_len = 1
+            else:
+                current_len += 1
+        else:
+            if current_start is not None and current_len > best_len:
+                best_start = current_start
+                best_len = current_len
+            current_start = None
+            current_len = 0
+    if current_start is not None and current_len > best_len:
+        best_start = current_start
+        best_len = current_len
+    return best_start, best_len
+
+def detect_meha(well_data, window_hours=24, score_quantile=0.7, temp_weight=0.5):
+    well_data = well_data.sort_values('timestamp')
+    resampled = well_data.set_index('timestamp').resample('1h').mean(numeric_only=True).dropna()
+    if len(resampled) < window_hours:
+        return None, "Not enough data"
+
+    saw_scores = [rolling_sawtooth(resampled[col], window_hours) for col in MEHA_SAW_COLS]
+    saw_mean = pd.concat(saw_scores, axis=1).mean(axis=1)
+
+    temp = resampled[MEHA_TEMP_COL]
+    temp_slope = (temp - temp.shift(window_hours - 1)) / float(window_hours - 1)
+    temp_norm = normalize_positive(temp_slope)
+
+    score = saw_mean + temp_weight * temp_norm
+    monthly = score.resample('MS').median()
+    nonzero = monthly[monthly > 0]
+    if nonzero.empty:
+        return None, "No anomaly score"
+
+    threshold = np.quantile(nonzero.values, score_quantile)
+    high = monthly >= threshold
+    start, seg_len = find_longest_true_segment(high)
+    if start is None:
+        return None, "No sustained anomaly"
+
+    return start, f"Detected (segment months: {seg_len})"
+
 def detect_negermet(df, well_id, rules=None):
     """
     Detects Leakage (Negermet) start time.
     Logic: Ruptures to find pressure jumps -> Filter by Frequency Stability -> Validate with Rules.
     """
+    if rpt is None:
+        return None, "ruptures not installed"
     well_data = df[df['well_id'] == str(well_id)].sort_values('timestamp').copy()
     if well_data.empty:
          well_data = df[df['well_id'] == well_id].sort_values('timestamp').copy()
@@ -231,7 +380,7 @@ def detect_pritok(df, well_id, rules=None):
         y = pressures[i : i + window_size]
         x = np.arange(window_size)
         
-        slope, intercept, r_value, p_value, std_err = linregress(x, y)
+        slope, intercept, r_value, p_value, std_err = safe_linregress(x, y)
         match_direction = (slope > 0) if expect_positive else (slope < 0)
         
         is_trend = (r_value**2) > r_squared_threshold
@@ -246,7 +395,7 @@ def detect_pritok(df, well_id, rules=None):
             if i + future_step < len(pressures):
                  y_conf = pressures[i : i + future_step]
                  x_conf = np.arange(future_step)
-                 s_c, i_c, r_c, _, _ = linregress(x_conf, y_conf)
+                 s_c, i_c, r_c, _, _ = safe_linregress(x_conf, y_conf)
                  
                  match_dir_conf = (s_c > 0) if expect_positive else (s_c < 0)
                  
@@ -296,7 +445,7 @@ def detect_pritok(df, well_id, rules=None):
                  
                  y_fut = pressures[idx_future : idx_future + window_size]
                  x_fut = np.arange(window_size)
-                 s_fut, _, _, _, _ = linregress(x_fut, y_fut)
+                 s_fut, _, _, _, _ = safe_linregress(x_fut, y_fut)
                  
                  # Must match direction
                  match_dir_fut = (s_fut > 0) if expect_positive else (s_fut < 0)
@@ -335,7 +484,7 @@ def load_ground_truth():
     gt_map = dict(zip(svod['well_id'], svod['anomaly_start_time']))
     return gt_map
 
-def main():
+def run_legacy_detection():
     df = load_data()
     gt_map = load_ground_truth()
     validation_rules = load_validation_rules()
@@ -380,6 +529,50 @@ def main():
     
     # Save to csv
     res_df.to_csv('anomaly_detection_results.csv', index=False)
+
+def run_meha_detection():
+    df = load_meha_data()
+    if df.empty:
+        print("No Meha data found.")
+        return
+
+    intervals = load_meha_intervals()
+    results = []
+
+    print("\n--- Processing Meha Wells ---")
+    for well_id, (start_dt, end_dt) in intervals.items():
+        print(f"Analyzing {well_id}...")
+        well_data = df[df['well_id'] == str(well_id)]
+        detected_time, detail = detect_meha(well_data)
+
+        if detected_time is None:
+            status = "Not found"
+        elif start_dt <= detected_time <= end_dt:
+            status = "Detected"
+        else:
+            status = "Out of interval"
+
+        results.append({
+            'well_id': well_id,
+            'type': 'Meha',
+            'detected_time': detected_time,
+            'actual_start': start_dt,
+            'actual_end': end_dt,
+            'status': status,
+            'detail': detail,
+        })
+        print(f"  -> Detected: {detected_time} | Actual: {start_dt} - {end_dt} ({status})")
+
+    res_df = pd.DataFrame(results)
+    print("\nFinal Results:")
+    print(res_df)
+    res_df.to_csv('anomaly_detection_results.csv', index=False)
+
+def main():
+    if Path('db/meha_intervals.csv').exists():
+        run_meha_detection()
+    else:
+        run_legacy_detection()
 
 if __name__ == "__main__":
     main()
