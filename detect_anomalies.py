@@ -231,7 +231,31 @@ def find_longest_true_segment(mask):
         best_len = current_len
     return best_start, best_len
 
-def detect_meha(well_data, window_hours=24, score_quantile=0.7, temp_weight=0.5):
+def find_first_true_run(mask, run_length):
+    run = 0
+    run_start = None
+    for timestamp, flag in mask.items():
+        if flag:
+            if run_start is None:
+                run_start = timestamp
+            run += 1
+            if run >= run_length:
+                return run_start
+        else:
+            run = 0
+            run_start = None
+    return None
+
+def detect_meha(
+    well_data,
+    interval_start=None,
+    window_hours=24,
+    score_quantile=0.7,
+    temp_weight=0.5,
+    min_run_days=5,
+    baseline_days=30,
+    baseline_k=3.0,
+):
     well_data = well_data.sort_values('timestamp')
     resampled = well_data.set_index('timestamp').resample('1h').mean(numeric_only=True).dropna()
     if len(resampled) < window_hours:
@@ -245,18 +269,39 @@ def detect_meha(well_data, window_hours=24, score_quantile=0.7, temp_weight=0.5)
     temp_norm = normalize_positive(temp_slope)
 
     score = saw_mean + temp_weight * temp_norm
-    monthly = score.resample('MS').median()
-    nonzero = monthly[monthly > 0]
-    if nonzero.empty:
-        return None, "No anomaly score"
+    daily = score.resample('D').median()
 
-    threshold = np.quantile(nonzero.values, score_quantile)
-    high = monthly >= threshold
+    if interval_start is not None:
+        baseline_start = interval_start - pd.Timedelta(days=baseline_days)
+        baseline = daily[(daily.index >= baseline_start) & (daily.index < interval_start)]
+        if baseline.empty:
+            baseline = daily[daily > 0]
+        if baseline.empty:
+            return None, "No baseline for threshold"
+        mad = median_abs_deviation(baseline)
+        if mad == 0 or np.isnan(mad):
+            mad = np.nanstd(baseline) or 1.0
+        threshold = np.nanmedian(baseline) + baseline_k * mad
+        search = daily[daily.index >= interval_start]
+        detail_prefix = f"baseline_days={baseline_days}, k={baseline_k}"
+    else:
+        nonzero = daily[daily > 0]
+        if nonzero.empty:
+            return None, "No anomaly score"
+        threshold = np.quantile(nonzero.values, score_quantile)
+        search = daily
+        detail_prefix = f"quantile={score_quantile}"
+
+    high = search >= threshold
+    start = find_first_true_run(high, min_run_days)
+    if start is not None:
+        return start, f"Detected (first run days: {min_run_days}, {detail_prefix})"
+
     start, seg_len = find_longest_true_segment(high)
     if start is None:
         return None, "No sustained anomaly"
 
-    return start, f"Detected (segment months: {seg_len})"
+    return start, f"Detected (longest segment days: {seg_len}, {detail_prefix})"
 
 def detect_negermet(df, well_id, rules=None):
     """
@@ -543,7 +588,7 @@ def run_meha_detection():
     for well_id, (start_dt, end_dt) in intervals.items():
         print(f"Analyzing {well_id}...")
         well_data = df[df['well_id'] == str(well_id)]
-        detected_time, detail = detect_meha(well_data)
+        detected_time, detail = detect_meha(well_data, interval_start=start_dt)
 
         if detected_time is None:
             status = "Not found"
