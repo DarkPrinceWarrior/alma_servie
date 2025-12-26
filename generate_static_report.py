@@ -131,7 +131,8 @@ def create_plot_base64(well_id, anomaly_type, detected_time, actual_start, actua
 def generate_static_html():
     print("Generating static HTML report...")
     results = pd.read_csv('anomaly_detection_results.csv')
-    full_data = load_data(results)
+    legacy_data = load_legacy_data()
+    meha_data = load_meha_data() if 'type' in results.columns and (results['type'] == 'Meha').any() else pd.DataFrame()
     has_interval = 'actual_start' in results.columns and 'actual_end' in results.columns
     
     html_content = """
@@ -206,10 +207,12 @@ def generate_static_html():
         detected_time = row['detected_time']
         actual_start = row['actual_start'] if has_interval else row.get('actual_time')
         actual_end = row['actual_end'] if has_interval else None
+
+        df = meha_data if anomaly_type == 'Meha' else legacy_data
         
         print(f"Processing plot {idx + 1}/{total_plots}: Well {well_id}")
         
-        b64_img = create_plot_base64(well_id, anomaly_type, detected_time, actual_start, actual_end, full_data)
+        b64_img = create_plot_base64(well_id, anomaly_type, detected_time, actual_start, actual_end, df)
         
         if b64_img:
             html_content += f"""

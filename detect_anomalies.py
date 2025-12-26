@@ -1,5 +1,7 @@
 import pandas as pd
 import numpy as np
+import argparse
+import random
 try:
     import ruptures as rpt
 except ImportError:
@@ -36,6 +38,13 @@ MEHA_SAW_COLS = [
 ]
 
 MEHA_TEMP_COL = 'motor_temperature'
+
+
+def normalize_well_id(well_id):
+    wid = str(well_id).strip()
+    if wid.endswith('_МЕХА'):
+        wid = wid.split('_', 1)[0]
+    return wid
 
 def parse_trend_rule(text):
     """
@@ -382,13 +391,47 @@ def detect_meha(
             f"resample={resample_rule}, trim_q={baseline_trim_quantile}"
         )
     else:
+        # No ground truth interval: use an adaptive threshold based on an initial baseline window
+        # (avoids using a global quantile threshold which can drift with time and delay detection).
         nonzero = daily_score[daily_score > 0]
         if nonzero.empty:
             return None, "No anomaly score"
-        threshold = np.quantile(nonzero.values, score_quantile)
-        search = daily_score
+
+        baseline_start = nonzero.index.min()
+        baseline_end = baseline_start + pd.Timedelta(days=baseline_days)
+        baseline = daily_score[(daily_score.index >= baseline_start) & (daily_score.index < baseline_end)]
+        baseline = baseline[baseline > 0]
+        if baseline.empty:
+            baseline = nonzero.head(min(len(nonzero), baseline_days))
+        if baseline.empty:
+            return None, "No baseline for threshold"
+
+        cutoff = baseline.quantile(baseline_trim_quantile)
+        trimmed = baseline[baseline <= cutoff]
+        if len(trimmed) >= max(5, int(len(baseline) * 0.3)):
+            baseline = trimmed
+
+        base_med = np.nanmedian(baseline)
+        base_mad = median_abs_deviation(baseline)
+        if base_mad == 0 or np.isnan(base_mad):
+            base_mad = np.nanstd(baseline) or 1.0
+
+        noise_ratio = base_mad / (abs(base_med) + 1e-6)
         run_days = min_run_days
-        detail_prefix = f"quantile={score_quantile}, run_days={run_days}, resample={resample_rule}"
+        k = baseline_k
+        if noise_ratio < 0.3:
+            k *= 0.9
+            run_days = max(5, min_run_days - 2)
+        elif noise_ratio > 0.8:
+            k *= 1.1
+            run_days = min_run_days + 2
+
+        threshold = base_med + k * base_mad
+        search = daily_score[daily_score.index >= baseline_end]
+        detail_prefix = (
+            f"auto_baseline_days={baseline_days}, k={round(k,2)}, run_days={run_days}, "
+            f"resample={resample_rule}, trim_q={baseline_trim_quantile}"
+        )
 
     high = search >= threshold
     start = find_first_true_run(high, run_days)
@@ -415,9 +458,12 @@ def detect_negermet(df, well_id, rules=None):
     if well_data.empty:
         return None, "Data not found"
 
+    well_data['intake_pressure'] = well_data['intake_pressure'].ffill().bfill()
+    well_data['frequency'] = well_data['frequency'].ffill().bfill()
+
     # Prepare signal for Ruptures
     # We focus on Intake Pressure
-    signal = well_data['intake_pressure'].fillna(method='ffill').fillna(method='bfill').values
+    signal = well_data['intake_pressure'].values
     
     if len(signal) < 100:
          return None, "Not enough data"
@@ -443,17 +489,18 @@ def detect_negermet(df, well_id, rules=None):
         prev_window = signal[cp_idx-window:cp_idx]
         post_window = signal[cp_idx:cp_idx+window]
         
-        diff = np.mean(post_window) - np.mean(prev_window)
+        diff = float(np.mean(post_window) - np.mean(prev_window))
         
         # Negermet usually implies INCREASE in pressure (up-up arrows in svod)
         # But general "sharp change" is the trigger.
         # Based on svod: 5271g -> "Sharp pressure jump" (Up)
         
-        if abs(diff) < 0.5: # Lowered threshold from 1.0 to 0.5 to catch smaller shifts like 3509g
+        # Negermet is expected to be a sustained INCREASE in intake pressure.
+        if diff < 0.5:
             continue
             
         # CHECK FREQUENCY STABILITY around this point
-        freq_signal = well_data['frequency'].fillna(method='ffill').values
+        freq_signal = well_data['frequency'].values
         freq_prev = freq_signal[cp_idx-window:cp_idx]
         freq_post = freq_signal[cp_idx:cp_idx+window]
         
@@ -465,14 +512,25 @@ def detect_negermet(df, well_id, rules=None):
             
         # If we are here: Pressure changed, Freq did not. Candidate!
         timestamp = well_data.iloc[cp_idx]['timestamp']
+
+        # Persistence check: in real negermet the pressure jump should remain for hours, not revert quickly.
+        before = well_data[(well_data['timestamp'] >= timestamp - pd.Timedelta(hours=1)) & (well_data['timestamp'] < timestamp)]
+        after = well_data[(well_data['timestamp'] >= timestamp) & (well_data['timestamp'] < timestamp + pd.Timedelta(hours=6))]
+        if len(before) < 5 or len(after) < 5:
+            continue
+        persist_diff = float(after['intake_pressure'].median() - before['intake_pressure'].median())
+        if persist_diff < 8.0:
+            continue
         
         # VALIDATE WITH SVOD RULES (e.g. Check Current Direction)
         if rules:
-            # Use a short window (1h) for Negermet validation as jumps are sharp
-            if not validate_anomaly(well_data, timestamp, rules.get(str(well_id)), window_hours=1):
-                continue
+            rule = rules.get(str(well_id))
+            if rule is not None:
+                # Use a short window (1h) for Negermet validation as jumps are sharp
+                if not validate_anomaly(well_data, timestamp, rule, window_hours=1):
+                    continue
 
-        candidates.append((timestamp, abs(diff)))
+        candidates.append((timestamp, diff, persist_diff))
         
     if not candidates:
         return None, "No anomalies found"
@@ -480,9 +538,9 @@ def detect_negermet(df, well_id, rules=None):
     # Return the earliest candidate with significant magnitude
     # Or the one with largest magnitude? 
     # "Start of anomaly" usually implies the first valid trigger.
-    candidates.sort(key=lambda x: x[0]) # Sort by time
-    
-    return candidates[0][0], "Detected"
+    candidates.sort(key=lambda x: x[0])
+    dt, jump, shift = candidates[0]
+    return dt, f"Detected (jump={jump:.3f}, shift6h={shift:.3f})"
 
 def detect_pritok(df, well_id, rules=None):
     """
@@ -513,10 +571,11 @@ def detect_pritok(df, well_id, rules=None):
     
     anomaly_start = None
     
-    # Check expected direction based on svod.csv logic
-    # 3261 -> Increase (Positive slope)
-    # Others -> Decrease (Negative slope)
-    expect_positive = str(well_id) == '3261'
+    allowed_direction = None
+    if rules:
+        rule = rules.get(str(well_id))
+        if rule is not None and rule.get('pressure') in (1, -1):
+            allowed_direction = rule['pressure']
     
     # We iterate through the series
     for i in range(len(pressures) - window_size):
@@ -524,60 +583,65 @@ def detect_pritok(df, well_id, rules=None):
         x = np.arange(window_size)
         
         slope, intercept, r_value, p_value, std_err = safe_linregress(x, y)
-        match_direction = (slope > 0) if expect_positive else (slope < 0)
+        if slope == 0:
+            continue
+        direction = 1 if slope > 0 else -1
+        if allowed_direction is not None and direction != allowed_direction:
+            continue
         
         is_trend = (r_value**2) > r_squared_threshold
         is_slope_mag = abs(slope) > min_slope_mag
         
-        detected = is_trend and is_slope_mag and match_direction
+        detected = is_trend and is_slope_mag
         
         if detected:
             # CONFIRMATION CHECK: Look ahead 96 hours (4 days)
             # This filters out transient changes (like 3261 on Oct 15) that reverse later.
-            future_step = 96
-            if i + future_step < len(pressures):
-                 y_conf = pressures[i : i + future_step]
-                 x_conf = np.arange(future_step)
-                 s_c, i_c, r_c, _, _ = safe_linregress(x_conf, y_conf)
-                 
-                 match_dir_conf = (s_c > 0) if expect_positive else (s_c < 0)
-                 
-                 # 1. Must match direction
-                 if not match_dir_conf:
-                      continue 
-                 
-                 # 2. Adaptive Slope Threshold based on R2
-                 # If the trend is very clean (High R2), we expect a steeper slope to call it an anomaly (ignore slow linear drifts).
-                 # If the trend is noisy (Low R2), we accept shallower slopes (like Well 906).
-                 r2_conf = r_c**2
-                 slope_thresh = 0.005 if r2_conf > 0.2 else 0.0025
-                 
-                 if abs(s_c) < slope_thresh:
-                      continue
-                      
-                 # 3. Arch/Convexity Check to filter transient spikes (e.g. 3261 Oct 15)
-                 # If trend is Up-then-Down (Arch), mean will be higher than linear midpoint.
-                 linear_mid = (y_conf[0] + y_conf[-1]) / 2
-                 actual_mean = np.mean(y_conf)
-                 convexity = actual_mean - linear_mid
-                 
-                 # Threshold for convexity rejection
-                 conv_thresh = 0.1 # Stricter threshold (was 0.2)
-                 
-                 if expect_positive:
-                     # Reject if we have a large positive convexity (Arch)
-                     if convexity > conv_thresh:
-                         continue
-                 else:
-                     # Reject if we have a large negative convexity (Valley)
-                     if convexity < -conv_thresh:
-                         continue
+            future_step_max = 96
+            future_step = min(future_step_max, len(pressures) - i)
+            if future_step >= 48:
+                y_conf = pressures[i : i + future_step]
+                x_conf = np.arange(future_step)
+                s_c, i_c, r_c, _, _ = safe_linregress(x_conf, y_conf)
+
+                if s_c == 0:
+                    continue
+                match_dir_conf = (1 if s_c > 0 else -1) == direction
+                if not match_dir_conf:
+                    continue
+
+                r2_conf = r_c**2
+                if r2_conf <= r_squared_threshold:
+                    continue
+
+                # Require a minimum net change over the confirmation window.
+                # This helps reject slow drift/oscillation while allowing gradual clean trends (e.g. 1772).
+                delta = float(y_conf[-1] - y_conf[0])
+                min_delta_96h = 0.2
+                delta_thr = min_delta_96h * (future_step / float(future_step_max))
+                if direction == 1 and delta < delta_thr:
+                    continue
+                if direction == -1 and delta > -delta_thr:
+                    continue
+
+                # Arch/Convexity Check to filter transient spikes.
+                linear_mid = (y_conf[0] + y_conf[-1]) / 2
+                actual_mean = np.mean(y_conf)
+                convexity = actual_mean - linear_mid
+
+                conv_thresh = 0.1
+                if direction == 1:
+                    if convexity > conv_thresh:
+                        continue
+                else:
+                    if convexity < -conv_thresh:
+                        continue
             
             # ACCELERATION CHECK: Is this just a slow precursor to a major event?
             # Look ahead up to 96 hours. If we find a window with Slope > 3x current_slope,
             # we assume the current one is too early (precursor) and skip it.
             is_precursor = False
-            lookahead_limit = 96
+            lookahead_limit = 168
             current_mag = abs(slope)
             
             # Scan future windows
@@ -590,8 +654,9 @@ def detect_pritok(df, well_id, rules=None):
                  x_fut = np.arange(window_size)
                  s_fut, _, _, _, _ = safe_linregress(x_fut, y_fut)
                  
-                 # Must match direction
-                 match_dir_fut = (s_fut > 0) if expect_positive else (s_fut < 0)
+                 if s_fut == 0:
+                     continue
+                 match_dir_fut = (1 if s_fut > 0 else -1) == direction
                  if not match_dir_fut:
                      continue
                      
@@ -607,14 +672,14 @@ def detect_pritok(df, well_id, rules=None):
             
             # VALIDATE WITH SVOD RULES
             if rules:
-                # Pritok is slow, so use 24h window for validation
-                if not validate_anomaly(well_data, anomaly_start, rules.get(str(well_id)), window_hours=24):
-                    continue
+                rule = rules.get(str(well_id))
+                if rule is not None:
+                    # Pritok is slow, so use 24h window for validation
+                    if not validate_anomaly(well_data, anomaly_start, rule, window_hours=24):
+                        continue
 
-            if expect_positive:
-                 return anomaly_start, f"Positive Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
-            else:
-                 return anomaly_start, f"Negative Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
+            sign = 'Positive' if direction == 1 else 'Negative'
+            return anomaly_start, f"{sign} Trend found (Slope: {slope:.4f}, R2: {r_value**2:.2f})"
             
     return None, "No sustained trend found"
 
@@ -626,6 +691,130 @@ def load_ground_truth():
     svod['well_id'] = svod['well_id'].astype(str)
     gt_map = dict(zip(svod['well_id'], svod['anomaly_start_time']))
     return gt_map
+
+
+def load_legacy_ground_truth():
+    svod = pd.read_csv('db/wells_svod.csv')
+    svod['well_id'] = svod['well_id'].astype(str)
+    svod = svod[svod['anomaly_type'].isin(['Негермет', 'Приток'])].copy()
+    svod['actual_start'] = pd.to_datetime(svod['anomaly_start_time'], errors='coerce')
+    svod['actual_end'] = pd.to_datetime(svod.get('well_stop_time'), errors='coerce')
+    return svod
+
+
+def detect_any_anomaly(
+    well_id,
+    legacy_df,
+    meha_df,
+    validation_rules=None,
+    meha_intervals=None,
+    meha_min_run_days=10,
+):
+    wid = normalize_well_id(well_id)
+
+    if not meha_df.empty and (meha_df['well_id'] == wid).any():
+        well_data = meha_df[meha_df['well_id'] == wid]
+        interval_start = None
+        if meha_intervals and wid in meha_intervals:
+            interval_start = meha_intervals[wid][0]
+
+        run_days = 5 if interval_start is not None else meha_min_run_days
+
+        detected_time, detail = detect_meha(
+            well_data,
+            interval_start=interval_start,
+            min_run_days=run_days,
+        )
+        if detected_time is not None:
+            return 'Meha', detected_time, detail
+
+        neg_dt, neg_detail = detect_negermet(meha_df, wid, rules=validation_rules)
+        if neg_dt is not None:
+            return 'Negermet', neg_dt, neg_detail
+
+        prit_dt, prit_detail = detect_pritok(meha_df, wid, rules=validation_rules)
+        if prit_dt is not None:
+            return 'Pritok', prit_dt, prit_detail
+
+        return None, None, 'No anomaly found'
+
+    neg_dt, neg_detail = detect_negermet(legacy_df, wid, rules=validation_rules)
+    if neg_dt is not None:
+        return 'Negermet', neg_dt, neg_detail
+
+    prit_dt, prit_detail = detect_pritok(legacy_df, wid, rules=validation_rules)
+    if prit_dt is not None:
+        return 'Pritok', prit_dt, prit_detail
+
+    return None, None, 'No anomaly found'
+
+
+def run_universal_detection(output_path='anomaly_detection_results.csv'):
+    legacy_df = load_data()
+    meha_df = load_meha_data()
+    validation_rules = load_validation_rules()
+
+    legacy_gt = load_legacy_ground_truth()
+    legacy_wells = legacy_gt['well_id'].unique().tolist()
+
+    meha_intervals = {}
+    meha_wells = []
+    if Path('db/meha_intervals.csv').exists():
+        meha_intervals = load_meha_intervals()
+        meha_wells = sorted(meha_intervals.keys())
+
+    wells = legacy_wells + meha_wells
+
+    results = []
+    print("\n--- Processing ALL Wells (Universal Detection) ---")
+
+    for wid in wells:
+        print(f"Analyzing {wid}...")
+        pred_type, detected_time, detail = detect_any_anomaly(
+            wid,
+            legacy_df,
+            meha_df,
+            validation_rules=validation_rules,
+            meha_intervals=meha_intervals,
+        )
+
+        actual_type = None
+        actual_start = None
+        actual_end = None
+        if wid in legacy_wells:
+            row = legacy_gt[legacy_gt['well_id'] == wid].iloc[0]
+            actual_type = 'Negermet' if row['anomaly_type'] == 'Негермет' else 'Pritok'
+            actual_start = row['actual_start']
+            actual_end = row['actual_end']
+        elif wid in meha_intervals:
+            actual_type = 'Meha'
+            actual_start, actual_end = meha_intervals[wid]
+
+        if detected_time is None:
+            status = 'Not found'
+        elif actual_type == 'Meha' and actual_start is not None and actual_end is not None:
+            status = 'Detected' if actual_start <= detected_time <= actual_end else 'Out of interval'
+        elif actual_type is not None and pred_type is not None and pred_type != actual_type:
+            status = f"Wrong type ({pred_type})"
+        else:
+            status = 'Detected'
+
+        results.append({
+            'well_id': wid,
+            'type': pred_type,
+            'detected_time': detected_time,
+            'actual_type': actual_type,
+            'actual_start': actual_start,
+            'actual_end': actual_end,
+            'status': status,
+            'detail': detail,
+        })
+        print(f"  -> Type: {pred_type} | Detected: {detected_time} | Status: {status}")
+
+    res_df = pd.DataFrame(results)
+    print("\nFinal Results:")
+    print(res_df)
+    res_df.to_csv(output_path, index=False)
 
 def run_legacy_detection():
     df = load_data()
@@ -712,10 +901,37 @@ def run_meha_detection():
     res_df.to_csv('anomaly_detection_results.csv', index=False)
 
 def main():
-    if Path('db/meha_intervals.csv').exists():
-        run_meha_detection()
-    else:
-        run_legacy_detection()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--well-id', type=str, default=None)
+    parser.add_argument('--random-well', action='store_true')
+    parser.add_argument('--output', type=str, default='anomaly_detection_results.csv')
+    args = parser.parse_args()
+
+    if args.well_id is not None or args.random_well:
+        legacy_df = load_data()
+        meha_df = load_meha_data()
+        validation_rules = load_validation_rules()
+
+        legacy_gt = load_legacy_ground_truth()
+        legacy_wells = legacy_gt['well_id'].unique().tolist()
+        meha_intervals = load_meha_intervals() if Path('db/meha_intervals.csv').exists() else {}
+        meha_wells = sorted(meha_intervals.keys())
+        wells = legacy_wells + meha_wells
+
+        wid = normalize_well_id(args.well_id) if args.well_id is not None else random.choice(wells)
+        pred_type, detected_time, _detail = detect_any_anomaly(
+            wid,
+            legacy_df,
+            meha_df,
+            validation_rules=validation_rules,
+            meha_intervals=meha_intervals,
+        )
+
+        print(pred_type)
+        print(detected_time)
+        return
+
+    run_universal_detection(output_path=args.output)
 
 if __name__ == "__main__":
     main()
