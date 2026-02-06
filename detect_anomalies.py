@@ -479,34 +479,34 @@ def detect_meha(
     return start, f"Detected (longest segment days: {seg_len}, {detail_prefix})"
 
 
-def detect_salt_start(
+def detect_salt_starts(
     well_data,
-    interval_start=None,
-    interval_end=None,
     slope_hours=6,
     baseline_days=14,
-    search_days=3,
+    threshold_q=0.97,
     min_hits=3,
     persistence_hours=12,
+    cooldown_days=5,
+    max_starts=20,
 ):
     """
-    Detects Salt anomaly start.
-    Uses pressure growth as the main signal and confirms it with
-    frequency/auxiliary parameter trends to avoid single-channel false positives.
+    Blind Salt detection: finds anomaly starts across the full well history.
+    Ground-truth intervals are not used inside this detector.
     """
     if well_data.empty:
-        return None, "Data not found"
+        return [], "Data not found"
 
     wd = well_data.sort_values('timestamp').copy()
     wd_res = wd.set_index('timestamp').resample('1h').mean(numeric_only=True)
     wd_res = wd_res.dropna(how='all')
     if wd_res.empty:
-        return None, "Not enough data"
+        return [], "Not enough data"
     if SALT_PRESSURE_COL not in wd_res.columns or SALT_FREQ_COL not in wd_res.columns:
-        return None, "Missing required Salt columns"
+        return [], "Missing required Salt columns"
 
     pressure = wd_res[SALT_PRESSURE_COL].interpolate(limit_area='inside')
     frequency = wd_res[SALT_FREQ_COL].interpolate(limit_area='inside')
+
     lag = max(2, int(slope_hours))
     p_slope = (pressure - pressure.shift(lag)) / float(lag)
     f_slope = (frequency - frequency.shift(lag)) / float(lag)
@@ -519,71 +519,87 @@ def detect_salt_start(
         if series.notna().sum() < lag * 4:
             continue
         aux_slopes.append((series - series.shift(lag)) / float(lag))
+
     if aux_slopes:
         aux_mean_slope = pd.concat(aux_slopes, axis=1).mean(axis=1, skipna=True)
     else:
         aux_mean_slope = pd.Series(0.0, index=wd_res.index)
 
-    if interval_start is None:
-        interval_start = wd_res.index.min()
-    if interval_end is None:
-        interval_end = wd_res.index.max()
-    interval_start = pd.to_datetime(interval_start)
-    interval_end = pd.to_datetime(interval_end)
-
-    base_mask = (
-        (wd_res.index >= interval_start - pd.Timedelta(days=baseline_days))
-        & (wd_res.index < interval_start)
+    # Score emphasizes pressure growth and adverse pressure-frequency coupling.
+    coupling = p_slope.clip(lower=0) * f_slope.clip(lower=0)
+    score = (
+        1.2 * normalize_positive(p_slope)
+        + 1.0 * normalize_positive(coupling)
+        + 0.4 * normalize_positive(aux_mean_slope)
     )
-    p_base = p_slope[base_mask].dropna()
-    f_base = f_slope[base_mask].dropna()
-    aux_base = aux_mean_slope[base_mask].dropna()
 
-    if p_base.empty:
-        return interval_start, "Fallback to interval_start: no baseline"
+    win_points = max(24 * int(baseline_days), lag * 12)
+    min_points = max(72, win_points // 3)
 
-    # Early trigger tuned for anomaly start detection:
-    # pressure should move up versus its own baseline and be supported by
-    # frequency trend and/or auxiliary channels.
-    p_thr = max(0.0, float(p_base.quantile(0.70)))
-    f_thr = max(0.0, float(f_base.quantile(0.50))) if not f_base.empty else 0.0
-    aux_thr = max(0.0, float(aux_base.quantile(0.60))) if not aux_base.empty else 0.0
+    score_thr = score.rolling(win_points, min_periods=min_points).quantile(float(threshold_q))
+    p_thr = p_slope.rolling(win_points, min_periods=min_points).quantile(0.70).clip(lower=0)
+    f_thr = f_slope.rolling(win_points, min_periods=min_points).quantile(0.50).clip(lower=0)
+    aux_thr = aux_mean_slope.rolling(win_points, min_periods=min_points).quantile(0.60).clip(lower=0)
 
-    search_end = min(interval_end, interval_start + pd.Timedelta(days=search_days))
-    search_mask = (wd_res.index >= interval_start) & (wd_res.index <= search_end)
-    search_idx = wd_res.index[search_mask]
-    if len(search_idx) == 0:
-        return interval_start, "Fallback to interval_start: empty search window"
+    # Fallback thresholds for sparse wells where rolling windows cannot be formed.
+    score_global = score.dropna().quantile(float(threshold_q)) if score.notna().any() else np.nan
+    p_global = p_slope.dropna().quantile(0.70) if p_slope.notna().any() else np.nan
+    f_global = f_slope.dropna().quantile(0.50) if f_slope.notna().any() else np.nan
+    aux_global = aux_mean_slope.dropna().quantile(0.60) if aux_mean_slope.notna().any() else np.nan
+
+    if np.isfinite(score_global):
+        score_thr = score_thr.fillna(float(score_global))
+    if np.isfinite(p_global):
+        p_thr = p_thr.fillna(max(0.0, float(p_global)))
+    if np.isfinite(f_global):
+        f_thr = f_thr.fillna(max(0.0, float(f_global)))
+    if np.isfinite(aux_global):
+        aux_thr = aux_thr.fillna(max(0.0, float(aux_global)))
 
     trigger = (
-        (p_slope.loc[search_idx] >= p_thr)
-        & (
-            (f_slope.loc[search_idx] >= f_thr)
-            | (aux_mean_slope.loc[search_idx] >= aux_thr)
-        )
+        (score >= score_thr)
+        & (p_slope >= p_thr)
+        & ((f_slope >= f_thr) | (aux_mean_slope >= aux_thr))
+    ).fillna(False)
+
+    starts = []
+    cooldown = pd.Timedelta(days=float(cooldown_days))
+    def append_starts(mask, required_hits):
+        for ts, flag in mask.items():
+            if not bool(flag):
+                continue
+            if starts and ts - starts[-1] < cooldown:
+                continue
+
+            win = mask[(mask.index >= ts) & (mask.index < ts + pd.Timedelta(hours=persistence_hours))]
+            if int(win.sum()) >= int(required_hits):
+                starts.append(ts)
+                if len(starts) >= int(max_starts):
+                    break
+
+    append_starts(trigger, min_hits)
+
+    # Reserve path for sparse/low-signal wells:
+    # sustained pressure growth with a softer score gate.
+    if len(starts) < int(max_starts):
+        p_soft = p_slope.rolling(win_points, min_periods=min_points).quantile(0.65).clip(lower=0)
+        p_soft_global = p_slope.dropna().quantile(0.65) if p_slope.notna().any() else np.nan
+        if np.isfinite(p_soft_global):
+            p_soft = p_soft.fillna(max(0.0, float(p_soft_global)))
+
+        score_soft = (score_thr * 0.70).fillna(score.quantile(0.70) if score.notna().any() else np.nan)
+        soft_trigger = ((p_slope >= p_soft) & (score >= score_soft)).fillna(False)
+        append_starts(soft_trigger, max(2, int(min_hits) - 1))
+
+    starts = sorted(set(starts))
+    if len(starts) > int(max_starts):
+        starts = starts[:int(max_starts)]
+
+    detail = (
+        f"Blind Salt (starts={len(starts)}, lag={lag}h, baseline_days={baseline_days}, "
+        f"score_q={threshold_q}, min_hits={min_hits}, cooldown_days={cooldown_days})"
     )
-
-    for ts, flag in trigger.items():
-        if not bool(flag):
-            continue
-        win = trigger[(trigger.index >= ts) & (trigger.index < ts + pd.Timedelta(hours=persistence_hours))]
-        if int(win.sum()) >= int(min_hits):
-            detail = (
-                f"Detected (early trigger, p_thr={p_thr:.4f}, f_thr={f_thr:.4f}, "
-                f"aux_thr={aux_thr:.4f}, lag={lag}h)"
-            )
-            return ts, detail
-
-    # Soft fallback: pressure-only early start
-    pressure_only = p_slope.loc[search_idx] >= p_thr
-    first_pressure = pressure_only[pressure_only].index.min()
-    if pd.notna(first_pressure):
-        detail = (
-            f"Detected (pressure-only early trigger, p_thr={p_thr:.4f}, lag={lag}h)"
-        )
-        return first_pressure, detail
-
-    return interval_start, "Fallback to interval_start: no trigger"
+    return starts, detail
 
 def detect_negermet(df, well_id, rules=None):
     """
@@ -960,37 +976,51 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
 
     if not salt_intervals.empty and not salt_df.empty:
         print("\n--- Processing Salt Intervals ---")
-        for _, row in salt_intervals.iterrows():
-            wid = str(row['well_id']).strip().lower()
-            interval_idx = int(row.get('interval_idx', 1))
-            start_dt = row['start_date']
-            end_dt = row['end_date']
-
-            print(f"Analyzing Salt {wid} (interval {interval_idx})...")
+        prestart_tolerance = pd.Timedelta(hours=48)
+        for wid, grp in salt_intervals.groupby('well_id', sort=True):
+            wid = str(wid).strip().lower()
             well_data = salt_df[salt_df['well_id'] == wid]
-            detected_time, detail = detect_salt_start(
-                well_data,
-                interval_start=start_dt,
-                interval_end=end_dt,
-            )
+            pred_starts, blind_detail = detect_salt_starts(well_data)
+            pred_starts = sorted(pred_starts)
+            used = [False] * len(pred_starts)
 
-            if detected_time is None:
-                status = 'Not found'
-            else:
-                status = 'Detected' if start_dt <= detected_time <= end_dt else 'Out of interval'
+            print(f"Analyzing Salt {wid} (blind predictions: {len(pred_starts)})...")
+            for _, row in grp.sort_values(['start_date', 'interval_idx']).iterrows():
+                interval_idx = int(row.get('interval_idx', 1))
+                start_dt = row['start_date']
+                end_dt = row['end_date']
 
-            results.append({
-                'well_id': wid,
-                'interval_idx': interval_idx,
-                'type': 'Salt',
-                'detected_time': detected_time,
-                'actual_type': 'Salt',
-                'actual_start': start_dt,
-                'actual_end': end_dt,
-                'status': status,
-                'detail': detail,
-            })
-            print(f"  -> Type: Salt | Detected: {detected_time} | Status: {status}")
+                detected_time = None
+                for i, ts in enumerate(pred_starts):
+                    if used[i]:
+                        continue
+                    if (start_dt - prestart_tolerance) <= ts <= end_dt:
+                        detected_time = ts
+                        used[i] = True
+                        break
+
+                if detected_time is None:
+                    status = 'Not found'
+                elif detected_time < start_dt:
+                    status = 'Early detected'
+                else:
+                    status = 'Detected'
+                detail = blind_detail
+                if detected_time is None:
+                    detail = f"{blind_detail}; no blind start matched this interval"
+
+                results.append({
+                    'well_id': wid,
+                    'interval_idx': interval_idx,
+                    'type': 'Salt',
+                    'detected_time': detected_time,
+                    'actual_type': 'Salt',
+                    'actual_start': start_dt,
+                    'actual_end': end_dt,
+                    'status': status,
+                    'detail': detail,
+                })
+                print(f"  -> Type: Salt | Interval: {interval_idx} | Detected: {detected_time} | Status: {status}")
 
     res_df = pd.DataFrame(results)
     print("\nFinal Results:")

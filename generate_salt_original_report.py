@@ -1,4 +1,5 @@
 import base64
+import argparse
 import io
 from pathlib import Path
 
@@ -10,8 +11,8 @@ SALT_PRESSURE_COL = 'Давление на приеме насоса кгс/см
 SALT_FREQ_COL = 'Выходная частота'
 
 
-def load_salt_raw_data():
-    src = Path('db/salt_anomaly_database.csv')
+def load_salt_data(src_path):
+    src = Path(src_path)
     if not src.exists():
         raise FileNotFoundError(f'Missing file: {src}')
 
@@ -115,16 +116,20 @@ def create_plot_base64(well_data, start_dt, end_dt, detected_dt, title, x_min, x
     return base64.b64encode(buf.read()).decode('utf-8')
 
 
-def generate_html(output_path='salt_anomaly_report_original.html'):
-    print('Generating Salt original report...')
-    salt_df = load_salt_raw_data()
+def generate_html(
+    source_path='db/salt_anomaly_database_interpolated.csv',
+    output_path='salt_anomaly_report_interpolated.html',
+    report_title='Salt Anomaly Report (Interpolated Dataset)',
+):
+    print(f'Generating Salt report from: {source_path}')
+    salt_df = load_salt_data(source_path)
     intervals = load_salt_intervals()
     detected_map = load_detected_salt_points()
 
     html = """
     <html>
     <head>
-        <title>Salt Anomaly Original Report</title>
+        <title>Salt Anomaly Report</title>
         <style>
             body { font-family: Arial, sans-serif; margin: 20px; }
             table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
@@ -136,7 +141,7 @@ def generate_html(output_path='salt_anomaly_report_original.html'):
         </style>
     </head>
     <body>
-        <h1>Salt Anomaly Report (Original Dataset)</h1>
+        <h1>{report_title}</h1>
         <h2>Summary Table</h2>
         <table>
             <tr>
@@ -174,7 +179,7 @@ def generate_html(output_path='salt_anomaly_report_original.html'):
 
     html += """
         </table>
-        <h2>Original Plots</h2>
+        <h2>Plots</h2>
     """
 
     total = len(intervals)
@@ -230,4 +235,21 @@ def generate_html(output_path='salt_anomaly_report_original.html'):
 
 
 if __name__ == '__main__':
-    generate_html()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        '--source',
+        default='db/salt_anomaly_database_interpolated.csv',
+        help='Path to salt CSV file for plotting',
+    )
+    parser.add_argument(
+        '--output',
+        default='salt_anomaly_report_interpolated.html',
+        help='Path to output HTML report',
+    )
+    parser.add_argument(
+        '--title',
+        default='Salt Anomaly Report (Interpolated Dataset)',
+        help='Title displayed in HTML report',
+    )
+    args = parser.parse_args()
+    generate_html(source_path=args.source, output_path=args.output, report_title=args.title)

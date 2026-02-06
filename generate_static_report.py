@@ -42,8 +42,8 @@ def load_meha_data():
 def load_salt_data():
     print("Loading Salt data for plotting...")
     candidates = [
-        Path('db/salt_anomaly_database.csv'),
         Path('db/salt_anomaly_database_interpolated.csv'),
+        Path('db/salt_anomaly_database.csv'),
     ]
     src = next((p for p in candidates if p.exists()), None)
     if src is None:
