@@ -16,6 +16,9 @@ MEHA_COLUMN_MAP = {
     'Рабочая частота': 'frequency',
 }
 
+SALT_PRESSURE_COL = 'Давление на приеме насоса кгс/см²'
+SALT_FREQ_COL = 'Выходная частота'
+
 def load_legacy_data():
     print("Loading legacy database for plotting...")
     df = pd.read_csv('db/wells_database.csv')
@@ -36,7 +39,25 @@ def load_meha_data():
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
+def load_salt_data():
+    print("Loading Salt data for plotting...")
+    candidates = [
+        Path('db/salt_anomaly_database.csv'),
+        Path('db/salt_anomaly_database_interpolated.csv'),
+    ]
+    src = next((p for p in candidates if p.exists()), None)
+    if src is None:
+        return pd.DataFrame()
+
+    df = pd.read_csv(src, dtype={'well_id': str}, low_memory=False)
+    df['well_id'] = df['well_id'].astype(str).str.strip().str.lower()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df = df.dropna(subset=['timestamp'])
+    return df
+
 def load_data(results):
+    if 'type' in results.columns and (results['type'] == 'Salt').any():
+        return load_salt_data()
     if 'type' in results.columns and (results['type'] == 'Meha').any():
         return load_meha_data()
     return load_legacy_data()
@@ -79,6 +100,54 @@ def create_plot_base64(well_id, anomaly_type, detected_time, actual_start, actua
                     start = pd.to_datetime(actual_start)
                     end = pd.to_datetime(actual_end)
                     ax.axvspan(start, end, color='tab:red', alpha=0.1)
+                except Exception:
+                    pass
+
+        axes[0].set_title(f"Well {well_id} - {anomaly_type}")
+        axes[-1].set_xlabel("Time")
+        axes[-1].xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+        fig.autofmt_xdate()
+
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight')
+        plt.close(fig)
+    elif anomaly_type == 'Salt':
+        if SALT_PRESSURE_COL not in well_data.columns or SALT_FREQ_COL not in well_data.columns:
+            return None
+
+        well_data = well_data.set_index('timestamp').resample('1h').mean(numeric_only=True)
+        # Salt dataset has many sparse columns; keep rows where at least one core signal exists.
+        well_data = well_data.dropna(subset=[SALT_PRESSURE_COL, SALT_FREQ_COL], how='all').reset_index()
+        if well_data.empty:
+            return None
+
+        fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+        series_map = [
+            (SALT_PRESSURE_COL, 'Intake Pressure', 'tab:blue'),
+            (SALT_FREQ_COL, 'Output Frequency', 'tab:orange'),
+        ]
+
+        for ax, (col, label, color) in zip(axes, series_map):
+            line_df = well_data[['timestamp', col]].dropna(subset=[col])
+            if line_df.empty:
+                ax.text(0.5, 0.5, f'No data for {label}', transform=ax.transAxes, ha='center', va='center')
+            else:
+                ax.plot(line_df['timestamp'], line_df[col], label=label, color=color, linewidth=0.9)
+            ax.grid(True, alpha=0.3)
+            ax.legend(loc='upper right')
+
+            if pd.notna(detected_time):
+                try:
+                    dt = pd.to_datetime(detected_time)
+                    ax.axvline(dt, color='black', linestyle='--', linewidth=1.0)
+                except Exception:
+                    pass
+
+            if pd.notna(actual_start) and pd.notna(actual_end):
+                try:
+                    start = pd.to_datetime(actual_start)
+                    end = pd.to_datetime(actual_end)
+                    ax.axvspan(start, end, color='tab:red', alpha=0.12)
                 except Exception:
                     pass
 
@@ -133,6 +202,7 @@ def generate_static_html():
     results = pd.read_csv('anomaly_detection_results.csv')
     legacy_data = load_legacy_data()
     meha_data = load_meha_data() if 'type' in results.columns and (results['type'] == 'Meha').any() else pd.DataFrame()
+    salt_data = load_salt_data() if 'type' in results.columns and (results['type'] == 'Salt').any() else pd.DataFrame()
     has_interval = 'actual_start' in results.columns and 'actual_end' in results.columns
     
     html_content = """
@@ -208,7 +278,13 @@ def generate_static_html():
         actual_start = row['actual_start'] if has_interval else row.get('actual_time')
         actual_end = row['actual_end'] if has_interval else None
 
-        df = meha_data if anomaly_type == 'Meha' else legacy_data
+        if anomaly_type == 'Meha':
+            df = meha_data
+        elif anomaly_type == 'Salt':
+            df = salt_data
+            well_id = str(well_id).strip().lower()
+        else:
+            df = legacy_data
         
         print(f"Processing plot {idx + 1}/{total_plots}: Well {well_id}")
         

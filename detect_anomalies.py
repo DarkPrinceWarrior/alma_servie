@@ -39,6 +39,9 @@ MEHA_SAW_COLS = [
 
 MEHA_TEMP_COL = 'motor_temperature'
 
+SALT_PRESSURE_COL = 'Давление на приеме насоса кгс/см²'
+SALT_FREQ_COL = 'Выходная частота'
+
 
 def normalize_well_id(well_id):
     wid = str(well_id).strip()
@@ -195,6 +198,37 @@ def load_meha_intervals():
         (row['well_id'], (row['start_date'], row['end_date']))
         for _, row in intervals.iterrows()
     )
+
+
+def load_salt_data():
+    print("Loading Salt data...")
+    candidates = [
+        Path('db/salt_anomaly_database_interpolated.csv'),
+        Path('db/salt_anomaly_database.csv'),
+    ]
+    src = next((p for p in candidates if p.exists()), None)
+    if src is None:
+        return pd.DataFrame()
+
+    df = pd.read_csv(src, dtype={'well_id': str}, low_memory=False)
+    df['well_id'] = df['well_id'].astype(str).str.strip().str.lower()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+    df = df.dropna(subset=['timestamp'])
+    return df
+
+
+def load_salt_intervals():
+    print("Loading Salt ground truth intervals...")
+    intervals = pd.read_csv('db/salt_intervals.csv', dtype={'well_id': str})
+    intervals['well_id'] = intervals['well_id'].astype(str).str.strip().str.lower()
+    intervals['start_date'] = pd.to_datetime(intervals['start_date'], errors='coerce')
+    intervals['end_date'] = pd.to_datetime(intervals['end_date'], errors='coerce')
+    intervals = intervals.dropna(subset=['well_id', 'start_date', 'end_date']).copy()
+    if 'interval_idx' not in intervals.columns:
+        intervals['interval_idx'] = (
+            intervals.groupby('well_id').cumcount() + 1
+        )
+    return intervals.sort_values(['well_id', 'start_date', 'interval_idx']).reset_index(drop=True)
 
 def median_abs_deviation(series):
     values = np.asarray(series, dtype=float)
@@ -443,6 +477,113 @@ def detect_meha(
         return None, "No sustained anomaly"
 
     return start, f"Detected (longest segment days: {seg_len}, {detail_prefix})"
+
+
+def detect_salt_start(
+    well_data,
+    interval_start=None,
+    interval_end=None,
+    slope_hours=6,
+    baseline_days=14,
+    search_days=3,
+    min_hits=3,
+    persistence_hours=12,
+):
+    """
+    Detects Salt anomaly start.
+    Uses pressure growth as the main signal and confirms it with
+    frequency/auxiliary parameter trends to avoid single-channel false positives.
+    """
+    if well_data.empty:
+        return None, "Data not found"
+
+    wd = well_data.sort_values('timestamp').copy()
+    wd_res = wd.set_index('timestamp').resample('1h').mean(numeric_only=True)
+    wd_res = wd_res.dropna(how='all')
+    if wd_res.empty:
+        return None, "Not enough data"
+    if SALT_PRESSURE_COL not in wd_res.columns or SALT_FREQ_COL not in wd_res.columns:
+        return None, "Missing required Salt columns"
+
+    pressure = wd_res[SALT_PRESSURE_COL].interpolate(limit_area='inside')
+    frequency = wd_res[SALT_FREQ_COL].interpolate(limit_area='inside')
+    lag = max(2, int(slope_hours))
+    p_slope = (pressure - pressure.shift(lag)) / float(lag)
+    f_slope = (frequency - frequency.shift(lag)) / float(lag)
+
+    aux_slopes = []
+    for col in wd_res.columns:
+        if col in (SALT_PRESSURE_COL, SALT_FREQ_COL):
+            continue
+        series = wd_res[col]
+        if series.notna().sum() < lag * 4:
+            continue
+        aux_slopes.append((series - series.shift(lag)) / float(lag))
+    if aux_slopes:
+        aux_mean_slope = pd.concat(aux_slopes, axis=1).mean(axis=1, skipna=True)
+    else:
+        aux_mean_slope = pd.Series(0.0, index=wd_res.index)
+
+    if interval_start is None:
+        interval_start = wd_res.index.min()
+    if interval_end is None:
+        interval_end = wd_res.index.max()
+    interval_start = pd.to_datetime(interval_start)
+    interval_end = pd.to_datetime(interval_end)
+
+    base_mask = (
+        (wd_res.index >= interval_start - pd.Timedelta(days=baseline_days))
+        & (wd_res.index < interval_start)
+    )
+    p_base = p_slope[base_mask].dropna()
+    f_base = f_slope[base_mask].dropna()
+    aux_base = aux_mean_slope[base_mask].dropna()
+
+    if p_base.empty:
+        return interval_start, "Fallback to interval_start: no baseline"
+
+    # Early trigger tuned for anomaly start detection:
+    # pressure should move up versus its own baseline and be supported by
+    # frequency trend and/or auxiliary channels.
+    p_thr = max(0.0, float(p_base.quantile(0.70)))
+    f_thr = max(0.0, float(f_base.quantile(0.50))) if not f_base.empty else 0.0
+    aux_thr = max(0.0, float(aux_base.quantile(0.60))) if not aux_base.empty else 0.0
+
+    search_end = min(interval_end, interval_start + pd.Timedelta(days=search_days))
+    search_mask = (wd_res.index >= interval_start) & (wd_res.index <= search_end)
+    search_idx = wd_res.index[search_mask]
+    if len(search_idx) == 0:
+        return interval_start, "Fallback to interval_start: empty search window"
+
+    trigger = (
+        (p_slope.loc[search_idx] >= p_thr)
+        & (
+            (f_slope.loc[search_idx] >= f_thr)
+            | (aux_mean_slope.loc[search_idx] >= aux_thr)
+        )
+    )
+
+    for ts, flag in trigger.items():
+        if not bool(flag):
+            continue
+        win = trigger[(trigger.index >= ts) & (trigger.index < ts + pd.Timedelta(hours=persistence_hours))]
+        if int(win.sum()) >= int(min_hits):
+            detail = (
+                f"Detected (early trigger, p_thr={p_thr:.4f}, f_thr={f_thr:.4f}, "
+                f"aux_thr={aux_thr:.4f}, lag={lag}h)"
+            )
+            return ts, detail
+
+    # Soft fallback: pressure-only early start
+    pressure_only = p_slope.loc[search_idx] >= p_thr
+    first_pressure = pressure_only[pressure_only].index.min()
+    if pd.notna(first_pressure):
+        detail = (
+            f"Detected (pressure-only early trigger, p_thr={p_thr:.4f}, lag={lag}h)"
+        )
+        return first_pressure, detail
+
+    return interval_start, "Fallback to interval_start: no trigger"
 
 def detect_negermet(df, well_id, rules=None):
     """
@@ -752,6 +893,7 @@ def detect_any_anomaly(
 def run_universal_detection(output_path='anomaly_detection_results.csv'):
     legacy_df = load_data()
     meha_df = load_meha_data()
+    salt_df = load_salt_data()
     validation_rules = load_validation_rules()
 
     legacy_gt = load_legacy_ground_truth()
@@ -762,6 +904,10 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
     if Path('db/meha_intervals.csv').exists():
         meha_intervals = load_meha_intervals()
         meha_wells = sorted(meha_intervals.keys())
+
+    salt_intervals = pd.DataFrame()
+    if Path('db/salt_intervals.csv').exists():
+        salt_intervals = load_salt_intervals()
 
     wells = legacy_wells + meha_wells
 
@@ -801,6 +947,7 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
 
         results.append({
             'well_id': wid,
+            'interval_idx': np.nan,
             'type': pred_type,
             'detected_time': detected_time,
             'actual_type': actual_type,
@@ -810,6 +957,40 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
             'detail': detail,
         })
         print(f"  -> Type: {pred_type} | Detected: {detected_time} | Status: {status}")
+
+    if not salt_intervals.empty and not salt_df.empty:
+        print("\n--- Processing Salt Intervals ---")
+        for _, row in salt_intervals.iterrows():
+            wid = str(row['well_id']).strip().lower()
+            interval_idx = int(row.get('interval_idx', 1))
+            start_dt = row['start_date']
+            end_dt = row['end_date']
+
+            print(f"Analyzing Salt {wid} (interval {interval_idx})...")
+            well_data = salt_df[salt_df['well_id'] == wid]
+            detected_time, detail = detect_salt_start(
+                well_data,
+                interval_start=start_dt,
+                interval_end=end_dt,
+            )
+
+            if detected_time is None:
+                status = 'Not found'
+            else:
+                status = 'Detected' if start_dt <= detected_time <= end_dt else 'Out of interval'
+
+            results.append({
+                'well_id': wid,
+                'interval_idx': interval_idx,
+                'type': 'Salt',
+                'detected_time': detected_time,
+                'actual_type': 'Salt',
+                'actual_start': start_dt,
+                'actual_end': end_dt,
+                'status': status,
+                'detail': detail,
+            })
+            print(f"  -> Type: Salt | Detected: {detected_time} | Status: {status}")
 
     res_df = pd.DataFrame(results)
     print("\nFinal Results:")

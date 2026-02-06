@@ -19,5 +19,11 @@ pip-delete-this-directory.txt
 plan.md
 report.md
 
+# Salt anomaly large artifacts
+salt_anomaly_files/*.xlsx
+db/salt_anomaly_database.csv
+db/salt_anomaly_database_interpolated.csv
+salt_anomaly_report_original.html
+
 # OS
 .DS_Store 
