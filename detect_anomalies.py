@@ -906,11 +906,15 @@ def detect_any_anomaly(
     return None, None, 'No anomaly found'
 
 
-def run_universal_detection(output_path='anomaly_detection_results.csv'):
+def run_universal_detection(output_path='anomaly_detection_results.csv', salt_method='classic'):
     legacy_df = load_data()
     meha_df = load_meha_data()
     salt_df = load_salt_data()
     validation_rules = load_validation_rules()
+
+    use_paano = salt_method == 'paano'
+    if use_paano:
+        from detect_salt_paano import detect_salt_paano_starts, load_salt_intervals as load_salt_intervals_paano
 
     legacy_gt = load_legacy_ground_truth()
     legacy_wells = legacy_gt['well_id'].unique().tolist()
@@ -975,13 +979,18 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
         print(f"  -> Type: {pred_type} | Detected: {detected_time} | Status: {status}")
 
     if not salt_intervals.empty and not salt_df.empty:
-        print("\n--- Processing Salt Intervals ---")
+        method_label = 'PaAno' if use_paano else 'Classic'
+        print(f"\n--- Processing Salt Intervals ({method_label}) ---")
         prestart_tolerance = pd.Timedelta(hours=6)
         early_status_tolerance = pd.Timedelta(hours=6)
         for wid, grp in salt_intervals.groupby('well_id', sort=True):
             wid = str(wid).strip().lower()
             well_data = salt_df[salt_df['well_id'] == wid]
-            pred_starts, blind_detail = detect_salt_starts(well_data)
+            if use_paano:
+                pred_starts, blind_detail = detect_salt_paano_starts(
+                    well_data, intervals_df=salt_intervals, well_id=wid)
+            else:
+                pred_starts, blind_detail = detect_salt_starts(well_data)
             pred_starts = sorted(pred_starts)
             used = [False] * len(pred_starts)
 
@@ -1142,6 +1151,9 @@ def main():
     parser.add_argument('--well-id', type=str, default=None)
     parser.add_argument('--random-well', action='store_true')
     parser.add_argument('--output', type=str, default='anomaly_detection_results.csv')
+    parser.add_argument('--salt-method', type=str, default='classic',
+                        choices=['classic', 'paano'],
+                        help='Salt detection method: classic (rolling stats) or paano (AI)')
     args = parser.parse_args()
 
     if args.well_id is not None or args.random_well:
@@ -1168,7 +1180,7 @@ def main():
         print(detected_time)
         return
 
-    run_universal_detection(output_path=args.output)
+    run_universal_detection(output_path=args.output, salt_method=args.salt_method)
 
 if __name__ == "__main__":
     main()

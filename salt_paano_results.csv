@@ -1,0 +1,9 @@
+well_id,interval_idx,type,detected_time,actual_type,actual_start,actual_end,status,detail
+149г,1,Salt,2025-06-24 06:43:38,Salt,2025-06-20 15:12:00,2025-06-28 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=1876, train_time=81.7s)"
+3244г,1,Salt,2025-12-06 13:55:18,Salt,2025-11-23 00:00:00,2025-12-29 16:00:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=2104, train_time=69.0s)"
+3245,1,Salt,2025-04-17 03:29:55,Salt,2025-04-14 16:44:00,2025-05-12 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=6978, train_time=69.9s)"
+3245(2),1,Salt,2025-10-06 13:14:36,Salt,2025-10-04 02:00:00,2025-11-07 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=6144, train_time=70.7s)"
+3269,1,Salt,2025-10-21 03:42:49,Salt,2025-10-15 02:00:00,2025-10-27 11:45:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=1344, train_time=57.7s)"
+4039,1,Salt,2025-06-07 08:13:53,Salt,2025-05-29 11:00:00,2025-06-07 15:10:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=5624, train_time=65.7s)"
+408,1,Salt,,Salt,2025-06-02 04:40:00,2025-06-26 11:20:00,Not found,"PaAno (patch=64, iters=200, channels=27, train_pts=5982, train_time=67.6s)"
+408,2,Salt,2025-08-01 20:44:19,Salt,2025-07-22 19:00:00,2025-08-23 14:44:00,Detected,"PaAno (patch=64, iters=200, channels=27, train_pts=5982, train_time=67.6s)"
