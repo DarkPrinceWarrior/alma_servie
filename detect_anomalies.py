@@ -481,13 +481,13 @@ def detect_meha(
 
 def detect_salt_starts(
     well_data,
-    slope_hours=6,
-    baseline_days=14,
-    threshold_q=0.97,
-    min_hits=3,
+    slope_hours=4,
+    baseline_days=7,
+    threshold_q=0.90,
+    min_hits=2,
     persistence_hours=12,
-    cooldown_days=5,
-    max_starts=20,
+    cooldown_days=1,
+    max_starts=200,
 ):
     """
     Blind Salt detection: finds anomaly starts across the full well history.
@@ -976,7 +976,8 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
 
     if not salt_intervals.empty and not salt_df.empty:
         print("\n--- Processing Salt Intervals ---")
-        prestart_tolerance = pd.Timedelta(hours=48)
+        prestart_tolerance = pd.Timedelta(hours=6)
+        early_status_tolerance = pd.Timedelta(hours=6)
         for wid, grp in salt_intervals.groupby('well_id', sort=True):
             wid = str(wid).strip().lower()
             well_data = salt_df[salt_df['well_id'] == wid]
@@ -991,17 +992,42 @@ def run_universal_detection(output_path='anomaly_detection_results.csv'):
                 end_dt = row['end_date']
 
                 detected_time = None
+                candidates = []
                 for i, ts in enumerate(pred_starts):
                     if used[i]:
                         continue
                     if (start_dt - prestart_tolerance) <= ts <= end_dt:
-                        detected_time = ts
-                        used[i] = True
-                        break
+                        # Match to the closest blind candidate to interval start
+                        # to avoid systematic late picks from "first-in-interval" logic.
+                        dist = abs((ts - start_dt).total_seconds())
+                        candidates.append((dist, i, ts))
+
+                if candidates:
+                    _, idx, detected_time = min(candidates, key=lambda x: x[0])
+                    used[idx] = True
+
+                    # If the closest candidate is too early, but there is a reasonably close
+                    # non-early candidate, prefer the non-early one.
+                    late_switch_window = pd.Timedelta(hours=54)
+                    if detected_time < start_dt - early_status_tolerance:
+                        non_early = [
+                            (i, ts)
+                            for i, ts in enumerate(pred_starts)
+                            if (not used[i]) and (start_dt <= ts <= min(end_dt, start_dt + late_switch_window))
+                        ]
+                        if non_early:
+                            repl_idx, repl_ts = min(
+                                non_early,
+                                key=lambda x: abs((x[1] - start_dt).total_seconds()),
+                            )
+                            # release old candidate and lock replacement
+                            used[idx] = False
+                            used[repl_idx] = True
+                            detected_time = repl_ts
 
                 if detected_time is None:
                     status = 'Not found'
-                elif detected_time < start_dt:
+                elif detected_time < start_dt - early_status_tolerance:
                     status = 'Early detected'
                 else:
                     status = 'Detected'
