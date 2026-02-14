@@ -1,4 +1,0 @@
-well_id,interval_idx,detected_time,actual_start,actual_end,status,detail
-3261,1,2025-10-23 17:16:00,2025-10-23,2025-11-05 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=26, train_pts=5692, train_time=2.9s)"
-495,1,2025-10-08 11:44:00,2025-10-08,2025-10-17 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=26, train_pts=5843, train_time=1.8s)"
-902,1,2025-10-27 16:48:00,2025-10-22,2025-11-15 02:00:00,Detected,"PaAno (patch=64, iters=200, channels=26, train_pts=4973, train_time=1.8s)"
