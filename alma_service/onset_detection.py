@@ -15,6 +15,15 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 
+try:
+    from numba import njit
+except ImportError:  # pragma: no cover - optional runtime acceleration
+    def njit(*args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
 
 @dataclass
 class CausalThresholds:
@@ -76,10 +85,8 @@ def robust_z(values: np.ndarray, median: float, mad: float) -> np.ndarray:
     return np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def ema(values: np.ndarray, alpha: float = 0.08) -> np.ndarray:
-    x = np.asarray(values, dtype=np.float32)
-    if len(x) == 0:
-        return x
+@njit(cache=True, fastmath=True)
+def _ema_impl(x: np.ndarray, alpha: float) -> np.ndarray:
     out = np.empty_like(x)
     out[0] = x[0]
     for i in range(1, len(x)):
@@ -87,12 +94,38 @@ def ema(values: np.ndarray, alpha: float = 0.08) -> np.ndarray:
     return out
 
 
-def positive_cusum(values: np.ndarray, drift: float) -> np.ndarray:
+def ema(values: np.ndarray, alpha: float = 0.08) -> np.ndarray:
     x = np.asarray(values, dtype=np.float32)
+    if len(x) == 0:
+        return x
+    return _ema_impl(x, float(alpha))
+
+
+@njit(cache=True, fastmath=True)
+def _positive_cusum_impl(x: np.ndarray, drift: float) -> np.ndarray:
     out = np.empty_like(x)
     c = 0.0
     for i in range(len(x)):
-        c = max(0.0, c + float(x[i]) - drift)
+        c = max(0.0, c + x[i] - drift)
+        out[i] = c
+    return out
+
+
+def positive_cusum(values: np.ndarray, drift: float) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    return _positive_cusum_impl(x, float(drift))
+
+
+@njit(cache=True, fastmath=True)
+def _positive_cusum_masked_impl(x: np.ndarray, drift: float, m: np.ndarray) -> np.ndarray:
+    out = np.empty_like(x)
+    c = 0.0
+    for i in range(len(x)):
+        if not m[i]:
+            c = 0.0
+            out[i] = 0.0
+            continue
+        c = max(0.0, c + x[i] - drift)
         out[i] = c
     return out
 
@@ -102,16 +135,7 @@ def positive_cusum_masked(values: np.ndarray, drift: float, mask: np.ndarray) ->
     m = np.asarray(mask, dtype=bool)
     if len(x) != len(m):
         raise ValueError("mask length must match values length.")
-    out = np.empty_like(x)
-    c = 0.0
-    for i in range(len(x)):
-        if not m[i]:
-            c = 0.0
-            out[i] = 0.0
-            continue
-        c = max(0.0, c + float(x[i]) - drift)
-        out[i] = c
-    return out
+    return _positive_cusum_masked_impl(x, float(drift), m)
 
 
 def _quantile_for_target_far(

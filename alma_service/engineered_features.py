@@ -23,11 +23,47 @@ MASK_PRIORITY_COLUMNS = (
     OUTPUT_CURRENT_COL,
     PRESSURE_COL,
 )
-WINDOW_MINUTES = (10, 60, 240)
-SLOPE_WINDOWS_MINUTES = (10, 60)
-MASK_BACK_MINUTES = 10
-MASK_FORWARD_MINUTES = 30
-MASK_STEP_SIGMA = 6.0
+FULL_WINDOW_MINUTES = (10, 60, 240)
+COMPACT_WINDOW_MINUTES = (10, 60)
+TIGHT_WINDOW_MINUTES = (10,)
+FULL_SLOPE_WINDOWS_MINUTES = (10, 60)
+COMPACT_SLOPE_WINDOWS_MINUTES = (10,)
+MASK_PROFILES = (
+    {
+        "name": "default",
+        "back_minutes": 10,
+        "forward_minutes": 30,
+        "step_sigma": 6.0,
+        "flatline_minutes": 60,
+        "missing_run_length": 3,
+    },
+    {
+        "name": "relaxed",
+        "back_minutes": 5,
+        "forward_minutes": 15,
+        "step_sigma": 8.0,
+        "flatline_minutes": 90,
+        "missing_run_length": 5,
+    },
+    {
+        "name": "minimal",
+        "back_minutes": 2,
+        "forward_minutes": 5,
+        "step_sigma": 10.0,
+        "flatline_minutes": 120,
+        "missing_run_length": 8,
+    },
+)
+ANOMALY_PATCH_SIZE = {
+    "negermet": 64,
+    "pritok": 96,
+    "salt": 96,
+}
+MASK_TARGETS = {
+    "negermet": {"target_masked_fraction": 0.65, "hard_max_fraction": 0.85},
+    "pritok": {"target_masked_fraction": 0.75, "hard_max_fraction": 0.90},
+    "salt": {"target_masked_fraction": 0.75, "hard_max_fraction": 0.90},
+}
 EPS = 1e-6
 
 
@@ -109,15 +145,18 @@ def _build_instability_mask(
     filled_matrix: np.ndarray,
     base_columns: list[str],
     step_seconds: float,
+    profile: dict[str, float | int | str],
 ) -> tuple[np.ndarray, list[str]]:
     if len(base_columns) == 0:
         return np.ones(len(raw_df), dtype=bool), []
 
     anchors = _choose_anchor_columns(raw_df, base_columns)
     event_mask = np.zeros(len(raw_df), dtype=bool)
-    back_steps = _window_steps(step_seconds, MASK_BACK_MINUTES)
-    forward_steps = _window_steps(step_seconds, MASK_FORWARD_MINUTES)
-    flatline_steps = max(_window_steps(step_seconds, 60), 12)
+    back_steps = _window_steps(step_seconds, int(profile["back_minutes"]))
+    forward_steps = _window_steps(step_seconds, int(profile["forward_minutes"]))
+    flatline_steps = max(_window_steps(step_seconds, int(profile["flatline_minutes"])), 12)
+    missing_run_length = int(profile["missing_run_length"])
+    step_sigma = float(profile["step_sigma"])
 
     for column in anchors:
         idx = base_columns.index(column)
@@ -127,7 +166,7 @@ def _build_instability_mask(
         abs_delta = np.abs(delta[1:])
         delta_mad = _robust_mad(abs_delta)
         if delta_mad > 0.0:
-            step_thr = MASK_STEP_SIGMA * delta_mad
+            step_thr = step_sigma * delta_mad
         else:
             positive_delta = abs_delta[abs_delta > EPS]
             step_thr = max(float(np.quantile(positive_delta, 0.90)) * 0.5, EPS) if len(positive_delta) else np.inf
@@ -136,8 +175,13 @@ def _build_instability_mask(
 
         missing = raw_series.isna().to_numpy()
         if missing.any():
-            missing_run = pd.Series(missing.astype(np.int8)).rolling(window=3, min_periods=1).sum().to_numpy()
-            event_mask |= missing_run >= 3
+            missing_run = (
+                pd.Series(missing.astype(np.int8))
+                .rolling(window=missing_run_length, min_periods=1)
+                .sum()
+                .to_numpy()
+            )
+            event_mask |= missing_run >= missing_run_length
 
         if column in (FREQ_COL, POWER_COL, OUTPUT_CURRENT_COL):
             abs_values = np.abs(filled[np.isfinite(filled)])
@@ -162,22 +206,34 @@ def _add_base_feature_family(
     values: np.ndarray,
     missing_flag: np.ndarray,
     step_seconds: float,
+    window_minutes: tuple[int, ...],
+    slope_window_minutes: tuple[int, ...],
+    include_stale: bool,
 ) -> None:
     values = np.asarray(values, dtype=np.float32)
     feature_dict[f"{name}::raw"] = values
     feature_dict[f"{name}::diff_1"] = np.diff(values, prepend=values[0]).astype(np.float32)
     feature_dict[f"{name}::missing"] = missing_flag.astype(np.float32)
-    feature_dict[f"{name}::stale_run"] = _stale_run_length(values)
+    if include_stale:
+        feature_dict[f"{name}::stale_run"] = _stale_run_length(values)
 
-    for minutes in WINDOW_MINUTES:
+    for minutes in window_minutes:
         steps = _window_steps(step_seconds, minutes)
         z, std = _rolling_zscore(values, window=steps)
         feature_dict[f"{name}::z_{minutes}m"] = z
         feature_dict[f"{name}::std_{minutes}m"] = std
 
-    for minutes in SLOPE_WINDOWS_MINUTES:
+    for minutes in slope_window_minutes:
         steps = _window_steps(step_seconds, minutes)
         feature_dict[f"{name}::slope_{minutes}m"] = _slope(values, window=steps)
+
+
+def _feature_mode(reference_points: int, masked_fraction: float) -> tuple[str, tuple[int, ...], tuple[int, ...], bool]:
+    if reference_points < 1024 or masked_fraction >= 0.85:
+        return "tight", TIGHT_WINDOW_MINUTES, COMPACT_SLOPE_WINDOWS_MINUTES, False
+    if reference_points < 2500 or masked_fraction >= 0.70:
+        return "compact", COMPACT_WINDOW_MINUTES, COMPACT_SLOPE_WINDOWS_MINUTES, True
+    return "full", FULL_WINDOW_MINUTES, FULL_SLOPE_WINDOWS_MINUTES, True
 
 
 def _build_soft_sensor_signals(base_columns: list[str], raw_matrix: np.ndarray) -> dict[str, np.ndarray]:
@@ -252,6 +308,7 @@ def prepare_engineered_well(
     min_reference_coverage: float,
     min_total_coverage: float,
 ) -> PreparedWellData | None:
+    patch_size = int(ANOMALY_PATCH_SIZE.get(anomaly_key, patch_size))
     wd = well_df.sort_values("timestamp").reset_index(drop=True)
     timestamps = wd["timestamp"].to_numpy()
     if len(timestamps) < patch_size * 4:
@@ -326,22 +383,72 @@ def prepare_engineered_well(
         raw_matrix = forward_fill_causal(raw_df.to_numpy(dtype=np.float32))
 
     step_seconds = infer_step_seconds(timestamps)
-    stability_mask, anchor_columns = _build_instability_mask(
-        raw_df=raw_df,
-        filled_matrix=raw_matrix,
-        base_columns=base_columns,
-        step_seconds=step_seconds,
-    )
-
-    reference_mask = np.zeros(len(wd), dtype=bool)
-    reference_mask[:reference_end_idx] = True
-    reference_mask &= stability_mask
     min_ref_points = max(patch_size * 2, 64)
+    mask_target = MASK_TARGETS.get(anomaly_key, MASK_TARGETS["salt"])
+    chosen_profile_name = "default"
+    chosen_masked_fraction = 0.0
+    anchor_columns: list[str] = []
+    stability_mask = np.ones(len(wd), dtype=bool)
+    reference_mask = np.zeros(len(wd), dtype=bool)
+    best_candidate: tuple[np.ndarray, np.ndarray, str, list[str], float, int] | None = None
+
+    for profile in MASK_PROFILES:
+        candidate_mask, anchors = _build_instability_mask(
+            raw_df=raw_df,
+            filled_matrix=raw_matrix,
+            base_columns=base_columns,
+            step_seconds=step_seconds,
+            profile=profile,
+        )
+        candidate_reference_mask = np.zeros(len(wd), dtype=bool)
+        candidate_reference_mask[:reference_end_idx] = True
+        candidate_reference_mask &= candidate_mask
+        candidate_ref_points = int(candidate_reference_mask.sum())
+        candidate_masked_fraction = float((~candidate_mask).mean()) if len(candidate_mask) else 0.0
+        current_rank = (
+            candidate_ref_points,
+            -candidate_masked_fraction,
+        )
+        if best_candidate is None or current_rank > (best_candidate[5], -best_candidate[4]):
+            best_candidate = (
+                candidate_mask,
+                candidate_reference_mask,
+                str(profile["name"]),
+                anchors,
+                candidate_masked_fraction,
+                candidate_ref_points,
+            )
+        if (
+            candidate_ref_points >= min_ref_points
+            and candidate_masked_fraction <= float(mask_target["target_masked_fraction"])
+        ):
+            stability_mask = candidate_mask
+            reference_mask = candidate_reference_mask
+            anchor_columns = anchors
+            chosen_profile_name = str(profile["name"])
+            chosen_masked_fraction = candidate_masked_fraction
+            break
+    else:
+        if best_candidate is None:
+            return None
+        stability_mask, reference_mask, chosen_profile_name, anchor_columns, chosen_masked_fraction, _ = best_candidate
+
     if int(reference_mask.sum()) < min_ref_points:
         reference_mask = np.zeros(len(wd), dtype=bool)
         reference_mask[:reference_end_idx] = True
     if int(reference_mask.sum()) < min_ref_points:
         return None
+
+    if chosen_masked_fraction > float(mask_target["hard_max_fraction"]):
+        onset_allowed_mask = np.ones(len(wd), dtype=bool)
+        onset_allowed_mask[:reference_end_idx] = False
+    else:
+        onset_allowed_mask = stability_mask.copy()
+
+    feature_mode, feature_windows, slope_windows, include_stale = _feature_mode(
+        reference_points=int(reference_mask.sum()),
+        masked_fraction=chosen_masked_fraction,
+    )
 
     feature_dict: dict[str, np.ndarray] = {}
     missing_matrix = raw_df.isna().to_numpy(dtype=np.float32)
@@ -352,6 +459,9 @@ def prepare_engineered_well(
             values=raw_matrix[:, idx],
             missing_flag=missing_matrix[:, idx],
             step_seconds=step_seconds,
+            window_minutes=feature_windows,
+            slope_window_minutes=slope_windows,
+            include_stale=include_stale,
         )
 
     if anomaly_key == "salt":
@@ -362,6 +472,9 @@ def prepare_engineered_well(
                 values=np.asarray(values, dtype=np.float32),
                 missing_flag=np.zeros(len(values), dtype=np.float32),
                 step_seconds=step_seconds,
+                window_minutes=feature_windows,
+                slope_window_minutes=slope_windows,
+                include_stale=include_stale,
             )
 
     feature_df = pd.DataFrame(feature_dict)
@@ -375,7 +488,6 @@ def prepare_engineered_well(
     feature_matrix = (feature_matrix - feature_mean) / feature_std
     feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
 
-    onset_allowed_mask = stability_mask.copy()
     detail = {
         "points": int(len(wd)),
         "raw_channels": int(len(base_columns)),
@@ -383,8 +495,11 @@ def prepare_engineered_well(
         "reference_end_idx": int(reference_end_idx),
         "reference_points": int(reference_mask.sum()),
         "trim_start_idx": int(trim_start_idx),
-        "masked_fraction": float((~stability_mask).mean()) if len(stability_mask) else 0.0,
+        "masked_fraction": chosen_masked_fraction,
         "anchor_columns": anchor_columns,
+        "mask_profile": chosen_profile_name,
+        "feature_mode": feature_mode,
+        "patch_size": patch_size,
     }
     return PreparedWellData(
         well_id=well_id,

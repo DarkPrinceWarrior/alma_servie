@@ -315,13 +315,20 @@ class FusedDetector(BaseDetector):
         device: torch.device,
         verbose: bool = False,
         weights: dict[str, float] | None = None,
+        patch_short: int = SHORT_PATCH,
+        patch_long: int = LONG_PATCH,
     ) -> None:
         self.device = device
         self.verbose = verbose
         self.weights = dict(FUSED_WEIGHTS if weights is None else weights)
         self.reference_mask_: np.ndarray | None = None
         self.detectors_: dict[str, BaseDetector] = {
-            "paano_feat": PaAnoFeatureDetector(device=device, verbose=verbose),
+            "paano_feat": PaAnoFeatureDetector(
+                device=device,
+                patch_short=patch_short,
+                patch_long=patch_long,
+                verbose=verbose,
+            ),
             "pca_spe": PCASPEDetector(),
             "lof": LOFDetector(),
             "iforest": IsolationForestDetector(),
@@ -400,6 +407,7 @@ class TranADGlobalDetector(BaseDetector):
         batch_size: int = 256,
         learning_rate: float = 1e-3,
         max_train_windows: int = 20000,
+        inference_batch_size: int = 2048,
         verbose: bool = False,
     ) -> None:
         self.device = device
@@ -410,6 +418,7 @@ class TranADGlobalDetector(BaseDetector):
         self.batch_size = int(batch_size)
         self.learning_rate = float(learning_rate)
         self.max_train_windows = int(max_train_windows)
+        self.inference_batch_size = int(inference_batch_size)
         self.verbose = verbose
         self.model_: _TranADStyleNet | None = None
         self.feature_dim_: int = 0
@@ -498,21 +507,37 @@ class TranADGlobalDetector(BaseDetector):
         valid_mask = np.ones(len(X), dtype=bool) if mask_all is None else np.asarray(mask_all, dtype=bool)
 
         scores = np.zeros(len(X), dtype=np.float32)
-        counts = np.zeros(len(X), dtype=np.float32)
-        self.model_.eval()
-        with torch.no_grad():
-            for end_idx in range(self.window_size - 1, len(X)):
-                start_idx = end_idx - self.window_size + 1
-                if not valid_mask[end_idx]:
-                    continue
-                window = torch.from_numpy(X[start_idx : end_idx + 1]).unsqueeze(0).to(self.device)
-                pred = self.model_(window).cpu().numpy()[0]
-                err = float(np.mean(np.square(pred - X[end_idx])))
-                scores[end_idx] += err
-                counts[end_idx] += 1.0
+        end_indices = np.flatnonzero(valid_mask)
+        end_indices = end_indices[end_indices >= self.window_size - 1]
+        if len(end_indices) == 0:
+            return DetectorScoreOutput(
+                primary=scores,
+                components={"tranad_recon": scores.copy()},
+                detail={
+                    "window_size": self.window_size,
+                    "hidden_dim": self.hidden_dim,
+                    "num_layers": self.num_layers,
+                    "epochs": self.epochs,
+                    "inference_batch_size": self.inference_batch_size,
+                },
+            )
 
-        counts = np.where(counts == 0.0, 1.0, counts)
-        primary = scores / counts
+        offsets = np.arange(self.window_size, dtype=np.int64) - (self.window_size - 1)
+        self.model_.eval()
+        autocast_enabled = self.device.type == "cuda"
+        with torch.no_grad():
+            for start in range(0, len(end_indices), self.inference_batch_size):
+                batch_end = end_indices[start : start + self.inference_batch_size]
+                batch_indices = batch_end[:, None] + offsets[None, :]
+                batch_windows = X[batch_indices]
+                batch_targets = X[batch_end]
+                batch_tensor = torch.from_numpy(batch_windows).to(self.device)
+                with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
+                    pred = self.model_(batch_tensor)
+                err = torch.mean((pred - torch.from_numpy(batch_targets).to(self.device)) ** 2, dim=1)
+                scores[batch_end] = err.detach().cpu().numpy().astype(np.float32)
+
+        primary = scores
         return DetectorScoreOutput(
             primary=primary.astype(np.float32),
             components={"tranad_recon": primary.astype(np.float32)},
@@ -521,6 +546,7 @@ class TranADGlobalDetector(BaseDetector):
                 "hidden_dim": self.hidden_dim,
                 "num_layers": self.num_layers,
                 "epochs": self.epochs,
+                "inference_batch_size": self.inference_batch_size,
             },
         )
 
@@ -534,6 +560,7 @@ class TranADGlobalDetector(BaseDetector):
             "hidden_dim": self.hidden_dim,
             "num_layers": self.num_layers,
             "epochs": self.epochs,
+            "inference_batch_size": self.inference_batch_size,
         }
         torch.save(payload, path)
 
@@ -544,6 +571,7 @@ class TranADGlobalDetector(BaseDetector):
         self.hidden_dim = int(payload["hidden_dim"])
         self.num_layers = int(payload["num_layers"])
         self.epochs = int(payload.get("epochs", self.epochs))
+        self.inference_batch_size = int(payload.get("inference_batch_size", self.inference_batch_size))
         self.model_ = _TranADStyleNet(
             input_dim=self.feature_dim_,
             hidden_dim=self.hidden_dim,

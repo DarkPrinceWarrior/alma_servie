@@ -17,7 +17,6 @@ from alma_service.benchmark_metrics import (
     predicted_from_mapping,
     select_interval_detection,
     summarize_splits,
-    summary_score_key,
 )
 from alma_service.detection_artifacts import (
     DEFAULT_DETECTOR,
@@ -65,26 +64,96 @@ from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
 DEFAULT_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
     "min_run_points": 3,
-    "cooldown_hours": 8.0,
+    "cooldown_hours": 12.0,
     "ema_alpha": 0.08,
     "gate_mode": "score_ema",
 }
 
 ONSET_TUNE_GRID = {
-    "target_far_per_day": [0.25, 0.50, 1.00],
-    "min_run_points": [2, 3, 4],
-    "cooldown_hours": [4.0, 8.0, 12.0],
+    "target_far_per_day": [0.10, 0.25, 0.50],
+    "min_run_points": [3, 4, 6],
+    "cooldown_hours": [8.0, 12.0, 24.0],
     "ema_alpha": [0.04, 0.08, 0.12],
     "gate_mode": ["score_ema", "relaxed", "strict"],
 }
 
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
+ANOMALY_RUNTIME_CONFIG = {
+    "negermet": {
+        "prepare_patch_size": 64,
+        "paano_patch_short": 32,
+        "paano_patch_long": 64,
+        "max_far_per_day": 0.25,
+        "max_starts_per_interval": 3.0,
+    },
+    "pritok": {
+        "prepare_patch_size": 96,
+        "paano_patch_short": 48,
+        "paano_patch_long": 96,
+        "max_far_per_day": 0.25,
+        "max_starts_per_interval": 10.0,
+    },
+    "salt": {
+        "prepare_patch_size": 96,
+        "paano_patch_short": 48,
+        "paano_patch_long": 96,
+        "max_far_per_day": 0.40,
+        "max_starts_per_interval": 20.0,
+    },
+}
+LOCAL_DEFAULT_PRIORITY = {
+    "fused": 5,
+    "pca_spe": 4,
+    "paano_feat": 3,
+    "lof": 2,
+    "iforest": 1,
+}
 
 
 @dataclass
 class PreparedDetectorRun:
     prepared: PreparedWellData
     score_output: DetectorScoreOutput
+
+
+def _runtime_config(anomaly_key: str) -> dict[str, float | int]:
+    return ANOMALY_RUNTIME_CONFIG.get(anomaly_key, ANOMALY_RUNTIME_CONFIG["salt"])
+
+
+def _safe_metric(value: Any, large: float = 1e9) -> float:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return large
+    if not np.isfinite(numeric):
+        return large
+    return numeric
+
+
+def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[str, Any]) -> tuple[float, ...]:
+    runtime_cfg = _runtime_config(anomaly_key)
+    max_far = float(runtime_cfg["max_far_per_day"])
+    max_starts = float(runtime_cfg["max_starts_per_interval"])
+    far = _safe_metric(summary.get("false_alarms_per_day"), large=1e9)
+    starts = _safe_metric(summary.get("avg_starts_per_interval"), large=1e9)
+    p90_ratio = _safe_metric(summary.get("p90_delay_ratio"), large=1e9)
+    p90_abs_delay = _safe_metric(summary.get("p90_abs_delay_hours"), large=1e9)
+    feasible_far = int(far <= max_far)
+    feasible_starts = int(starts <= max_starts)
+    far_over = max(far - max_far, 0.0)
+    starts_over = max(starts - max_starts, 0.0)
+    priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
+    return (
+        float(summary.get("hit_count", 0)),
+        float(feasible_far + feasible_starts),
+        -far_over,
+        -starts_over,
+        -p90_ratio,
+        -far,
+        -starts,
+        -p90_abs_delay,
+        float(priority),
+    )
 
 
 def load_anomaly_data(spec: DetectionSpec, source_path: str | None = None) -> pd.DataFrame:
@@ -116,9 +185,15 @@ def load_intervals(spec: DetectionSpec, required: bool = True) -> pd.DataFrame:
     return load_intervals_df(src)
 
 
-def _build_detector(detector_key: str, device: torch.device, verbose: bool = False):
+def _build_detector(anomaly_key: str, detector_key: str, device: torch.device, verbose: bool = False):
+    runtime_cfg = _runtime_config(anomaly_key)
     if detector_key == "paano_feat":
-        return PaAnoFeatureDetector(device=device, verbose=verbose)
+        return PaAnoFeatureDetector(
+            device=device,
+            patch_short=int(runtime_cfg["paano_patch_short"]),
+            patch_long=int(runtime_cfg["paano_patch_long"]),
+            verbose=verbose,
+        )
     if detector_key == "pca_spe":
         return PCASPEDetector()
     if detector_key == "lof":
@@ -126,7 +201,12 @@ def _build_detector(detector_key: str, device: torch.device, verbose: bool = Fal
     if detector_key == "iforest":
         return IsolationForestDetector()
     if detector_key == "fused":
-        return FusedDetector(device=device, verbose=verbose)
+        return FusedDetector(
+            device=device,
+            verbose=verbose,
+            patch_short=int(runtime_cfg["paano_patch_short"]),
+            patch_long=int(runtime_cfg["paano_patch_long"]),
+        )
     raise ValueError(f"Unsupported local detector: {detector_key}")
 
 
@@ -136,6 +216,7 @@ def _prepare_all_wells(
     intervals: pd.DataFrame,
     verbose: bool,
 ) -> dict[str, PreparedWellData]:
+    runtime_cfg = _runtime_config(spec.anomaly_key)
     split_map = (
         intervals[["well_id", "split"]]
         .drop_duplicates("well_id")
@@ -150,7 +231,7 @@ def _prepare_all_wells(
             well_id=well_id,
             split=split_map.get(well_id, "train"),
             well_df=well_df,
-            patch_size=LONG_PATCH,
+            patch_size=int(runtime_cfg["prepare_patch_size"]),
             reference_min_ratio=REFERENCE_MIN_RATIO,
             reference_max_ratio=REFERENCE_MAX_RATIO,
             reference_min_days=REFERENCE_MIN_DAYS,
@@ -188,6 +269,7 @@ def _align_features(prepared_runs: dict[str, PreparedWellData]) -> tuple[list[st
 
 
 def _build_local_runs(
+    anomaly_key: str,
     detector_key: str,
     prepared_runs: dict[str, PreparedWellData],
     device: torch.device,
@@ -195,7 +277,7 @@ def _build_local_runs(
 ) -> dict[str, PreparedDetectorRun]:
     out: dict[str, PreparedDetectorRun] = {}
     for well_id, prepared in prepared_runs.items():
-        detector = _build_detector(detector_key, device=device, verbose=verbose)
+        detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
         X_ref = prepared.feature_matrix[prepared.reference_mask]
         detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
         score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
@@ -318,6 +400,7 @@ def _candidate_configs(detector_key: str) -> list[dict[str, Any]]:
 
 
 def _tune_config(
+    anomaly_key: str,
     detector_key: str,
     train_runs: dict[str, PreparedDetectorRun],
     train_intervals: pd.DataFrame,
@@ -345,7 +428,7 @@ def _tune_config(
             scores=None,
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
-        key = summary_score_key(summary)
+        key = _operational_score_key(anomaly_key, detector_key, summary)
         leaderboard.append({"score_key": list(key), "config": cfg, "summary": summary})
         if best_key is None or key > best_key:
             best_cfg = cfg.copy()
@@ -396,7 +479,13 @@ def _load_or_build_config(
         if payload:
             return payload
 
-    cfg, tuning_summary = _tune_config(detector_key, train_runs, train_intervals, verbose=verbose)
+    cfg, tuning_summary = _tune_config(
+        spec.anomaly_key,
+        detector_key,
+        train_runs,
+        train_intervals,
+        verbose=verbose,
+    )
     ensure_parent(cfg_path).write_text(
         json.dumps({"detector": detector_key, "config": cfg}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -481,40 +570,35 @@ def _summary_for_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _choose_default_detector(detector_summaries: dict[str, dict[str, Any]], legacy_payload: dict[str, Any]) -> str:
-    if "fused" not in detector_summaries:
+def _choose_default_detector(
+    anomaly_key: str,
+    detector_summaries: dict[str, dict[str, Any]],
+    legacy_payload: dict[str, Any],
+) -> str:
+    candidates: list[tuple[tuple[float, ...], str]] = []
+    for detector_key, payload in detector_summaries.items():
+        if detector_key not in LOCAL_DETECTOR_KEYS:
+            continue
+        summary = _summary_for_payload(payload.get("splits", {}).get("all", payload))
+        candidates.append((_operational_score_key(anomaly_key, detector_key, summary), detector_key))
+
+    if not candidates:
         if "paano_feat" in detector_summaries:
             return "paano_feat"
         available = sorted(detector_summaries)
         return available[0] if available else DEFAULT_DETECTOR
 
-    fused_summary = _summary_for_payload(detector_summaries["fused"])
-    baseline_summary = None
-    if "paano_feat" in detector_summaries:
-        baseline_summary = _summary_for_payload(detector_summaries["paano_feat"])
+    candidates.sort(reverse=True)
+    selected = candidates[0][1]
+
     if legacy_payload:
         legacy_summary = _summary_for_payload(legacy_payload)
-        if baseline_summary is None or float(legacy_summary.get("hit_count", -1)) > float(
-            baseline_summary.get("hit_count", -1)
-        ):
-            baseline_summary = legacy_summary
-
-    if baseline_summary is None:
-        return "fused"
-
-    fused_hit = float(fused_summary.get("hit_count", 0))
-    base_hit = float(baseline_summary.get("hit_count", 0))
-    fused_delay_ratio = float(fused_summary.get("p90_delay_ratio", np.inf))
-    base_delay_ratio = float(baseline_summary.get("p90_delay_ratio", np.inf))
-    if not np.isfinite(base_delay_ratio):
-        base_delay_ratio = float(baseline_summary.get("p90_abs_delay_hours", np.inf))
-        fused_delay_ratio = float(fused_summary.get("p90_abs_delay_hours", np.inf))
-    fused_far = float(fused_summary.get("false_alarms_per_day", np.inf))
-    base_far = float(baseline_summary.get("false_alarms_per_day", np.inf))
-    far_ok = True if not np.isfinite(base_far) else fused_far <= base_far * 1.25
-    if fused_hit >= base_hit and fused_delay_ratio <= base_delay_ratio and far_ok:
-        return "fused"
-    return "paano_feat" if "paano_feat" in detector_summaries else "fused"
+        selected_summary = _summary_for_payload(detector_summaries[selected].get("splits", {}).get("all", detector_summaries[selected]))
+        legacy_key = _operational_score_key(anomaly_key, "paano_feat", legacy_summary)
+        selected_key = _operational_score_key(anomaly_key, selected, selected_summary)
+        if legacy_key > selected_key and "paano_feat" in detector_summaries:
+            return "paano_feat"
+    return selected
 
 
 def _update_benchmark_summary(spec: DetectionSpec) -> dict[str, Any]:
@@ -524,7 +608,7 @@ def _update_benchmark_summary(spec: DetectionSpec) -> dict[str, Any]:
         if path.exists():
             detector_payloads[detector_key] = load_json(path)
     legacy_payload = load_json(legacy_summary_path(spec))
-    selected = _choose_default_detector(detector_payloads, legacy_payload)
+    selected = _choose_default_detector(spec.anomaly_key, detector_payloads, legacy_payload)
     payload = {
         "anomaly": spec.anomaly_key,
         "selected_default_detector": selected,
@@ -575,7 +659,7 @@ def run_detection(
         raise RuntimeError("No wells survived engineered preprocessing.")
 
     if detector_key in LOCAL_DETECTOR_KEYS:
-        detector_runs = _build_local_runs(detector_key, prepared_runs, device=device, verbose=verbose)
+        detector_runs = _build_local_runs(spec.anomaly_key, detector_key, prepared_runs, device=device, verbose=verbose)
     else:
         detector_runs = _build_tranad_runs(
             spec=spec,
@@ -677,7 +761,7 @@ def run_single_well(
         well_id=well_id,
         split=split,
         well_df=well_df,
-        patch_size=LONG_PATCH,
+        patch_size=int(_runtime_config(spec.anomaly_key)["prepare_patch_size"]),
         reference_min_ratio=REFERENCE_MIN_RATIO,
         reference_max_ratio=REFERENCE_MAX_RATIO,
         reference_min_days=REFERENCE_MIN_DAYS,
@@ -690,7 +774,7 @@ def run_single_well(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if detector_key in LOCAL_DETECTOR_KEYS:
-        detector_obj = _build_detector(detector_key, device=device, verbose=True)
+        detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
         detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
         score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
         run = PreparedDetectorRun(prepared=prepared, score_output=score_output)

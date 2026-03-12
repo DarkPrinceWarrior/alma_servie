@@ -26,6 +26,14 @@ class EngineeredFeatureMaskTests(unittest.TestCase):
             filled_matrix=raw_df[["Выходная частота", "Полная выходная мощность"]].to_numpy(dtype=np.float32),
             base_columns=["Выходная частота", "Полная выходная мощность"],
             step_seconds=120.0,
+            profile={
+                "name": "test",
+                "back_minutes": 10,
+                "forward_minutes": 30,
+                "step_sigma": 6.0,
+                "flatline_minutes": 60,
+                "missing_run_length": 3,
+            },
         )
 
         self.assertIn("Выходная частота", anchors)

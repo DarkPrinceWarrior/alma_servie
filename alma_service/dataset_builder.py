@@ -150,8 +150,10 @@ def _build_well_frame(slist: list[pd.Series], freq: str) -> tuple[pd.DataFrame, 
             continue
         combined_idx = trimmed.index.union(grid)
         reindexed = trimmed.reindex(combined_idx).sort_index()
-        interpolated = reindexed.interpolate(method="time", limit_area="inside")
-        df_well[series.name] = interpolated.reindex(grid).values
+        # Strictly causal fill: carry only past information forward to the
+        # resampled grid, never interpolate using future sensor values.
+        causal_filled = reindexed.ffill()
+        df_well[series.name] = causal_filled.reindex(grid).values
 
     return df_well, {
         "start": union_start,
