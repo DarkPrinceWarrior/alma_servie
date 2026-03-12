@@ -1,27 +1,15 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import io
 from html import escape
 from pathlib import Path
 from typing import Any
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.dates as mdates
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-try:
-    import plotly.graph_objects as go
-    import plotly.io as pio
-    from plotly.subplots import make_subplots
-except ImportError:  # pragma: no cover - fallback for older envs
-    go = None
-    pio = None
-    make_subplots = None
+import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
 
 from alma_service.anomaly_specs import get_detection_spec
 from alma_service.benchmark_metrics import evaluate_predictions
@@ -38,8 +26,6 @@ from alma_service.detection_artifacts import (
 )
 from alma_service.paths import DB_DIR, REPORTS_DIR, ensure_parent
 from alma_service.tabular_io import read_table
-
-plt.rcParams["font.size"] = 10
 
 PRESSURE_COL = "Давление на приеме насоса кгс/см²"
 FREQ_COL = "Выходная частота"
@@ -169,82 +155,6 @@ def _pick_plot_columns(well_df: pd.DataFrame) -> list[str]:
     return (preferred + numeric_cols)[:2]
 
 
-def _create_plot_base64(
-    well_df: pd.DataFrame,
-    result_row: pd.Series,
-    scores_df: pd.DataFrame | None,
-) -> str | None:
-    plot_cols = _pick_plot_columns(well_df)
-    score_col = _score_column(scores_df)
-    has_scores = score_col is not None
-    if not plot_cols and not has_scores:
-        return None
-
-    x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
-    x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
-    if pd.notna(x_min) and pd.notna(x_max):
-        well_df = well_df[(well_df["timestamp"] >= x_min) & (well_df["timestamp"] <= x_max)]
-    if well_df.empty:
-        return None
-
-    n_rows = max(len(plot_cols), 1) + (1 if has_scores else 0)
-    fig, axes = plt.subplots(n_rows, 1, figsize=(14, 4.0 * n_rows), sharex=True)
-    if n_rows == 1:
-        axes = [axes]
-
-    line_colors = ["tab:blue", "tab:orange", "tab:green"]
-    for idx, col in enumerate(plot_cols):
-        ax = axes[idx]
-        line_df = well_df[["timestamp", col]].copy()
-        line_df[col] = pd.to_numeric(line_df[col], errors="coerce")
-        line_df = line_df.dropna(subset=[col])
-        if line_df.empty:
-            ax.text(0.5, 0.5, f"Нет данных: {col}", transform=ax.transAxes, ha="center", va="center")
-        else:
-            ax.plot(line_df["timestamp"], line_df[col], color=line_colors[idx % len(line_colors)], linewidth=0.7)
-        ax.axvspan(result_row["actual_start"], result_row["actual_end"], color="tab:red", alpha=0.12)
-        ax.axvline(result_row["actual_start"], color="tab:green", linewidth=1.0)
-        if pd.notna(result_row["detected_time"]):
-            ax.axvline(result_row["detected_time"], color="#7c3aed", linestyle="--", linewidth=1.2)
-        ax.set_ylabel(col)
-        ax.grid(True, alpha=0.25)
-        if pd.notna(x_min) and pd.notna(x_max) and x_min < x_max:
-            ax.set_xlim(x_min, x_max)
-
-    if has_scores and scores_df is not None:
-        score_ax = axes[-1]
-        score_view = scores_df.copy()
-        if pd.notna(x_min) and pd.notna(x_max):
-            score_view = score_view[(score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)]
-        if not score_view.empty:
-            score_ax.fill_between(score_view["timestamp"], 0, score_view[score_col], color="#7c3aed", alpha=0.22)
-            score_ax.plot(score_view["timestamp"], score_view[score_col], color="#7c3aed", linewidth=0.7)
-        score_ax.axvspan(result_row["actual_start"], result_row["actual_end"], color="tab:red", alpha=0.12)
-        score_ax.axvline(result_row["actual_start"], color="tab:green", linewidth=1.0)
-        if pd.notna(result_row["detected_time"]):
-            score_ax.axvline(result_row["detected_time"], color="#7c3aed", linestyle="--", linewidth=1.2)
-        score_ax.set_ylabel(score_col)
-        score_ax.grid(True, alpha=0.25)
-        if pd.notna(x_min) and pd.notna(x_max) and x_min < x_max:
-            score_ax.set_xlim(x_min, x_max)
-
-    axes[0].set_title(
-        f"Скважина {result_row['well_id']} | интервал {int(result_row['interval_idx'])} | split={result_row['split']}",
-        fontsize=12,
-        fontweight="bold",
-    )
-    axes[-1].set_xlabel("Время")
-    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d %H:%M"))
-    fig.autofmt_xdate()
-    fig.tight_layout()
-
-    buffer = io.BytesIO()
-    fig.savefig(buffer, format="png", dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    buffer.seek(0)
-    return base64.b64encode(buffer.read()).decode("utf-8")
-
-
 def _create_plot_html(
     well_df: pd.DataFrame,
     result_row: pd.Series,
@@ -252,9 +162,6 @@ def _create_plot_html(
     *,
     include_plotlyjs: bool,
 ) -> str | None:
-    if go is None or pio is None or make_subplots is None:
-        return None
-
     plot_cols = _pick_plot_columns(well_df)
     score_col = _score_column(scores_df)
     has_scores = score_col is not None
@@ -456,13 +363,6 @@ def generate_report(
             scores_df=scores_by_well.get(well_id),
             include_plotlyjs=(idx == 0),
         )
-        if not plot_html:
-            plot_b64 = _create_plot_base64(
-                well_df=well_ts,
-                result_row=result_row,
-                scores_df=scores_by_well.get(well_id),
-            )
-            plot_html = f'<img src="data:image/png;base64,{plot_b64}" alt="{well_id}">' if plot_b64 else ""
         detail_text = escape(str(result_row.get("detail", "—")))
         sections.append(
             f"""

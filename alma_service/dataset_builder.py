@@ -212,11 +212,9 @@ def build_dataset(spec: DatasetSpec, freq: str | None = None) -> tuple[pd.DataFr
 
     freq_label = freq.replace(" ", "")
     parquet_out_path = DB_DIR / f"{spec.output_prefix}_anomaly_database_{freq_label}.parquet"
-    csv_out_path = DB_DIR / f"{spec.output_prefix}_anomaly_database_{freq_label}.csv"
     write_dataset_tables(
         result,
         parquet_path=parquet_out_path,
-        csv_path=csv_out_path,
     )
     print(f"\nDatabase: {parquet_out_path} ({len(result)} rows)")
 

@@ -51,8 +51,6 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         source_candidates=(
             "negermet_anomaly_database_15s.parquet",
             "negermet_anomaly_database_2min.parquet",
-            "negermet_anomaly_database_15s.csv",
-            "negermet_anomaly_database_2min.csv",
         ),
     ),
     "pritok": DatasetSpec(
@@ -65,8 +63,6 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         source_candidates=(
             "pritok_anomaly_database_2min.parquet",
             "pritok_anomaly_database_15s.parquet",
-            "pritok_anomaly_database_2min.csv",
-            "pritok_anomaly_database_15s.csv",
         ),
     ),
     "salt": DatasetSpec(
@@ -79,8 +75,6 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         source_candidates=(
             "salt_anomaly_database_2min.parquet",
             "salt_anomaly_database_15s.parquet",
-            "salt_anomaly_database_2min.csv",
-            "salt_anomaly_database_15s.csv",
         ),
     ),
 }

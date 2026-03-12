@@ -6,14 +6,14 @@
 
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
-- `scripts/datasets/` — сборка Parquet/CSV-датасетов и интервалов из исходных Excel-файлов.
+- `scripts/datasets/` — сборка Parquet-датасетов и интервалов из исходных Excel-файлов.
 - `scripts/detection/` — новый unified detector stack (`paano_feat`, `pca_spe`, `lof`, `iforest`, `fused`, `tranad_global`) и legacy PaAno-обёртки.
 - `scripts/reports/` — HTML-отчёты по результатам blind-детекции и legacy feature-importance отчёты.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
 - `data/reference/` — общие справочные Excel-файлы.
   - `Параметры для модели.xlsx` — эталонный список признаков, который используют dataset builders.
-- `db/` — подготовленные датасеты (`.parquet` + `.csv`), интервалы, скоры и конфиги детекторов.
+- `db/` — подготовленные датасеты (`.parquet`), интервалы, скоры и конфиги детекторов.
 - `models/` — сохранённые веса моделей PaAno.
 - `artifacts/results/` — итоговые таблицы детекции.
 - `artifacts/reports/` — HTML-отчёты.
@@ -46,14 +46,13 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 Результат:
 
 - `db/*_anomaly_database_*.parquet`
-- `db/*_anomaly_database_*.csv`
 - `db/*_intervals.csv`
 
 Примечания:
 
-- builders читают Excel через `polars.read_excel(..., engine="calamine")` и сохраняют датасет в `Parquet` с `CSV`-sidecar;
+- builders читают Excel через `polars.read_excel(..., engine="calamine")` и сохраняют датасет только в `Parquet`;
 - builders собирают полный набор параметров, который реально есть в Excel по конкретной скважине;
-- каналы, которых нет у конкретной скважины, остаются `NaN` в общем CSV, но позже не подаются в blind PaAno для этой скважины;
+- каналы, которых нет у конкретной скважины, остаются `NaN` в общем Parquet, но позже не подаются в blind PaAno для этой скважины;
 - в `db/*_intervals.csv` пишется колонка `split`, где train/test-скважины задаются через `alma_service/dataset_config.py`.
 
 ### 2. Запуск детекции
@@ -147,5 +146,5 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 - Скрипты больше не зависят от запуска строго из корня: пути резолвятся относительно репозитория.
 - Новые отчёты и итоговые CSV по умолчанию больше не складываются в корень проекта.
 - HTML-отчёты теперь интерактивные: Plotly-графики поддерживают zoom/pan и читают те же CSV/JSON, которые пишет детектор, поэтому summary в HTML, `results.csv` и `summary.json` синхронизированы.
-- `db/*_anomaly_database_*.parquet` является приоритетным raw-источником для detection/report; `CSV` сохраняется как sidecar для совместимости и ручного просмотра.
+- `db/*_anomaly_database_*.parquet` является единственным raw-источником для detection/report.
 - `torch.compile` включён для кастомного `TranAD`-benchmark и для локального `PatchEncoder` в blind PaAno stack, с безопасным fallback если backend не поддерживается.
