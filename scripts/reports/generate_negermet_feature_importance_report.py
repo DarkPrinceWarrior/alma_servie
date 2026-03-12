@@ -34,6 +34,7 @@ from utils.data_preprocess import PatchCreator, preprocess_to_patches
 from utils.utils import create_memory_bank
 from utils.evaluation import calculate_anomaly_scores, distribute_patch_scores_to_points
 from alma_service.paths import DB_DIR, REPORTS_DIR, ensure_parent
+from alma_service.tabular_io import read_table
 from alma_service.well_features import get_well_feature_columns
 
 warnings.filterwarnings('ignore')
@@ -55,20 +56,19 @@ def set_seed():
 
 
 def load_data(src_path):
-    df = pd.read_csv(src_path, dtype={'well_id': str}, low_memory=False)
+    df = read_table(src_path, dtypes={'well_id': str}, parse_dates=['timestamp'], low_memory=False)
     df['well_id'] = df['well_id'].astype(str).str.strip().str.lower()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
     df = df.dropna(subset=['timestamp'])
     return df
 
 
 def load_intervals():
-    intervals = pd.read_csv(DB_DIR / 'negermet_intervals.csv', dtype={'well_id': str})
+    intervals = read_table(
+        DB_DIR / 'negermet_intervals.parquet',
+        dtypes={'well_id': str},
+        parse_dates=['start_date', 'end_date', 'data_start', 'data_end'],
+    )
     intervals['well_id'] = intervals['well_id'].astype(str).str.strip().str.lower()
-    intervals['start_date'] = pd.to_datetime(intervals['start_date'], errors='coerce')
-    intervals['end_date'] = pd.to_datetime(intervals['end_date'], errors='coerce')
-    intervals['data_start'] = pd.to_datetime(intervals.get('data_start'), errors='coerce')
-    intervals['data_end'] = pd.to_datetime(intervals.get('data_end'), errors='coerce')
     if 'interval_idx' not in intervals.columns:
         intervals['interval_idx'] = intervals.groupby('well_id').cumcount() + 1
     return intervals.sort_values(['well_id', 'start_date']).reset_index(drop=True)
@@ -382,7 +382,7 @@ def generate_report(source_path, output_path, report_title):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--source', default=str(DB_DIR / 'negermet_anomaly_database_15s.csv'))
+    parser.add_argument('--source', default=str(DB_DIR / 'negermet_anomaly_database_15s.parquet'))
     parser.add_argument('--output', default=str(REPORTS_DIR / 'negermet_paano_feature_importance.html'))
     parser.add_argument('--title', default='Влияние переменных на детекцию негерметичности НКТ (PaAno)')
     args = parser.parse_args()

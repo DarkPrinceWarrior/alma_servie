@@ -59,8 +59,20 @@ def write_dataset_tables(
     *,
     parquet_path: str | Path,
 ) -> None:
-    parquet_dst = Path(parquet_path)
-    pl.from_pandas(df).write_parquet(parquet_dst, compression="zstd")
+    write_table(df, parquet_path)
+
+
+def write_table(df: pd.DataFrame | pl.DataFrame, path: str | Path) -> None:
+    dst = Path(path)
+    suffix = dst.suffix.lower()
+    frame = df if isinstance(df, pl.DataFrame) else pl.from_pandas(df)
+    if suffix == ".parquet":
+        frame.write_parquet(dst, compression="zstd")
+        return
+    if suffix == ".csv":
+        frame.write_csv(dst)
+        return
+    raise ValueError(f"Unsupported table format for write: {dst}")
 
 
 def read_excel_sheet(

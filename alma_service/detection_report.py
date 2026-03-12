@@ -63,12 +63,12 @@ def _load_timeseries(path: Path) -> pd.DataFrame:
 
 
 def _load_intervals(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str})
+    df = read_table(
+        path,
+        dtypes={"well_id": str},
+        parse_dates=["start_date", "end_date", "data_start", "data_end"],
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
-    df["data_start"] = pd.to_datetime(df.get("data_start"), errors="coerce")
-    df["data_end"] = pd.to_datetime(df.get("data_end"), errors="coerce")
     if "split" in df.columns:
         df["split"] = df["split"].astype(str).str.strip().str.lower()
     else:
@@ -84,14 +84,15 @@ def _load_intervals(path: Path) -> pd.DataFrame:
 def _load_results(path: Path) -> pd.DataFrame:
     if not path.exists():
         raise FileNotFoundError(f"Results file not found: {path}")
-    df = pd.read_csv(path, dtype={"well_id": str})
+    df = read_table(
+        path,
+        dtypes={"well_id": str},
+        parse_dates=["actual_start", "actual_end", "detected_time", "data_start", "data_end"],
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
     if "interval_idx" not in df.columns:
         df["interval_idx"] = df.groupby("well_id").cumcount() + 1
     df["interval_idx"] = pd.to_numeric(df["interval_idx"], errors="coerce").fillna(1).astype(int)
-    for col in ["actual_start", "actual_end", "detected_time", "data_start", "data_end"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce")
     if "split" not in df.columns:
         df["split"] = "train"
     df["split"] = df["split"].astype(str).str.strip().str.lower()
@@ -103,9 +104,8 @@ def _load_results(path: Path) -> pd.DataFrame:
 def _load_scores(path: Path) -> dict[str, pd.DataFrame]:
     if not path.exists():
         return {}
-    df = pd.read_csv(path, dtype={"well_id": str})
+    df = read_table(path, dtypes={"well_id": str}, parse_dates=["timestamp"])
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     df = df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
     return {well_id: grp for well_id, grp in df.groupby("well_id")}
 
@@ -319,7 +319,11 @@ def generate_report(
     summary_payload = load_json(summary_path(spec, detector_key))
     if not summary_payload:
         predictions_path = predicted_starts_path(spec, detector_key)
-        pred_df = pd.read_csv(predictions_path, dtype={"well_id": str}) if predictions_path.exists() else pd.DataFrame()
+        pred_df = (
+            read_table(predictions_path, dtypes={"well_id": str}, parse_dates=["detected_time"])
+            if predictions_path.exists()
+            else pd.DataFrame()
+        )
         if not pred_df.empty:
             pred_df["well_id"] = pred_df["well_id"].astype(str).str.strip().str.lower()
             pred_df["detected_time"] = pd.to_datetime(pred_df["detected_time"], errors="coerce")
@@ -515,8 +519,8 @@ def run_cli(default_anomaly: str) -> None:
     parser.add_argument("--detector", default=None, help="Detector key, default is benchmark-selected or fused.")
     parser.add_argument("--output", default=None, help="Output HTML path")
     parser.add_argument("--source", default=None, help="Override source dataset path")
-    parser.add_argument("--results", default=None, help="Override results CSV path")
-    parser.add_argument("--scores", default=None, help="Override scores CSV path")
+    parser.add_argument("--results", default=None, help="Override results Parquet path")
+    parser.add_argument("--scores", default=None, help="Override scores Parquet path")
     args = parser.parse_args()
 
     generate_report(

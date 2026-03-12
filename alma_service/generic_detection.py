@@ -64,7 +64,7 @@ from alma_service.paano_defaults import (
     REFERENCE_MIN_RATIO,
 )
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
-from alma_service.tabular_io import read_table
+from alma_service.tabular_io import read_table, write_table
 
 DEFAULT_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
@@ -856,17 +856,17 @@ def run_detection(
     result_df = _merge_result_details(result_df, predicted=predicted, detail_map=detail_map)
     _print_result_table(spec, detector_key, result_df)
 
-    result_df.to_csv(output, index=False)
+    write_table(result_df, output)
     print(f"\nResults saved to {output}")
 
     score_output_path = scores_path(spec, detector_key)
     ensure_parent(score_output_path)
-    score_df.to_csv(score_output_path, index=False)
+    write_table(score_df, score_output_path)
     print(f"Per-point scores saved to {score_output_path}")
 
     pred_output_path = predicted_starts_path(spec, detector_key)
     ensure_parent(pred_output_path)
-    pred_df.to_csv(pred_output_path, index=False)
+    write_table(pred_df, pred_output_path)
     print(f"Predicted starts saved to {pred_output_path}")
 
     summary_payload = {

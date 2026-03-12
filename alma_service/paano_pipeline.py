@@ -50,7 +50,7 @@ from alma_service.paano_defaults import (
     TUNE_GRID,
 )
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
-from alma_service.tabular_io import read_table
+from alma_service.tabular_io import read_table, write_table
 from alma_service.well_preprocess import WellMatrix, prepare_blind_well_matrix
 
 warnings.filterwarnings("ignore")
@@ -122,12 +122,12 @@ def load_intervals(spec: DetectionSpec, required: bool = True) -> pd.DataFrame:
             columns=["well_id", "start_date", "end_date", "data_start", "data_end", "split", "interval_idx"]
         )
 
-    df = pd.read_csv(src, dtype={"well_id": str})
+    df = read_table(
+        src,
+        dtypes={"well_id": str},
+        parse_dates=["start_date", "end_date", "data_start", "data_end"],
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
-    df["data_start"] = pd.to_datetime(df.get("data_start"), errors="coerce")
-    df["data_end"] = pd.to_datetime(df.get("data_end"), errors="coerce")
     if "split" in df.columns:
         df["split"] = df["split"].astype(str).str.strip().str.lower()
     else:
@@ -607,13 +607,13 @@ def run_detection(
             res_df[["well_id", "interval_idx", "split", "detected_time", "actual_start", "actual_end", "status"]]
             .to_string(index=False)
         )
-    res_df.to_csv(output, index=False)
+    write_table(res_df, output)
     print(f"\nResults saved to {output}")
 
-    pd.DataFrame(score_rows).to_csv(spec.scores_path, index=False)
+    write_table(pd.DataFrame(score_rows), spec.scores_path)
     print(f"Per-point scores saved to {spec.scores_path}")
 
-    pd.DataFrame(pred_rows).to_csv(spec.predicted_starts_path, index=False)
+    write_table(pd.DataFrame(pred_rows), spec.predicted_starts_path)
     print(f"Predicted starts saved to {spec.predicted_starts_path}")
 
     pred_df = pd.DataFrame(pred_rows)

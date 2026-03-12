@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
+import polars as pl
 
 from alma_service.onset_detection import choose_reference_end_index, infer_step_seconds
 from alma_service.well_features import get_well_feature_columns
@@ -119,18 +120,30 @@ def _stale_run_length(values: np.ndarray, eps: float = EPS) -> np.ndarray:
 
 
 def _rolling_zscore(values: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
-    series = pd.Series(np.asarray(values, dtype=np.float32))
-    mean = series.rolling(window=window, min_periods=1).mean()
-    std = series.rolling(window=window, min_periods=2).std(ddof=0)
-    z = ((series - mean) / std.replace(0.0, np.nan)).fillna(0.0).to_numpy(dtype=np.float32)
-    std_values = std.fillna(0.0).to_numpy(dtype=np.float32)
-    return z, std_values
+    frame = pl.DataFrame({"x": np.asarray(values, dtype=np.float32)})
+    stats = frame.with_columns(
+        [
+            pl.col("x").rolling_mean(window_size=window, min_samples=1).alias("mean"),
+            pl.col("x").rolling_std(window_size=window, min_samples=2, ddof=0).fill_null(0.0).alias("std"),
+        ]
+    )
+    mean = stats["mean"].to_numpy().astype(np.float32)
+    std = stats["std"].to_numpy().astype(np.float32)
+    z = np.divide(
+        np.asarray(values, dtype=np.float32) - mean,
+        std,
+        out=np.zeros_like(std, dtype=np.float32),
+        where=np.abs(std) > EPS,
+    )
+    return z.astype(np.float32), std
 
 
 def _slope(values: np.ndarray, window: int) -> np.ndarray:
-    series = pd.Series(np.asarray(values, dtype=np.float32))
-    slope = ((series - series.shift(window)) / float(window)).fillna(0.0)
-    return slope.to_numpy(dtype=np.float32)
+    frame = pl.DataFrame({"x": np.asarray(values, dtype=np.float32)})
+    slope = frame.with_columns(
+        ((pl.col("x") - pl.col("x").shift(window)) / float(window)).fill_null(0.0).alias("slope")
+    )["slope"]
+    return slope.to_numpy().astype(np.float32)
 
 
 def _choose_anchor_columns(raw_df: pd.DataFrame, candidates: list[str]) -> list[str]:

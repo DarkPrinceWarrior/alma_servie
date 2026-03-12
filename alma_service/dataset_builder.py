@@ -8,8 +8,8 @@ import pandas as pd
 
 from alma_service.anomaly_specs import DatasetSpec
 from alma_service.dataset_config import normalize_param_name, split_for_well
-from alma_service.paths import DB_DIR, SUMMARY_INFO_PATH, ensure_dir
-from alma_service.tabular_io import read_excel_sheet, read_excel_workbook, write_dataset_tables
+from alma_service.paths import DB_DIR, RAW_CACHE_DIR, SUMMARY_INFO_PATH, ensure_dir
+from alma_service.tabular_io import read_excel_sheet, read_excel_workbook, read_table, write_dataset_tables, write_table
 
 
 def _looks_like_datetime(value: object) -> bool:
@@ -22,11 +22,13 @@ def _looks_like_datetime(value: object) -> bool:
     return pd.notna(parsed)
 
 
-def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
-    print(f"  Парсинг {well_id} из {filepath}...")
-    series_list: list[pd.Series] = []
-    workbook = read_excel_workbook(filepath, has_header=False, infer_schema_length=20)
+def _raw_cache_path(filepath: Path) -> Path:
+    return RAW_CACHE_DIR / filepath.parent.name / f"{filepath.stem}.parquet"
 
+
+def _parse_workbook_to_cache_frame(filepath: Path) -> pd.DataFrame:
+    workbook = read_excel_workbook(filepath, has_header=False, infer_schema_length=20)
+    records: list[dict[str, object]] = []
     for sname, sheet_df in workbook.items():
         rows = list(sheet_df.itertuples(index=False, name=None))
         row_iter = iter(rows)
@@ -45,8 +47,6 @@ def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
         if _looks_like_datetime(third_value):
             row_iter = itertools.chain([third_row], row_iter)
 
-        times: list[pd.Timestamp] = []
-        values: list[float] = []
         for row in row_iter:
             ts_value = row[0] if row and len(row) > 0 else None
             val_value = row[1] if row and len(row) > 1 else None
@@ -57,15 +57,50 @@ def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
                 val = float(val_value) if val_value is not None else np.nan
             except (TypeError, ValueError):
                 continue
-            times.append(ts)
-            values.append(val)
+            records.append(
+                {
+                    "sheet_name": sname,
+                    "param_name": param_name,
+                    "timestamp": ts,
+                    "value": val,
+                }
+            )
+    if not records:
+        return pd.DataFrame(columns=["sheet_name", "param_name", "timestamp", "value"])
+    cache_df = pd.DataFrame.from_records(records)
+    cache_df = cache_df.dropna(subset=["timestamp"]).sort_values(["param_name", "timestamp"]).reset_index(drop=True)
+    return cache_df
 
-        if not times:
-            continue
 
-        series = pd.Series(values, index=pd.DatetimeIndex(times), name=param_name)
+def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
+    print(f"  Парсинг {well_id} из {filepath}...")
+    series_list: list[pd.Series] = []
+    cache_path = _raw_cache_path(filepath)
+    cache_is_fresh = cache_path.exists() and cache_path.stat().st_mtime >= filepath.stat().st_mtime
+    if cache_is_fresh:
+        cache_df = read_table(
+            cache_path,
+            dtypes={"sheet_name": str, "param_name": str},
+            parse_dates=["timestamp"],
+        )
+    else:
+        cache_df = _parse_workbook_to_cache_frame(filepath)
+        ensure_dir(cache_path.parent)
+        write_table(cache_df, cache_path)
+
+    if cache_df.empty:
+        print(f"    {well_id}: 0 параметров из xlsx")
+        return series_list
+
+    for param_name, param_df in cache_df.groupby("param_name", sort=True):
+        series = pd.Series(
+            param_df["value"].to_numpy(dtype=np.float32),
+            index=pd.DatetimeIndex(param_df["timestamp"]),
+            name=str(param_name),
+        )
         series = series[~series.index.duplicated(keep="first")].sort_index()
-        series_list.append(series)
+        if not series.empty:
+            series_list.append(series)
     print(f"    {well_id}: {len(series_list)} параметров из xlsx")
     return series_list
 
@@ -219,8 +254,8 @@ def build_dataset(spec: DatasetSpec, freq: str | None = None) -> tuple[pd.DataFr
     print(f"\nDatabase: {parquet_out_path} ({len(result)} rows)")
 
     intervals = build_intervals(spec)
-    intervals_path = DB_DIR / f"{spec.output_prefix}_intervals.csv"
-    intervals.to_csv(intervals_path, index=False)
+    intervals_path = DB_DIR / f"{spec.output_prefix}_intervals.parquet"
+    write_table(intervals, intervals_path)
     print(f"\nIntervals: {intervals_path}")
     print(intervals.to_string())
 

@@ -37,15 +37,15 @@ def detector_stem(spec: DetectionSpec, detector: str) -> str:
 
 
 def results_path(spec: DetectionSpec, detector: str) -> Path:
-    return RESULTS_DIR / f"{detector_stem(spec, detector)}_results.csv"
+    return RESULTS_DIR / f"{detector_stem(spec, detector)}_results.parquet"
 
 
 def scores_path(spec: DetectionSpec, detector: str) -> Path:
-    return DB_DIR / f"{detector_stem(spec, detector)}_scores.csv"
+    return DB_DIR / f"{detector_stem(spec, detector)}_scores.parquet"
 
 
 def predicted_starts_path(spec: DetectionSpec, detector: str) -> Path:
-    return DB_DIR / f"{detector_stem(spec, detector)}_predicted_starts.csv"
+    return DB_DIR / f"{detector_stem(spec, detector)}_predicted_starts.parquet"
 
 
 def config_path(spec: DetectionSpec, detector: str) -> Path:

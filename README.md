@@ -13,7 +13,7 @@
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
 - `data/reference/` — общие справочные Excel-файлы.
   - `Параметры для модели.xlsx` — эталонный список признаков, который используют dataset builders.
-- `db/` — подготовленные датасеты (`.parquet`), интервалы, скоры и конфиги детекторов.
+- `db/` — подготовленные датасеты (`.parquet`), интервалы (`.parquet`), скоры (`.parquet`) и конфиги детекторов.
 - `models/` — сохранённые веса моделей PaAno.
 - `artifacts/results/` — итоговые таблицы детекции.
 - `artifacts/reports/` — HTML-отчёты.
@@ -46,14 +46,15 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 Результат:
 
 - `db/*_anomaly_database_*.parquet`
-- `db/*_intervals.csv`
+- `db/*_intervals.parquet`
 
 Примечания:
 
 - builders читают Excel через `polars.read_excel(..., engine="calamine")` и сохраняют датасет только в `Parquet`;
+- builders дополнительно поддерживают raw-cache `xlsx -> parquet` для каждого workbook, чтобы повторная сборка не перепарсивала все Excel заново;
 - builders собирают полный набор параметров, который реально есть в Excel по конкретной скважине;
 - каналы, которых нет у конкретной скважины, остаются `NaN` в общем Parquet, но позже не подаются в blind PaAno для этой скважины;
-- в `db/*_intervals.csv` пишется колонка `split`, где train/test-скважины задаются через `alma_service/dataset_config.py`.
+- в `db/*_intervals.parquet` пишется колонка `split`, где train/test-скважины задаются через `alma_service/dataset_config.py`.
 
 ### 2. Запуск детекции
 
@@ -84,11 +85,11 @@ python scripts/detection/detect_salt_paano.py
 
 Результат:
 
-- `artifacts/results/*_<detector>_results.csv`
+- `artifacts/results/*_<detector>_results.parquet`
 - `artifacts/results/*_<detector>_results.summary.json`
 - `artifacts/results/*_benchmark_summary.json`
-- `db/*_<detector>_scores.csv`
-- `db/*_<detector>_predicted_starts.csv`
+- `db/*_<detector>_scores.parquet`
+- `db/*_<detector>_predicted_starts.parquet`
 - `db/*_<detector>_config.json`
 - `db/*_<detector>_tuning.json`
 - `models/*_tranad_global.pt` для глобального benchmark-моделя
@@ -145,6 +146,7 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 
 - Скрипты больше не зависят от запуска строго из корня: пути резолвятся относительно репозитория.
 - Новые отчёты и итоговые CSV по умолчанию больше не складываются в корень проекта.
-- HTML-отчёты теперь интерактивные: Plotly-графики поддерживают zoom/pan и читают те же CSV/JSON, которые пишет детектор, поэтому summary в HTML, `results.csv` и `summary.json` синхронизированы.
+- HTML-отчёты теперь интерактивные: Plotly-графики поддерживают zoom/pan и читают те же Parquet/JSON, которые пишет детектор, поэтому summary в HTML, `results.parquet` и `summary.json` синхронизированы.
 - `db/*_anomaly_database_*.parquet` является единственным raw-источником для detection/report.
+- Интервалы, результаты, per-point scores и predicted starts тоже хранятся в `Parquet`; `JSON` остаётся только для summary/config/tuning.
 - `torch.compile` включён для кастомного `TranAD`-benchmark и для локального `PatchEncoder` в blind PaAno stack, с безопасным fallback если backend не поддерживается.

@@ -17,6 +17,7 @@ SUMMARY_INFO_PATH = REFERENCE_DATA_DIR / "Сводная информация.xl
 MODEL_PARAMS_PATH = REFERENCE_DATA_DIR / "Параметры для модели.xlsx"
 
 DB_DIR = PROJECT_ROOT / "db"
+RAW_CACHE_DIR = DB_DIR / "raw_cache"
 MODELS_DIR = PROJECT_ROOT / "models"
 ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
 RESULTS_DIR = ARTIFACTS_DIR / "results"

@@ -7,12 +7,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from alma_service.tabular_io import read_table, write_table
+
 
 def load_intervals(path: str | Path) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str})
+    df = read_table(
+        path,
+        dtypes={"well_id": str},
+        parse_dates=["start_date", "end_date", "data_start", "data_end"],
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
     if "interval_idx" not in df.columns:
         df["interval_idx"] = df.groupby("well_id").cumcount() + 1
     df["interval_idx"] = pd.to_numeric(df["interval_idx"], errors="coerce").fillna(1).astype(int)
@@ -34,9 +38,8 @@ def load_intervals(path: str | Path) -> pd.DataFrame:
 
 
 def load_predicted_starts(path: str | Path) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str})
+    df = read_table(path, dtypes={"well_id": str}, parse_dates=["detected_time"])
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["detected_time"] = pd.to_datetime(df["detected_time"], errors="coerce")
     if "split" not in df.columns:
         df["split"] = "train"
     df["split"] = df["split"].astype(str).str.strip().str.lower()
@@ -49,9 +52,8 @@ def load_scores(path: str | Path | None) -> pd.DataFrame:
     p = Path(path)
     if not p.exists():
         return pd.DataFrame(columns=["well_id", "timestamp"])
-    df = pd.read_csv(p, dtype={"well_id": str})
+    df = read_table(p, dtypes={"well_id": str}, parse_dates=["timestamp"])
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     if "split" not in df.columns:
         df["split"] = "train"
     df["split"] = df["split"].astype(str).str.strip().str.lower()
@@ -250,3 +252,7 @@ def summarize_splits(
 
 def write_summary(path: str | Path, payload: dict[str, Any]) -> None:
     Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def write_interval_frame(path: str | Path, df: pd.DataFrame) -> None:
+    write_table(df, path)

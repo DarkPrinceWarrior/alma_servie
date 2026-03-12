@@ -19,7 +19,7 @@ class DatasetSpec:
 
     @property
     def intervals_path(self) -> Path:
-        return DB_DIR / f"{self.output_prefix}_intervals.csv"
+        return DB_DIR / f"{self.output_prefix}_intervals.parquet"
 
     @property
     def default_source_path(self) -> Path:
@@ -85,9 +85,9 @@ DETECTION_SPECS: dict[str, DetectionSpec] = {
         anomaly_key=key,
         display_name=spec.display_name,
         dataset=spec,
-        results_path=RESULTS_DIR / f"{spec.output_prefix}_paano_results.csv",
-        scores_path=DB_DIR / f"{spec.output_prefix}_paano_scores.csv",
-        predicted_starts_path=DB_DIR / f"{spec.output_prefix}_paano_predicted_starts.csv",
+        results_path=RESULTS_DIR / f"{spec.output_prefix}_paano_results.parquet",
+        scores_path=DB_DIR / f"{spec.output_prefix}_paano_scores.parquet",
+        predicted_starts_path=DB_DIR / f"{spec.output_prefix}_paano_predicted_starts.parquet",
         config_path=DB_DIR / f"{spec.output_prefix}_paano_config.json",
         tuning_path=DB_DIR / f"{spec.output_prefix}_paano_tuning.json",
         feature_importance_path=RESULTS_DIR.parent / "reports" / f"{spec.output_prefix}_paano_feature_importance.html",

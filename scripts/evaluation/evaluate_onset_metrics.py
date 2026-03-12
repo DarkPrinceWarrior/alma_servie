@@ -15,6 +15,7 @@ from alma_service.benchmark_metrics import (
     load_predicted_starts,
     load_scores,
     summarize_splits,
+    write_interval_frame,
 )
 from alma_service.detection_artifacts import DEFAULT_DETECTOR, predicted_starts_path, scores_path
 
@@ -23,9 +24,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate delay-aware onset detection metrics.")
     parser.add_argument("--anomaly", choices=["negermet", "pritok", "salt"], default=None)
     parser.add_argument("--detector", default=DEFAULT_DETECTOR, help="Detector key when --anomaly is used.")
-    parser.add_argument("--intervals", default=None, help="Path to *_intervals.csv")
-    parser.add_argument("--predicted-starts", default=None, help="Path to *_predicted_starts.csv")
-    parser.add_argument("--scores", default=None, help="Path to *_scores.csv")
+    parser.add_argument("--intervals", default=None, help="Path to *_intervals.parquet")
+    parser.add_argument("--predicted-starts", default=None, help="Path to *_predicted_starts.parquet")
+    parser.add_argument("--scores", default=None, help="Path to *_scores.parquet")
     parser.add_argument("--prestart-hours", type=float, default=2.0, help="Early-detection tolerance for interval hit.")
     parser.add_argument("--name", default="run", help="Label for outputs")
     parser.add_argument("--output-prefix", default=None, help="If set, writes JSON summary and per-interval CSV")
@@ -65,11 +66,14 @@ def main() -> None:
     if args.output_prefix:
         prefix = Path(args.output_prefix)
         summary_path = prefix.with_suffix(".json")
-        interval_path = prefix.with_name(prefix.name + "_intervals.csv")
+        interval_path = prefix.with_name(prefix.name + "_intervals.parquet")
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        split_frames.get("all", split_frames.get("train", split_frames.get("test", None))).to_csv(interval_path, index=False)
+        interval_frame = split_frames.get("all", split_frames.get("train", split_frames.get("test", None)))
+        if interval_frame is not None:
+            write_interval_frame(interval_path, interval_frame)
         print(f"Saved: {summary_path}")
-        print(f"Saved: {interval_path}")
+        if interval_frame is not None:
+            print(f"Saved: {interval_path}")
 
 
 if __name__ == "__main__":
