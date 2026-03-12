@@ -1,6 +1,0 @@
-well_id,interval_idx,type,detected_time,actual_type,actual_start,actual_end,status,detail
-1123л,1,Negermet_NKT,2025-06-21 10:38:15,Negermet_NKT,2025-06-21 10:32:00,2025-06-21 23:42:00,Detected,"PaAno (patch=128, iters=200, channels=26, train_pts=2500, train_time=3.9s)"
-172г,1,Negermet_NKT,2025-05-03 14:50:45,Negermet_NKT,2025-05-03 13:30:00,2025-05-07 02:00:00,Detected,"PaAno (patch=128, iters=200, channels=26, train_pts=3906, train_time=2.8s)"
-3509г,1,Negermet_NKT,2025-08-10 12:32:15,Negermet_NKT,2025-08-10 11:40:00,2025-08-10 21:25:00,Detected,"PaAno (patch=128, iters=200, channels=26, train_pts=3333, train_time=2.8s)"
-524,1,Negermet_NKT,2025-06-09 21:32:30,Negermet_NKT,2025-06-09 21:38:00,2025-06-10 15:30:00,Detected,"PaAno (patch=128, iters=200, channels=26, train_pts=5825, train_time=2.8s)"
-5271г,1,Negermet_NKT,2025-08-15 00:56:45,Negermet_NKT,2025-08-15 02:37:00,2025-08-15 02:46:00,Detected,"PaAno (patch=128, iters=200, channels=26, train_pts=11375, train_time=3.0s)"

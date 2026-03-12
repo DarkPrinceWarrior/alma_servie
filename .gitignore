@@ -18,9 +18,9 @@ pip-delete-this-directory.txt
 # Project specific
 plan.md
 report.md
+artifacts/
 
-# Salt anomaly large artifacts
-salt_anomaly_files/*.xlsx
+# Legacy generated files
 db/salt_anomaly_database.csv
 db/salt_anomaly_database_interpolated.csv
 salt_anomaly_report_original.html
