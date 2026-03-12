@@ -3,3 +3,8 @@ pandas
 scipy
 numpy
 matplotlib
+openpyxl
+scikit-learn
+statsmodels
+tqdm
+torch

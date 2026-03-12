@@ -1,0 +1,9 @@
+well_id,interval_idx,type,detected_time,actual_type,actual_start,actual_end,status,detail
+149г,1,Salt,,Salt,2025-06-20 15:12:00,2025-06-28 02:00:00,Not found,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.493,thr_ema=2.885,thr_cusum=3122.390,starts=7)"
+3244г,1,Salt,2025-11-29 04:50:00,Salt,2025-11-23 00:00:00,2025-12-29 16:00:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.498,thr_ema=2.756,thr_cusum=2758.083,starts=11)"
+3245,1,Salt,2025-04-15 09:44:00,Salt,2025-04-14 16:44:00,2025-05-12 02:00:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.136,thr_ema=2.498,thr_cusum=4009.792,starts=39)"
+3245(2),1,Salt,2025-10-06 20:34:00,Salt,2025-10-04 02:00:00,2025-11-07 02:00:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.136,thr_ema=2.418,thr_cusum=2484.571,starts=72)"
+3269,1,Salt,2025-10-26 23:54:00,Salt,2025-10-15 02:00:00,2025-10-27 11:45:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.874,thr_ema=3.081,thr_cusum=950.675,starts=5)"
+4039,1,Salt,2025-05-29 15:04:00,Salt,2025-05-29 11:00:00,2025-06-07 15:10:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.318,thr_ema=2.595,thr_cusum=16917.246,starts=55)"
+408,1,Salt,2025-06-02 05:26:00,Salt,2025-06-02 04:40:00,2025-06-26 11:20:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.491,thr_ema=2.906,thr_cusum=3397.362,starts=108)"
+408,2,Salt,2025-07-23 09:36:00,Salt,2025-07-22 19:00:00,2025-08-23 14:44:00,Detected,"PaAno dev-loio(s=32,l=64,w=0.65,far=4.0,run=2,cd=8.0,ema=0.08,gate=relaxed,thr_score=2.477,thr_ema=2.826,thr_cusum=4267.682,starts=103)"

@@ -1,0 +1,17 @@
+{
+  "config": {
+    "fusion_weight_short": 0.65,
+    "target_far_per_day": 4.0,
+    "min_run_points": 2,
+    "cooldown_hours": 8.0,
+    "ema_alpha": 0.08,
+    "gate_mode": "relaxed",
+    "prestart_tolerance_hours": 6,
+    "early_tolerance_hours": 6,
+    "holdout_buffer_hours": 12.0
+  },
+  "metadata": {
+    "mode": "dev",
+    "manual_override": true
+  }
+}

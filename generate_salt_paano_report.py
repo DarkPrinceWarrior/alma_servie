@@ -201,16 +201,16 @@ def generate_html(
         <p><b>PaAno</b> (Patch-based Anomaly detection) &mdash; метод обнаружения аномалий во временных рядах
         на основе нейросети (ICLR 2026). Принцип работы:</p>
         <ol>
-            <li><b>Обучение на норме.</b> Все нормальные участки данных скважины (вне известных аномалий)
-                нарезаются на короткие фрагменты (патчи). Лёгкая свёрточная нейросеть (1D-CNN) обучается
-                кодировать каждый патч в компактный вектор (эмбеддинг) так, чтобы похожие по форме
-                фрагменты имели близкие вектора, а разные &mdash; далёкие (triplet loss + pretext task).
-                Из полученных эмбеддингов формируется <b>банк нормальных паттернов</b> (memory bank).</li>
+            <li><b>Обучение на норме.</b> В качестве нормы используется исторический префикс ряда.
+                Для него обучаются две модели PaAno (короткий и длинный патч), после чего их скоры
+                объединяются в единый multi-scale сигнал.</li>
             <li><b>Скоринг.</b> Каждый фрагмент полного ряда прогоняется через ту же сеть.
                 Для него вычисляется <b>косинусное расстояние</b> до 3 ближайших эталонов в банке.
                 Чем дальше текущий фрагмент от всех нормальных &mdash; тем выше <b>PaAno Score</b>.</li>
-            <li><b>Детекция.</b> Когда PaAno Score устойчиво превышает пороговое значение (95-й перцентиль)
-                на протяжении нескольких точек подряд, фиксируется начало аномалии.</li>
+            <li><b>Детекция.</b> Используется каузальный onset-детектор: пороги калибруются только на
+                историческом нормальном префиксе (FAR/day), затем для текущего потока считаются
+                robust z-score, EMA и CUSUM. Начало аномалии фиксируется при устойчивом превышении
+                всех трех критериев.</li>
         </ol>
         <p><b>Интерпретация графика:</b> низкий score &asymp; нормальный режим работы;
         резкий рост score &rarr; поведение скважины отклонилось от выученной нормы
@@ -326,13 +326,13 @@ def generate_html(
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Генерация HTML-отчёта PaAno по солям')
-    parser.add_argument('--source', default='db/salt_anomaly_database_interpolated_2min.csv',
+    parser.add_argument('--source', default='db/salt_anomaly_database_2min.csv',
                         help='CSV с данными скважин')
     parser.add_argument('--output', default='salt_paano_report.html',
                         help='Путь к выходному HTML')
     parser.add_argument('--title', default='Детекция солеотложений методом PaAno (AI)',
                         help='Заголовок отчёта')
-    parser.add_argument('--paano-results', default='salt_paano_results_2min.csv',
+    parser.add_argument('--paano-results', default='salt_paano_results.csv',
                         help='CSV с результатами PaAno детекции')
     parser.add_argument('--paano-scores', default='db/salt_paano_scores.csv',
                         help='CSV с поточечными PaAno Score')

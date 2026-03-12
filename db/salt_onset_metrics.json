@@ -1,0 +1,15 @@
+{
+  "interval_count": 8,
+  "hit_count": 7,
+  "hit_rate": 0.875,
+  "delay_mae_hours": 80.21428571428571,
+  "delay_median_hours": 94.03333333333333,
+  "delay_p90_hours": 141.18,
+  "false_alarms": 127,
+  "false_alarms_per_day": 0.18676470588235294,
+  "early_false_alarms": 105,
+  "early_false_alarms_per_day": 0.3056175414766663,
+  "observed_days_total": 680.0,
+  "pre_anomaly_days_total": 343.5666666666667,
+  "name": "salt"
+}
