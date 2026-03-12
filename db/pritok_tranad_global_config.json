@@ -1,0 +1,10 @@
+{
+  "detector": "tranad_global",
+  "config": {
+    "target_far_per_day": 0.25,
+    "min_run_points": 4,
+    "cooldown_hours": 12.0,
+    "ema_alpha": 0.04,
+    "gate_mode": "relaxed"
+  }
+}

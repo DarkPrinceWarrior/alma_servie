@@ -1,0 +1,36 @@
+from __future__ import annotations
+
+import unittest
+
+import numpy as np
+import pandas as pd
+
+from alma_service.engineered_features import _build_instability_mask
+
+
+class EngineeredFeatureMaskTests(unittest.TestCase):
+    def test_instability_mask_flags_step_change(self) -> None:
+        timestamps = pd.date_range("2025-01-01", periods=80, freq="2min")
+        freq = np.full(len(timestamps), 50.0, dtype=np.float32)
+        power = np.full(len(timestamps), 25.0, dtype=np.float32)
+        freq[40:] += 20.0
+        raw_df = pd.DataFrame(
+            {
+                "timestamp": timestamps,
+                "Выходная частота": freq,
+                "Полная выходная мощность": power,
+            }
+        )
+        mask, anchors = _build_instability_mask(
+            raw_df=raw_df[["Выходная частота", "Полная выходная мощность"]],
+            filled_matrix=raw_df[["Выходная частота", "Полная выходная мощность"]].to_numpy(dtype=np.float32),
+            base_columns=["Выходная частота", "Полная выходная мощность"],
+            step_seconds=120.0,
+        )
+
+        self.assertIn("Выходная частота", anchors)
+        self.assertTrue((~mask[35:55]).any())
+
+
+if __name__ == "__main__":
+    unittest.main()

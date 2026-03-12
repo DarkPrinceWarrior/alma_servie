@@ -7,7 +7,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alma_service.paano_report import run_cli
+from alma_service.detection_report import run_cli
 
 
 if __name__ == "__main__":

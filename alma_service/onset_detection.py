@@ -231,6 +231,64 @@ def detect_causal_onsets(
     return starts
 
 
+def detect_causal_onsets_masked(
+    scores: np.ndarray,
+    timestamps: np.ndarray,
+    diagnostics: Dict[str, np.ndarray],
+    thresholds: CausalThresholds,
+    reference_mask: np.ndarray,
+    onset_mask: np.ndarray,
+    min_run_points: int,
+    cooldown_hours: float,
+    gate_mode: str = "relaxed",
+) -> List[pd.Timestamp]:
+    x = np.asarray(scores, dtype=np.float32)
+    ref_mask = np.asarray(reference_mask, dtype=bool)
+    valid_mask = np.asarray(onset_mask, dtype=bool)
+    if len(ref_mask) != len(x) or len(valid_mask) != len(x):
+        raise ValueError("reference_mask and onset_mask must match scores length.")
+
+    z_ema = diagnostics["ema_z"]
+    cusum = diagnostics["cusum"]
+
+    score_cond = x >= thresholds.score_threshold
+    ema_cond = z_ema >= thresholds.ema_z_threshold
+    cusum_cond = cusum >= thresholds.cusum_threshold
+
+    if gate_mode == "strict":
+        cond = score_cond & ema_cond & cusum_cond
+    elif gate_mode == "score_ema":
+        cond = score_cond & ema_cond
+    else:
+        cond = score_cond & (ema_cond | cusum_cond)
+
+    cond &= valid_mask
+
+    starts: List[pd.Timestamp] = []
+    cooldown = pd.Timedelta(hours=float(cooldown_hours))
+    run_start = None
+    run_len = 0
+
+    ref_indices = np.flatnonzero(ref_mask)
+    start_i = int(ref_indices[-1] + 1) if len(ref_indices) else 0
+    for i in range(start_i, len(cond)):
+        if cond[i]:
+            if run_start is None:
+                run_start = i
+                run_len = 1
+            else:
+                run_len += 1
+            if run_len == min_run_points:
+                ts = pd.Timestamp(timestamps[run_start])
+                if not starts or ts - starts[-1] >= cooldown:
+                    starts.append(ts)
+        else:
+            run_start = None
+            run_len = 0
+
+    return starts
+
+
 def robust_scale_for_fusion(scores: np.ndarray, reference_end_idx: int) -> np.ndarray:
     x = np.asarray(scores, dtype=np.float32)
     if len(x) == 0:

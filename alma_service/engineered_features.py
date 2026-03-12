@@ -1,0 +1,402 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+
+from alma_service.onset_detection import choose_reference_end_index, infer_step_seconds
+from alma_service.well_features import get_well_feature_columns
+from alma_service.well_preprocess import forward_fill_causal
+
+PRESSURE_COL = "Давление на приеме насоса кгс/см²"
+FREQ_COL = "Выходная частота"
+POWER_COL = "Полная выходная мощность"
+OUTPUT_CURRENT_COL = "Выходной ток ПЧ"
+PHASE_CURRENT_COLS = ("Ток на фазе А", "Ток на фазе В", "Ток на фазе С")
+PHASE_VOLTAGE_COLS = ("Фазное напряжение Ua", "Фазное напряжение Ub", "Фазное напряжение Uc")
+VIBRATION_COLS = ("Вибрация Х", "Вибрация Y", "Вибрация Z")
+
+MASK_PRIORITY_COLUMNS = (
+    FREQ_COL,
+    POWER_COL,
+    OUTPUT_CURRENT_COL,
+    PRESSURE_COL,
+)
+WINDOW_MINUTES = (10, 60, 240)
+SLOPE_WINDOWS_MINUTES = (10, 60)
+MASK_BACK_MINUTES = 10
+MASK_FORWARD_MINUTES = 30
+MASK_STEP_SIGMA = 6.0
+EPS = 1e-6
+
+
+@dataclass
+class PreparedWellData:
+    well_id: str
+    split: str
+    timestamps: np.ndarray
+    raw_columns: list[str]
+    feature_columns: list[str]
+    raw_matrix: np.ndarray
+    feature_matrix: np.ndarray
+    reference_end_idx: int
+    reference_mask: np.ndarray
+    stability_mask: np.ndarray
+    onset_allowed_mask: np.ndarray
+    detail: dict[str, object]
+
+
+def _window_steps(step_seconds: float, minutes: int) -> int:
+    return max(int(np.ceil((minutes * 60.0) / max(step_seconds, 1.0))), 2)
+
+
+def _robust_mad(values: np.ndarray) -> float:
+    arr = np.asarray(values, dtype=np.float32)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) == 0:
+        return 0.0
+    med = np.median(arr)
+    return float(np.median(np.abs(arr - med)))
+
+
+def _expand_event_mask(events: np.ndarray, back_steps: int, forward_steps: int) -> np.ndarray:
+    mask = np.asarray(events, dtype=bool)
+    if not mask.any():
+        return mask
+    marks = np.zeros(len(mask) + 1, dtype=np.int32)
+    for idx in np.flatnonzero(mask):
+        start = max(idx - back_steps, 0)
+        end = min(idx + forward_steps + 1, len(mask))
+        marks[start] += 1
+        marks[end] -= 1
+    return np.cumsum(marks[:-1]) > 0
+
+
+def _stale_run_length(values: np.ndarray, eps: float = EPS) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    out = np.zeros(len(x), dtype=np.float32)
+    for idx in range(1, len(x)):
+        if np.isfinite(x[idx]) and np.isfinite(x[idx - 1]) and abs(float(x[idx] - x[idx - 1])) <= eps:
+            out[idx] = out[idx - 1] + 1.0
+    return out
+
+
+def _rolling_zscore(values: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    series = pd.Series(np.asarray(values, dtype=np.float32))
+    mean = series.rolling(window=window, min_periods=1).mean()
+    std = series.rolling(window=window, min_periods=2).std(ddof=0)
+    z = ((series - mean) / std.replace(0.0, np.nan)).fillna(0.0).to_numpy(dtype=np.float32)
+    std_values = std.fillna(0.0).to_numpy(dtype=np.float32)
+    return z, std_values
+
+
+def _slope(values: np.ndarray, window: int) -> np.ndarray:
+    series = pd.Series(np.asarray(values, dtype=np.float32))
+    slope = ((series - series.shift(window)) / float(window)).fillna(0.0)
+    return slope.to_numpy(dtype=np.float32)
+
+
+def _choose_anchor_columns(raw_df: pd.DataFrame, candidates: list[str]) -> list[str]:
+    anchors = [column for column in MASK_PRIORITY_COLUMNS if column in candidates]
+    if anchors:
+        return anchors
+    return candidates[: min(len(candidates), 4)]
+
+
+def _build_instability_mask(
+    raw_df: pd.DataFrame,
+    filled_matrix: np.ndarray,
+    base_columns: list[str],
+    step_seconds: float,
+) -> tuple[np.ndarray, list[str]]:
+    if len(base_columns) == 0:
+        return np.ones(len(raw_df), dtype=bool), []
+
+    anchors = _choose_anchor_columns(raw_df, base_columns)
+    event_mask = np.zeros(len(raw_df), dtype=bool)
+    back_steps = _window_steps(step_seconds, MASK_BACK_MINUTES)
+    forward_steps = _window_steps(step_seconds, MASK_FORWARD_MINUTES)
+    flatline_steps = max(_window_steps(step_seconds, 60), 12)
+
+    for column in anchors:
+        idx = base_columns.index(column)
+        raw_series = pd.to_numeric(raw_df[column], errors="coerce")
+        filled = filled_matrix[:, idx]
+        delta = np.diff(filled, prepend=filled[0])
+        abs_delta = np.abs(delta[1:])
+        delta_mad = _robust_mad(abs_delta)
+        if delta_mad > 0.0:
+            step_thr = MASK_STEP_SIGMA * delta_mad
+        else:
+            positive_delta = abs_delta[abs_delta > EPS]
+            step_thr = max(float(np.quantile(positive_delta, 0.90)) * 0.5, EPS) if len(positive_delta) else np.inf
+        if np.isfinite(step_thr):
+            event_mask |= np.abs(delta) > step_thr
+
+        missing = raw_series.isna().to_numpy()
+        if missing.any():
+            missing_run = pd.Series(missing.astype(np.int8)).rolling(window=3, min_periods=1).sum().to_numpy()
+            event_mask |= missing_run >= 3
+
+        if column in (FREQ_COL, POWER_COL, OUTPUT_CURRENT_COL):
+            abs_values = np.abs(filled[np.isfinite(filled)])
+            positive = abs_values[abs_values > EPS]
+            if len(positive):
+                low_thr = max(float(np.quantile(positive, 0.10)) * 0.2, EPS)
+                stale = _stale_run_length(filled)
+                event_mask |= (stale >= flatline_steps) & (np.abs(filled) <= low_thr)
+                prev = np.r_[filled[0], filled[:-1]]
+                start_stop = ((np.abs(prev) > low_thr) & (np.abs(filled) <= low_thr)) | (
+                    (np.abs(prev) <= low_thr) & (np.abs(filled) > low_thr)
+                )
+                event_mask |= start_stop
+
+    unstable = _expand_event_mask(event_mask, back_steps=back_steps, forward_steps=forward_steps)
+    return ~unstable, anchors
+
+
+def _add_base_feature_family(
+    feature_dict: dict[str, np.ndarray],
+    name: str,
+    values: np.ndarray,
+    missing_flag: np.ndarray,
+    step_seconds: float,
+) -> None:
+    values = np.asarray(values, dtype=np.float32)
+    feature_dict[f"{name}::raw"] = values
+    feature_dict[f"{name}::diff_1"] = np.diff(values, prepend=values[0]).astype(np.float32)
+    feature_dict[f"{name}::missing"] = missing_flag.astype(np.float32)
+    feature_dict[f"{name}::stale_run"] = _stale_run_length(values)
+
+    for minutes in WINDOW_MINUTES:
+        steps = _window_steps(step_seconds, minutes)
+        z, std = _rolling_zscore(values, window=steps)
+        feature_dict[f"{name}::z_{minutes}m"] = z
+        feature_dict[f"{name}::std_{minutes}m"] = std
+
+    for minutes in SLOPE_WINDOWS_MINUTES:
+        steps = _window_steps(step_seconds, minutes)
+        feature_dict[f"{name}::slope_{minutes}m"] = _slope(values, window=steps)
+
+
+def _build_soft_sensor_signals(base_columns: list[str], raw_matrix: np.ndarray) -> dict[str, np.ndarray]:
+    lookup = {column: raw_matrix[:, idx] for idx, column in enumerate(base_columns)}
+    derived: dict[str, np.ndarray] = {}
+
+    if PRESSURE_COL in lookup and FREQ_COL in lookup:
+        pressure = lookup[PRESSURE_COL]
+        freq = lookup[FREQ_COL]
+        derived["soft::pressure_freq_ratio"] = pressure / (np.abs(freq) + 1e-3)
+        derived["soft::pressure_freq_gap"] = pressure - freq
+
+    if POWER_COL in lookup and FREQ_COL in lookup:
+        power = lookup[POWER_COL]
+        freq = lookup[FREQ_COL]
+        derived["soft::power_freq_ratio"] = power / (np.abs(freq) + 1e-3)
+        derived["soft::power_freq_gap"] = power - freq
+
+    if all(column in lookup for column in PHASE_CURRENT_COLS):
+        currents = np.stack([lookup[column] for column in PHASE_CURRENT_COLS], axis=1)
+        derived["soft::current_unbalance"] = np.std(currents, axis=1) / (np.mean(np.abs(currents), axis=1) + 1e-3)
+
+    if all(column in lookup for column in PHASE_VOLTAGE_COLS):
+        voltages = np.stack([lookup[column] for column in PHASE_VOLTAGE_COLS], axis=1)
+        derived["soft::voltage_unbalance"] = np.std(voltages, axis=1) / (np.mean(np.abs(voltages), axis=1) + 1e-3)
+
+    vib_cols = [column for column in VIBRATION_COLS if column in lookup]
+    if vib_cols:
+        vib = np.stack([lookup[column] for column in vib_cols], axis=1)
+        derived["soft::vibration_vector"] = np.sqrt(np.sum(np.square(vib), axis=1))
+
+    return derived
+
+
+def _select_base_columns(
+    wd: pd.DataFrame,
+    reference_end_idx: int,
+    patch_size: int,
+    min_reference_coverage: float,
+    min_total_coverage: float,
+) -> list[str]:
+    candidates = get_well_feature_columns(wd)
+    chosen: list[str] = []
+    relaxed: list[str] = []
+
+    for column in candidates:
+        series = pd.to_numeric(wd[column], errors="coerce")
+        total_cov = float(series.notna().mean())
+        ref_slice = series.iloc[:reference_end_idx]
+        ref_cov = float(ref_slice.notna().mean()) if len(ref_slice) else 0.0
+        first_valid = series.first_valid_index()
+        if first_valid is None:
+            continue
+        enough_history = int(first_valid) <= max(reference_end_idx - patch_size, 0)
+        if total_cov >= min_total_coverage and ref_cov >= min_reference_coverage and enough_history:
+            chosen.append(column)
+        elif total_cov >= min_total_coverage and ref_cov >= max(min_reference_coverage - 0.2, 0.4):
+            relaxed.append(column)
+
+    return chosen or relaxed
+
+
+def prepare_engineered_well(
+    anomaly_key: str,
+    well_id: str,
+    split: str,
+    well_df: pd.DataFrame,
+    patch_size: int,
+    reference_min_ratio: float,
+    reference_max_ratio: float,
+    reference_min_days: float,
+    min_reference_coverage: float,
+    min_total_coverage: float,
+) -> PreparedWellData | None:
+    wd = well_df.sort_values("timestamp").reset_index(drop=True)
+    timestamps = wd["timestamp"].to_numpy()
+    if len(timestamps) < patch_size * 4:
+        return None
+
+    provisional_ref_end_idx = choose_reference_end_index(
+        timestamps=timestamps,
+        patch_size=patch_size,
+        min_ratio=reference_min_ratio,
+        max_ratio=reference_max_ratio,
+        min_days=reference_min_days,
+    )
+    base_columns = _select_base_columns(
+        wd=wd,
+        reference_end_idx=provisional_ref_end_idx,
+        patch_size=patch_size,
+        min_reference_coverage=min_reference_coverage,
+        min_total_coverage=min_total_coverage,
+    )
+    if not base_columns:
+        return None
+
+    first_valid_positions = [int(pd.to_numeric(wd[column], errors="coerce").first_valid_index()) for column in base_columns]
+    trim_start_idx = max(first_valid_positions)
+    wd = wd.iloc[trim_start_idx:].reset_index(drop=True)
+    timestamps = wd["timestamp"].to_numpy()
+    if len(timestamps) < patch_size * 4:
+        return None
+
+    reference_end_idx = choose_reference_end_index(
+        timestamps=timestamps,
+        patch_size=patch_size,
+        min_ratio=reference_min_ratio,
+        max_ratio=reference_max_ratio,
+        min_days=reference_min_days,
+    )
+    base_columns = _select_base_columns(
+        wd=wd,
+        reference_end_idx=reference_end_idx,
+        patch_size=patch_size,
+        min_reference_coverage=min_reference_coverage,
+        min_total_coverage=min_total_coverage,
+    )
+    if not base_columns:
+        return None
+
+    first_valid_positions = [int(pd.to_numeric(wd[column], errors="coerce").first_valid_index()) for column in base_columns]
+    second_trim = max(first_valid_positions)
+    if second_trim > 0:
+        trim_start_idx += second_trim
+        wd = wd.iloc[second_trim:].reset_index(drop=True)
+        timestamps = wd["timestamp"].to_numpy()
+        if len(timestamps) < patch_size * 4:
+            return None
+        reference_end_idx = choose_reference_end_index(
+            timestamps=timestamps,
+            patch_size=patch_size,
+            min_ratio=reference_min_ratio,
+            max_ratio=reference_max_ratio,
+            min_days=reference_min_days,
+        )
+
+    raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
+    raw_matrix = raw_df.to_numpy(dtype=np.float32)
+    raw_matrix = forward_fill_causal(raw_matrix)
+    if np.isnan(raw_matrix).any():
+        keep_columns = [column for idx, column in enumerate(base_columns) if not np.isnan(raw_matrix[:, idx]).any()]
+        if not keep_columns:
+            return None
+        base_columns = keep_columns
+        raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
+        raw_matrix = forward_fill_causal(raw_df.to_numpy(dtype=np.float32))
+
+    step_seconds = infer_step_seconds(timestamps)
+    stability_mask, anchor_columns = _build_instability_mask(
+        raw_df=raw_df,
+        filled_matrix=raw_matrix,
+        base_columns=base_columns,
+        step_seconds=step_seconds,
+    )
+
+    reference_mask = np.zeros(len(wd), dtype=bool)
+    reference_mask[:reference_end_idx] = True
+    reference_mask &= stability_mask
+    min_ref_points = max(patch_size * 2, 64)
+    if int(reference_mask.sum()) < min_ref_points:
+        reference_mask = np.zeros(len(wd), dtype=bool)
+        reference_mask[:reference_end_idx] = True
+    if int(reference_mask.sum()) < min_ref_points:
+        return None
+
+    feature_dict: dict[str, np.ndarray] = {}
+    missing_matrix = raw_df.isna().to_numpy(dtype=np.float32)
+    for idx, column in enumerate(base_columns):
+        _add_base_feature_family(
+            feature_dict=feature_dict,
+            name=column,
+            values=raw_matrix[:, idx],
+            missing_flag=missing_matrix[:, idx],
+            step_seconds=step_seconds,
+        )
+
+    if anomaly_key == "salt":
+        for name, values in _build_soft_sensor_signals(base_columns, raw_matrix).items():
+            _add_base_feature_family(
+                feature_dict=feature_dict,
+                name=name,
+                values=np.asarray(values, dtype=np.float32),
+                missing_flag=np.zeros(len(values), dtype=np.float32),
+                step_seconds=step_seconds,
+            )
+
+    feature_df = pd.DataFrame(feature_dict)
+    feature_df = feature_df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    feature_matrix = feature_df.to_numpy(dtype=np.float32)
+
+    ref_values = feature_matrix[reference_mask]
+    feature_mean = np.mean(ref_values, axis=0, keepdims=True).astype(np.float32)
+    feature_std = np.std(ref_values, axis=0, keepdims=True).astype(np.float32)
+    feature_std = np.where(feature_std < EPS, 1.0, feature_std)
+    feature_matrix = (feature_matrix - feature_mean) / feature_std
+    feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
+
+    onset_allowed_mask = stability_mask.copy()
+    detail = {
+        "points": int(len(wd)),
+        "raw_channels": int(len(base_columns)),
+        "feature_count": int(feature_matrix.shape[1]),
+        "reference_end_idx": int(reference_end_idx),
+        "reference_points": int(reference_mask.sum()),
+        "trim_start_idx": int(trim_start_idx),
+        "masked_fraction": float((~stability_mask).mean()) if len(stability_mask) else 0.0,
+        "anchor_columns": anchor_columns,
+    }
+    return PreparedWellData(
+        well_id=well_id,
+        split=split,
+        timestamps=timestamps,
+        raw_columns=base_columns,
+        feature_columns=list(feature_df.columns),
+        raw_matrix=raw_matrix.astype(np.float32),
+        feature_matrix=feature_matrix.astype(np.float32),
+        reference_end_idx=int(reference_end_idx),
+        reference_mask=reference_mask,
+        stability_mask=stability_mask,
+        onset_allowed_mask=onset_allowed_mask,
+        detail=detail,
+    )

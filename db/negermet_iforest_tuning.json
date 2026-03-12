@@ -1,0 +1,321 @@
+{
+  "best_score_key": [
+    1.0,
+    -0.6247667910447761,
+    -0.2,
+    -1.0,
+    -11.1625
+  ],
+  "top10": [
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.25,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.04,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.25,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.08,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.25,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.12,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.5,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.04,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.5,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.08,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.5,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.12,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 1.0,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.04,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 1.0,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.08,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.2,
+        -1.0,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 1.0,
+        "min_run_points": 2,
+        "cooldown_hours": 12.0,
+        "ema_alpha": 0.12,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 4,
+        "false_alarms": 3,
+        "false_alarms_per_day": 0.2,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.0,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    },
+    {
+      "score_key": [
+        1.0,
+        -0.6247667910447761,
+        -0.26666666666666666,
+        -1.25,
+        -11.1625
+      ],
+      "config": {
+        "target_far_per_day": 0.25,
+        "min_run_points": 2,
+        "cooldown_hours": 8.0,
+        "ema_alpha": 0.04,
+        "gate_mode": "relaxed"
+      },
+      "summary": {
+        "interval_count": 4,
+        "hit_count": 1,
+        "hit_rate": 0.25,
+        "start_count": 5,
+        "false_alarms": 4,
+        "false_alarms_per_day": 0.26666666666666666,
+        "observed_days_total": 15.0,
+        "avg_starts_per_interval": 1.25,
+        "delay_mae_hours": 11.1625,
+        "median_abs_delay_hours": 11.1625,
+        "p90_abs_delay_hours": 11.1625,
+        "median_delay_ratio": 0.6247667910447761,
+        "p90_delay_ratio": 0.6247667910447761
+      }
+    }
+  ]
+}

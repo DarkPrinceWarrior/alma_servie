@@ -1,204 +1,65 @@
-"""
-Evaluate unified blind onset-detection quality from predicted anomaly starts.
-
-Metrics:
-- Interval hit rate
-- Absolute start-delay MAE / median / P90 (hours)
-- False alarms per day
-- Split-wise summaries (train/test/all)
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from alma_service.anomaly_specs import get_detection_spec
+from alma_service.benchmark_metrics import (
+    load_intervals,
+    load_predicted_starts,
+    load_scores,
+    summarize_splits,
+)
+from alma_service.detection_artifacts import DEFAULT_DETECTOR, predicted_starts_path, scores_path
 
 
-def load_intervals(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str})
-    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
-    df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
-    if "interval_idx" not in df.columns:
-        df["interval_idx"] = df.groupby("well_id").cumcount() + 1
-    if "data_start" in df.columns:
-        df["data_start"] = pd.to_datetime(df["data_start"], errors="coerce")
-    else:
-        df["data_start"] = pd.NaT
-    if "data_end" in df.columns:
-        df["data_end"] = pd.to_datetime(df["data_end"], errors="coerce")
-    else:
-        df["data_end"] = pd.NaT
-    if "split" in df.columns:
-        df["split"] = df["split"].astype(str).str.strip().str.lower()
-    else:
-        df["split"] = "train"
-    return df.dropna(subset=["well_id", "start_date", "end_date"]).sort_values(
-        ["well_id", "start_date", "interval_idx"]
-    )
-
-
-def load_predicted_starts(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str})
-    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["detected_time"] = pd.to_datetime(df["detected_time"], errors="coerce")
-    df = df.dropna(subset=["well_id", "detected_time"]).sort_values(["well_id", "detected_time"])
-    return df
-
-
-def load_scores(path: str | None) -> pd.DataFrame:
-    if path is None:
-        return pd.DataFrame(columns=["well_id", "timestamp"])
-    p = Path(path)
-    if not p.exists():
-        return pd.DataFrame(columns=["well_id", "timestamp"])
-    df = pd.read_csv(path, dtype={"well_id": str})
-    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
-    df = df.dropna(subset=["well_id", "timestamp"])
-    return df
-
-
-def _is_inside_any(ts: pd.Timestamp, intervals: pd.DataFrame) -> bool:
-    for _, r in intervals.iterrows():
-        if r["start_date"] <= ts <= r["end_date"]:
-            return True
-    return False
-
-
-def _select_interval_detection(
-    predicted_times: list[pd.Timestamp],
-    start_dt: pd.Timestamp,
-    end_dt: pd.Timestamp,
-    prestart_hours: float,
-) -> pd.Timestamp | pd.NaT:
-    pre_tol = pd.Timedelta(hours=prestart_hours)
-    inside = [ts for ts in predicted_times if start_dt - pre_tol <= ts <= end_dt]
-    return min(inside) if inside else pd.NaT
-
-
-def evaluate(
-    intervals: pd.DataFrame,
-    predictions: pd.DataFrame,
-    scores: pd.DataFrame,
-    prestart_hours: float,
-) -> tuple[dict, pd.DataFrame]:
-    interval_rows = []
-    false_alarms = 0
-    observed_days_total = 0.0
-
-    all_wells = sorted(set(intervals["well_id"].unique()).union(predictions["well_id"].unique()))
-
-    for wid in all_wells:
-        wi = intervals[intervals["well_id"] == wid].sort_values(["start_date", "interval_idx"])
-        wp = predictions[predictions["well_id"] == wid].sort_values("detected_time")
-        ws = scores[scores["well_id"] == wid].sort_values("timestamp")
-
-        if not wi.empty and wi["data_start"].notna().any() and wi["data_end"].notna().any():
-            obs_start = wi["data_start"].dropna().min()
-            obs_end = wi["data_end"].dropna().max()
-        elif not ws.empty:
-            obs_start = ws["timestamp"].min()
-            obs_end = ws["timestamp"].max()
-        elif not wi.empty:
-            obs_start = wi["start_date"].min()
-            obs_end = wi["end_date"].max()
-        elif not wp.empty:
-            obs_start = wp["detected_time"].min()
-            obs_end = wp["detected_time"].max()
-        else:
-            obs_start = pd.NaT
-            obs_end = pd.NaT
-
-        if pd.notna(obs_start) and pd.notna(obs_end) and obs_end > obs_start:
-            observed_days_total += (obs_end - obs_start).total_seconds() / 86400.0
-
-        pred_list = [pd.Timestamp(ts) for ts in wp["detected_time"].to_numpy()]
-        for ts in pred_list:
-            if not _is_inside_any(ts, wi):
-                false_alarms += 1
-
-        for _, row in wi.iterrows():
-            start_dt = row["start_date"]
-            end_dt = row["end_date"]
-            first_hit = _select_interval_detection(pred_list, start_dt, end_dt, prestart_hours)
-            delay_h = (
-                float((first_hit - start_dt).total_seconds() / 3600.0) if pd.notna(first_hit) else np.nan
-            )
-            interval_rows.append(
-                {
-                    "well_id": wid,
-                    "interval_idx": int(row.get("interval_idx", 1)),
-                    "actual_start": start_dt,
-                    "actual_end": end_dt,
-                    "detected_time": first_hit,
-                    "split": str(row.get("split", "train")),
-                    "hit": int(pd.notna(first_hit)),
-                    "delay_hours": delay_h,
-                }
-            )
-
-    interval_df = pd.DataFrame(interval_rows)
-    n_intervals = int(len(interval_df))
-    n_hits = int(interval_df["hit"].sum()) if n_intervals else 0
-    delays = interval_df["delay_hours"].dropna()
-
-    summary = {
-        "interval_count": n_intervals,
-        "hit_count": n_hits,
-        "hit_rate": float(n_hits / n_intervals) if n_intervals else 0.0,
-        "delay_mae_hours": float(np.mean(np.abs(delays))) if len(delays) else np.nan,
-        "delay_median_hours": float(np.median(np.abs(delays))) if len(delays) else np.nan,
-        "delay_p90_hours": float(np.quantile(np.abs(delays), 0.9)) if len(delays) else np.nan,
-        "false_alarms": int(false_alarms),
-        "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,
-        "observed_days_total": float(observed_days_total),
-    }
-    return summary, interval_df
-
-
-def main():
-    parser = argparse.ArgumentParser(description="Evaluate anomaly onset detection metrics.")
-    parser.add_argument("--intervals", required=True, help="Path to *_intervals.csv")
-    parser.add_argument("--predicted-starts", required=True, help="Path to *_paano_predicted_starts.csv")
-    parser.add_argument("--scores", default=None, help="Path to *_paano_scores.csv (optional)")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate delay-aware onset detection metrics.")
+    parser.add_argument("--anomaly", choices=["negermet", "pritok", "salt"], default=None)
+    parser.add_argument("--detector", default=DEFAULT_DETECTOR, help="Detector key when --anomaly is used.")
+    parser.add_argument("--intervals", default=None, help="Path to *_intervals.csv")
+    parser.add_argument("--predicted-starts", default=None, help="Path to *_predicted_starts.csv")
+    parser.add_argument("--scores", default=None, help="Path to *_scores.csv")
     parser.add_argument("--prestart-hours", type=float, default=2.0, help="Early-detection tolerance for interval hit.")
     parser.add_argument("--name", default="run", help="Label for outputs")
     parser.add_argument("--output-prefix", default=None, help="If set, writes JSON summary and per-interval CSV")
     args = parser.parse_args()
 
-    intervals = load_intervals(args.intervals)
-    predictions = load_predicted_starts(args.predicted_starts)
-    scores = load_scores(args.scores)
+    if args.anomaly:
+        spec = get_detection_spec(args.anomaly)
+        intervals_path = args.intervals or str(spec.dataset.intervals_path)
+        predicted_path = args.predicted_starts or str(predicted_starts_path(spec, args.detector))
+        scores_path_value = args.scores or str(scores_path(spec, args.detector))
+    else:
+        if not args.intervals or not args.predicted_starts:
+            parser.error("Either --anomaly or both --intervals and --predicted-starts are required.")
+        intervals_path = args.intervals
+        predicted_path = args.predicted_starts
+        scores_path_value = args.scores
 
-    all_summary, interval_df = evaluate(intervals, predictions, scores, prestart_hours=args.prestart_hours)
-    split_summaries = {}
-    for split_name in ["train", "test"]:
-        subset = intervals[intervals["split"] == split_name]
-        if subset.empty:
-            continue
-        subset_pred = predictions[predictions["well_id"].isin(subset["well_id"].unique())]
-        subset_scores = scores[scores["well_id"].isin(subset["well_id"].unique())]
-        split_summaries[split_name], _ = evaluate(
-            subset,
-            subset_pred,
-            subset_scores,
-            prestart_hours=args.prestart_hours,
-        )
+    intervals = load_intervals(intervals_path)
+    predictions = load_predicted_starts(predicted_path)
+    scores = load_scores(scores_path_value)
+    split_summaries, split_frames = summarize_splits(
+        intervals=intervals,
+        predictions=predictions,
+        scores=scores,
+        prestart_hours=args.prestart_hours,
+    )
 
     summary = {
         "name": args.name,
+        "anomaly": args.anomaly,
+        "detector": args.detector if args.anomaly else None,
         "prestart_hours": args.prestart_hours,
-        "splits": {
-            "all": all_summary,
-            **split_summaries,
-        },
+        "splits": split_summaries,
     }
-
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
     if args.output_prefix:
@@ -206,7 +67,7 @@ def main():
         summary_path = prefix.with_suffix(".json")
         interval_path = prefix.with_name(prefix.name + "_intervals.csv")
         summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        interval_df.to_csv(interval_path, index=False)
+        split_frames.get("all", split_frames.get("train", split_frames.get("test", None))).to_csv(interval_path, index=False)
         print(f"Saved: {summary_path}")
         print(f"Saved: {interval_path}")
 
