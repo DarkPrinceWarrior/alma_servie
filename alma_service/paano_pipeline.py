@@ -12,6 +12,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+try:
+    import optuna
+except ImportError:  # pragma: no cover
+    optuna = None
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PAANO_ROOT = PROJECT_ROOT / "paano"
@@ -46,6 +50,7 @@ from alma_service.paano_defaults import (
     TUNE_GRID,
 )
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
+from alma_service.tabular_io import read_table
 from alma_service.well_preprocess import WellMatrix, prepare_blind_well_matrix
 
 warnings.filterwarnings("ignore")
@@ -56,6 +61,7 @@ BATCH_SIZE = 256
 LR = 1e-4
 TOP_K = 3
 MEMORY_BANK_RATIO = 0.1
+ENABLE_TORCH_COMPILE = True
 
 
 @dataclass
@@ -76,6 +82,15 @@ def set_seed(seed: int = SEED) -> None:
     torch.manual_seed(seed)
 
 
+def _maybe_compile_module(module: torch.nn.Module) -> torch.nn.Module:
+    if not ENABLE_TORCH_COMPILE or not hasattr(torch, "compile"):
+        return module
+    try:
+        return torch.compile(module, mode="reduce-overhead")
+    except Exception:  # pragma: no cover - runtime fallback
+        return module
+
+
 def load_anomaly_data(spec: DetectionSpec, source_path: str | None = None) -> pd.DataFrame:
     if source_path is not None:
         src = Path(source_path)
@@ -88,9 +103,13 @@ def load_anomaly_data(spec: DetectionSpec, source_path: str | None = None) -> pd
             raise FileNotFoundError(f"No source dataset found for {spec.anomaly_key}")
 
     print(f"Loading {spec.anomaly_key} data from: {src}")
-    df = pd.read_csv(src, dtype={"well_id": str}, low_memory=False)
+    df = read_table(
+        src,
+        dtypes={"well_id": str},
+        parse_dates=["timestamp"],
+        low_memory=False,
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
 
 
@@ -136,6 +155,7 @@ def run_paano_single_scale(data: np.ndarray, train_data: np.ndarray, patch_size:
     )
 
     model = PatchEncoder(in_channels=data.shape[1], use_revin=True).to(device)
+    model = _maybe_compile_module(model)
 
     t0 = time.time()
     train_patches = preprocess_to_patches(train_norm, patch_size=patch_size, stride=1)
@@ -317,49 +337,110 @@ def tune_on_train_runs(train_runs: list[BlindScoreRun], train_intervals: pd.Data
     if not train_runs:
         return DEFAULT_CONFIG.copy(), {"message": "No train runs available"}
 
-    candidates: list[dict[str, Any]] = []
-    for weight in TUNE_GRID["fusion_weight_short"]:
-        for far in TUNE_GRID["target_far_per_day"]:
-            for run_points in TUNE_GRID["min_run_points"]:
-                for cooldown in TUNE_GRID["cooldown_hours"]:
-                    for ema_alpha in TUNE_GRID["ema_alpha"]:
-                        for gate_mode in TUNE_GRID["gate_mode"]:
-                            cfg = DEFAULT_CONFIG.copy()
-                            cfg.update(
-                                {
-                                    "fusion_weight_short": float(weight),
-                                    "target_far_per_day": float(far),
-                                    "min_run_points": int(run_points),
-                                    "cooldown_hours": float(cooldown),
-                                    "ema_alpha": float(ema_alpha),
-                                    "gate_mode": str(gate_mode),
-                                }
-                            )
-                            candidates.append(cfg)
+    def candidate_from_trial(trial: Any) -> dict[str, Any]:
+        cfg = DEFAULT_CONFIG.copy()
+        cfg.update(
+            {
+                "fusion_weight_short": float(
+                    trial.suggest_categorical("fusion_weight_short", TUNE_GRID["fusion_weight_short"])
+                ),
+                "target_far_per_day": float(
+                    trial.suggest_categorical("target_far_per_day", TUNE_GRID["target_far_per_day"])
+                ),
+                "min_run_points": int(
+                    trial.suggest_categorical("min_run_points", TUNE_GRID["min_run_points"])
+                ),
+                "cooldown_hours": float(
+                    trial.suggest_categorical("cooldown_hours", TUNE_GRID["cooldown_hours"])
+                ),
+                "ema_alpha": float(trial.suggest_categorical("ema_alpha", TUNE_GRID["ema_alpha"])),
+                "gate_mode": str(trial.suggest_categorical("gate_mode", TUNE_GRID["gate_mode"])),
+            }
+        )
+        return cfg
 
-    best_cfg = DEFAULT_CONFIG.copy()
-    best_key = None
-    leaderboard: list[dict[str, Any]] = []
-    for cfg in candidates:
-        predicted: dict[str, list[pd.Timestamp]] = {}
-        for run in train_runs:
-            _, _, starts = detect_starts_from_run(run, cfg)
-            predicted[run.well_id] = [pd.Timestamp(x) for x in starts]
-        _, summary = summarize_predictions(train_intervals, predicted)
-        row = {**cfg, **summary}
-        key = (
+    def score_key(summary: dict[str, Any]) -> tuple[float, float, float, float, float]:
+        return (
             summary["hit_count"],
             -summary["false_alarms_per_day"],
             -summary["p90_abs_delay_hours"],
             -summary["median_abs_delay_hours"],
             -summary["avg_starts_per_interval"],
         )
-        leaderboard.append({"score_key": key, **row})
-        if best_key is None or key > best_key:
-            best_key = key
-            best_cfg = cfg.copy()
+
+    def objective(trial: Any) -> float:
+        cfg = candidate_from_trial(trial)
+        predicted: dict[str, list[pd.Timestamp]] = {}
+        for run in train_runs:
+            _, _, starts = detect_starts_from_run(run, cfg)
+            predicted[run.well_id] = [pd.Timestamp(x) for x in starts]
+        _, summary = summarize_predictions(train_intervals, predicted)
+        trial.set_user_attr("config", cfg)
+        trial.set_user_attr("summary", summary)
+        trial.set_user_attr("score_key", list(score_key(summary)))
+        return (
+            summary["hit_count"] * 1_000_000.0
+            - float(summary["false_alarms_per_day"]) * 1_000.0
+            - float(summary["avg_starts_per_interval"]) * 10.0
+            - float(summary["p90_abs_delay_hours"])
+        )
+
+    leaderboard: list[dict[str, Any]] = []
+    if optuna is not None:
+        optuna.logging.set_verbosity(optuna.logging.WARNING)
+        study = optuna.create_study(direction="maximize", sampler=optuna.samplers.TPESampler(seed=SEED))
+        study.optimize(objective, n_trials=36, show_progress_bar=False)
+        for trial in study.trials:
+            if trial.state != optuna.trial.TrialState.COMPLETE:
+                continue
+            cfg = trial.user_attrs.get("config")
+            summary = trial.user_attrs.get("summary")
+            key = trial.user_attrs.get("score_key")
+            if not cfg or not summary or key is None:
+                continue
+            leaderboard.append({"score_key": tuple(key), **cfg, **summary})
+    else:
+        candidates: list[dict[str, Any]] = []
+        for weight in TUNE_GRID["fusion_weight_short"]:
+            for far in TUNE_GRID["target_far_per_day"]:
+                for run_points in TUNE_GRID["min_run_points"]:
+                    for cooldown in TUNE_GRID["cooldown_hours"]:
+                        for ema_alpha in TUNE_GRID["ema_alpha"]:
+                            for gate_mode in TUNE_GRID["gate_mode"]:
+                                cfg = DEFAULT_CONFIG.copy()
+                                cfg.update(
+                                    {
+                                        "fusion_weight_short": float(weight),
+                                        "target_far_per_day": float(far),
+                                        "min_run_points": int(run_points),
+                                        "cooldown_hours": float(cooldown),
+                                        "ema_alpha": float(ema_alpha),
+                                        "gate_mode": str(gate_mode),
+                                    }
+                                )
+                                candidates.append(cfg)
+        for cfg in candidates:
+            predicted: dict[str, list[pd.Timestamp]] = {}
+            for run in train_runs:
+                _, _, starts = detect_starts_from_run(run, cfg)
+                predicted[run.well_id] = [pd.Timestamp(x) for x in starts]
+            _, summary = summarize_predictions(train_intervals, predicted)
+            leaderboard.append({"score_key": score_key(summary), **cfg, **summary})
 
     leaderboard = sorted(leaderboard, key=lambda row: row["score_key"], reverse=True)
+    best_cfg = DEFAULT_CONFIG.copy()
+    best_key = leaderboard[0]["score_key"] if leaderboard else None
+    if leaderboard:
+        best_cfg.update(
+            {
+                "fusion_weight_short": float(leaderboard[0]["fusion_weight_short"]),
+                "target_far_per_day": float(leaderboard[0]["target_far_per_day"]),
+                "min_run_points": int(leaderboard[0]["min_run_points"]),
+                "cooldown_hours": float(leaderboard[0]["cooldown_hours"]),
+                "ema_alpha": float(leaderboard[0]["ema_alpha"]),
+                "gate_mode": str(leaderboard[0]["gate_mode"]),
+            }
+        )
     summary = {
         "best_score_key": list(best_key) if best_key is not None else None,
         "top10": leaderboard[:10],

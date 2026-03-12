@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import random
 import sys
 from dataclasses import dataclass
@@ -42,12 +43,27 @@ FUSED_WEIGHTS = {
     "lof": 0.15,
     "iforest": 0.15,
 }
+ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
 
 
 def set_seed(seed: int = SEED) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def _maybe_compile_module(module: nn.Module, *, label: str, verbose: bool = False) -> nn.Module:
+    if not ENABLE_TORCH_COMPILE or not hasattr(torch, "compile"):
+        return module
+    try:
+        compiled = torch.compile(module, mode="reduce-overhead")
+        if verbose:
+            print(f"    torch.compile enabled for {label}")
+        return compiled
+    except Exception as exc:  # pragma: no cover - runtime fallback
+        if verbose:
+            print(f"    torch.compile skipped for {label}: {exc}")
+        return module
 
 
 @dataclass
@@ -109,6 +125,7 @@ def _run_paano_single_scale(
     )
 
     model = PatchEncoder(in_channels=data.shape[1], use_revin=True).to(device)
+    model = _maybe_compile_module(model, label="PatchEncoder", verbose=verbose)
     train_patches = preprocess_to_patches(train_norm, patch_size=patch_size, stride=1)
     train_model(
         model,
@@ -421,6 +438,7 @@ class TranADGlobalDetector(BaseDetector):
         self.inference_batch_size = int(inference_batch_size)
         self.verbose = verbose
         self.model_: _TranADStyleNet | None = None
+        self.compiled_model_: nn.Module | None = None
         self.feature_dim_: int = 0
 
     @staticmethod
@@ -471,20 +489,26 @@ class TranADGlobalDetector(BaseDetector):
             hidden_dim=self.hidden_dim,
             num_layers=self.num_layers,
         ).to(self.device)
+        self.compiled_model_ = _maybe_compile_module(
+            self.model_,
+            label="TranADGlobalDetector",
+            verbose=self.verbose,
+        )
+        active_model = self.compiled_model_ if self.compiled_model_ is not None else self.model_
 
         dataset = TensorDataset(torch.from_numpy(train_windows), torch.from_numpy(train_targets))
         loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True, drop_last=False)
         optimizer = torch.optim.Adam(self.model_.parameters(), lr=self.learning_rate)
         loss_fn = nn.MSELoss()
 
-        self.model_.train()
+        active_model.train()
         for epoch in range(self.epochs):
             epoch_loss = 0.0
             for batch_x, batch_y in loader:
                 batch_x = batch_x.to(self.device)
                 batch_y = batch_y.to(self.device)
                 optimizer.zero_grad(set_to_none=True)
-                pred = self.model_(batch_x)
+                pred = active_model(batch_x)
                 loss = loss_fn(pred, batch_y)
                 loss.backward()
                 optimizer.step()
@@ -523,7 +547,8 @@ class TranADGlobalDetector(BaseDetector):
             )
 
         offsets = np.arange(self.window_size, dtype=np.int64) - (self.window_size - 1)
-        self.model_.eval()
+        active_model = self.compiled_model_ if self.compiled_model_ is not None else self.model_
+        active_model.eval()
         autocast_enabled = self.device.type == "cuda"
         with torch.no_grad():
             for start in range(0, len(end_indices), self.inference_batch_size):
@@ -533,7 +558,7 @@ class TranADGlobalDetector(BaseDetector):
                 batch_targets = X[batch_end]
                 batch_tensor = torch.from_numpy(batch_windows).to(self.device)
                 with torch.autocast(device_type=self.device.type, enabled=autocast_enabled):
-                    pred = self.model_(batch_tensor)
+                    pred = active_model(batch_tensor)
                 err = torch.mean((pred - torch.from_numpy(batch_targets).to(self.device)) ** 2, dim=1)
                 scores[batch_end] = err.detach().cpu().numpy().astype(np.float32)
 
@@ -578,5 +603,10 @@ class TranADGlobalDetector(BaseDetector):
             num_layers=self.num_layers,
         ).to(self.device)
         self.model_.load_state_dict(payload["state_dict"])
+        self.compiled_model_ = _maybe_compile_module(
+            self.model_,
+            label="TranADGlobalDetector",
+            verbose=self.verbose,
+        )
         self.model_.eval()
         return self

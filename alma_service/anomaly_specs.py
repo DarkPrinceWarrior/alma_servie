@@ -24,7 +24,7 @@ class DatasetSpec:
     @property
     def default_source_path(self) -> Path:
         freq_label = self.default_freq.replace(" ", "")
-        return DB_DIR / f"{self.output_prefix}_anomaly_database_{freq_label}.csv"
+        return DB_DIR / f"{self.output_prefix}_anomaly_database_{freq_label}.parquet"
 
 
 @dataclass(frozen=True)
@@ -49,6 +49,8 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         default_freq="15s",
         summary_match="негерметичность",
         source_candidates=(
+            "negermet_anomaly_database_15s.parquet",
+            "negermet_anomaly_database_2min.parquet",
             "negermet_anomaly_database_15s.csv",
             "negermet_anomaly_database_2min.csv",
         ),
@@ -61,6 +63,8 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         default_freq="2min",
         summary_match="приток",
         source_candidates=(
+            "pritok_anomaly_database_2min.parquet",
+            "pritok_anomaly_database_15s.parquet",
             "pritok_anomaly_database_2min.csv",
             "pritok_anomaly_database_15s.csv",
         ),
@@ -73,6 +77,8 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         default_freq="2min",
         summary_match="соли",
         source_candidates=(
+            "salt_anomaly_database_2min.parquet",
+            "salt_anomaly_database_15s.parquet",
             "salt_anomaly_database_2min.csv",
             "salt_anomaly_database_15s.csv",
         ),

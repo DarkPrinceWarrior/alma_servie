@@ -9,3 +9,7 @@ statsmodels
 tqdm
 torch
 numba
+optuna
+plotly
+polars
+fastexcel

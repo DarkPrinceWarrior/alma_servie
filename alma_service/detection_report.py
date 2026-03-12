@@ -14,6 +14,14 @@ import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+try:
+    import plotly.graph_objects as go
+    import plotly.io as pio
+    from plotly.subplots import make_subplots
+except ImportError:  # pragma: no cover - fallback for older envs
+    go = None
+    pio = None
+    make_subplots = None
 
 from alma_service.anomaly_specs import get_detection_spec
 from alma_service.benchmark_metrics import evaluate_predictions
@@ -29,6 +37,7 @@ from alma_service.detection_artifacts import (
     summary_path,
 )
 from alma_service.paths import DB_DIR, REPORTS_DIR, ensure_parent
+from alma_service.tabular_io import read_table
 
 plt.rcParams["font.size"] = 10
 
@@ -57,9 +66,13 @@ def _pick_existing_source(spec, source_path: str | None) -> Path:
 
 
 def _load_timeseries(path: Path) -> pd.DataFrame:
-    df = pd.read_csv(path, dtype={"well_id": str}, low_memory=False)
+    df = read_table(
+        path,
+        dtypes={"well_id": str},
+        parse_dates=["timestamp"],
+        low_memory=False,
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
 
 
@@ -232,6 +245,134 @@ def _create_plot_base64(
     return base64.b64encode(buffer.read()).decode("utf-8")
 
 
+def _create_plot_html(
+    well_df: pd.DataFrame,
+    result_row: pd.Series,
+    scores_df: pd.DataFrame | None,
+    *,
+    include_plotlyjs: bool,
+) -> str | None:
+    if go is None or pio is None or make_subplots is None:
+        return None
+
+    plot_cols = _pick_plot_columns(well_df)
+    score_col = _score_column(scores_df)
+    has_scores = score_col is not None
+    if not plot_cols and not has_scores:
+        return None
+
+    x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
+    x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
+    if pd.notna(x_min) and pd.notna(x_max):
+        well_df = well_df[(well_df["timestamp"] >= x_min) & (well_df["timestamp"] <= x_max)]
+    if well_df.empty:
+        return None
+
+    subplot_titles = list(plot_cols)
+    if has_scores:
+        subplot_titles.append(str(score_col))
+    fig = make_subplots(
+        rows=max(len(subplot_titles), 1),
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        subplot_titles=subplot_titles or ["Signals"],
+    )
+
+    line_colors = ["#2563eb", "#ea580c", "#0f766e", "#7c3aed"]
+    current_row = 1
+    for idx, col in enumerate(plot_cols):
+        line_df = well_df[["timestamp", col]].copy()
+        line_df[col] = pd.to_numeric(line_df[col], errors="coerce")
+        line_df = line_df.dropna(subset=[col])
+        if not line_df.empty:
+            fig.add_trace(
+                go.Scattergl(
+                    x=line_df["timestamp"],
+                    y=line_df[col],
+                    mode="lines",
+                    name=col,
+                    line={"color": line_colors[idx % len(line_colors)], "width": 1.1},
+                    showlegend=False,
+                ),
+                row=current_row,
+                col=1,
+            )
+        current_row += 1
+
+    if has_scores and scores_df is not None:
+        score_view = scores_df.copy()
+        if pd.notna(x_min) and pd.notna(x_max):
+            score_view = score_view[(score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)]
+        if not score_view.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=score_view["timestamp"],
+                    y=score_view[score_col],
+                    mode="lines",
+                    line={"color": "#7c3aed", "width": 1.2},
+                    fill="tozeroy",
+                    fillcolor="rgba(124,58,237,0.14)",
+                    name=str(score_col),
+                    showlegend=False,
+                ),
+                row=current_row,
+                col=1,
+            )
+
+    for row_idx in range(1, max(len(subplot_titles), 1) + 1):
+        fig.add_vrect(
+            x0=result_row["actual_start"],
+            x1=result_row["actual_end"],
+            fillcolor="rgba(220,38,38,0.10)",
+            line_width=0,
+            row=row_idx,
+            col=1,
+        )
+        fig.add_vline(
+            x=result_row["actual_start"],
+            line_color="#16a34a",
+            line_width=1,
+            row=row_idx,
+            col=1,
+        )
+        if pd.notna(result_row["detected_time"]):
+            fig.add_vline(
+                x=result_row["detected_time"],
+                line_color="#7c3aed",
+                line_width=1.25,
+                line_dash="dash",
+                row=row_idx,
+                col=1,
+            )
+
+    fig.update_layout(
+        height=max(360 * max(len(subplot_titles), 1), 420),
+        margin={"l": 44, "r": 24, "t": 56, "b": 36},
+        paper_bgcolor="#ffffff",
+        plot_bgcolor="#ffffff",
+        title={
+            "text": (
+                f"Скважина {result_row['well_id']} | интервал {int(result_row['interval_idx'])} "
+                f"| split={result_row['split']}"
+            ),
+            "x": 0.01,
+        },
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="rgba(148,163,184,0.15)")
+    fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.15)")
+    return pio.to_html(
+        fig,
+        full_html=False,
+        include_plotlyjs="cdn" if include_plotlyjs else False,
+        config={
+            "displaylogo": False,
+            "responsive": True,
+            "scrollZoom": True,
+        },
+    )
+
+
 def _resolve_detector(spec, detector: str | None) -> str:
     if detector:
         return normalize_detector_key(detector)
@@ -309,12 +450,19 @@ def generate_report(
         well_id = str(result_row["well_id"])
         print(f"  График {idx + 1}/{len(results_df)}: скв. {well_id}, интервал {int(result_row['interval_idx'])}")
         well_ts = data_df[data_df["well_id"] == well_id].copy()
-        plot_b64 = _create_plot_base64(
+        plot_html = _create_plot_html(
             well_df=well_ts,
             result_row=result_row,
             scores_df=scores_by_well.get(well_id),
+            include_plotlyjs=(idx == 0),
         )
-        plot_html = f'<img src="data:image/png;base64,{plot_b64}" alt="{well_id}">' if plot_b64 else ""
+        if not plot_html:
+            plot_b64 = _create_plot_base64(
+                well_df=well_ts,
+                result_row=result_row,
+                scores_df=scores_by_well.get(well_id),
+            )
+            plot_html = f'<img src="data:image/png;base64,{plot_b64}" alt="{well_id}">' if plot_b64 else ""
         detail_text = escape(str(result_row.get("detail", "—")))
         sections.append(
             f"""
@@ -336,7 +484,7 @@ def generate_report(
                 <span><b>Pred starts:</b> {escape(str(result_row.get('n_predicted_starts', '—')))}</span>
               </div>
               <pre>{detail_text}</pre>
-              {plot_html}
+              <div class="plot-wrap">{plot_html}</div>
             </article>
             """
         )
@@ -418,11 +566,20 @@ def generate_report(
           }}
           .pill.ok {{ color: #027a48; background: #ecfdf3; }}
           .pill.miss {{ color: #b42318; background: #fef3f2; }}
-          img {{
+          .plot-wrap {{
+            width: 100%;
+            margin-top: 12px;
+          }}
+          .plot-wrap img {{
             width: 100%;
             border-radius: 14px;
             border: 1px solid var(--border);
-            margin-top: 12px;
+          }}
+          .plot-wrap .plotly-graph-div {{
+            width: 100% !important;
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            overflow: hidden;
           }}
           pre {{
             white-space: pre-wrap;

@@ -9,6 +9,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
+try:
+    import optuna
+except ImportError:  # pragma: no cover - optional fallback for older envs
+    optuna = None
 
 from alma_service.anomaly_specs import DetectionSpec, get_detection_spec
 from alma_service.benchmark_metrics import (
@@ -60,6 +64,7 @@ from alma_service.paano_defaults import (
     REFERENCE_MIN_RATIO,
 )
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
+from alma_service.tabular_io import read_table
 
 DEFAULT_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
@@ -168,9 +173,13 @@ def load_anomaly_data(spec: DetectionSpec, source_path: str | None = None) -> pd
             raise FileNotFoundError(f"No source dataset found for {spec.anomaly_key}")
 
     print(f"Loading {spec.anomaly_key} data from: {src}")
-    df = pd.read_csv(src, dtype={"well_id": str}, low_memory=False)
+    df = read_table(
+        src,
+        dtypes={"well_id": str},
+        parse_dates=["timestamp"],
+        low_memory=False,
+    )
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
 
 
@@ -399,7 +408,145 @@ def _candidate_configs(detector_key: str) -> list[dict[str, Any]]:
     return candidates
 
 
-def _tune_config(
+def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[str, Any]) -> float:
+    runtime_cfg = _runtime_config(anomaly_key)
+    max_far = float(runtime_cfg["max_far_per_day"])
+    max_starts = float(runtime_cfg["max_starts_per_interval"])
+    far = _safe_metric(summary.get("false_alarms_per_day"), large=1e6)
+    starts = _safe_metric(summary.get("avg_starts_per_interval"), large=1e6)
+    p90_ratio = _safe_metric(summary.get("p90_delay_ratio"), large=1e6)
+    p90_abs_delay = _safe_metric(summary.get("p90_abs_delay_hours"), large=1e6)
+    hits = float(summary.get("hit_count", 0))
+    feasible_far = 1.0 if far <= max_far else 0.0
+    feasible_starts = 1.0 if starts <= max_starts else 0.0
+    far_over = max(far - max_far, 0.0)
+    starts_over = max(starts - max_starts, 0.0)
+    priority = float(LOCAL_DEFAULT_PRIORITY.get(detector_key, 0))
+    return (
+        hits * 1_000_000_000.0
+        + (feasible_far + feasible_starts) * 1_000_000.0
+        - far_over * 100_000.0
+        - starts_over * 10_000.0
+        - p90_ratio * 100.0
+        - far * 10.0
+        - starts
+        - p90_abs_delay * 0.01
+        + priority * 1e-3
+    )
+
+
+def _suggest_optuna_config(trial: Any, detector_key: str) -> dict[str, Any]:
+    cfg = DEFAULT_ONSET_CONFIG.copy()
+    cfg.update(
+        {
+            "target_far_per_day": float(
+                trial.suggest_categorical("target_far_per_day", ONSET_TUNE_GRID["target_far_per_day"])
+            ),
+            "min_run_points": int(
+                trial.suggest_categorical("min_run_points", ONSET_TUNE_GRID["min_run_points"])
+            ),
+            "cooldown_hours": float(
+                trial.suggest_categorical("cooldown_hours", ONSET_TUNE_GRID["cooldown_hours"])
+            ),
+            "ema_alpha": float(trial.suggest_categorical("ema_alpha", ONSET_TUNE_GRID["ema_alpha"])),
+            "gate_mode": str(trial.suggest_categorical("gate_mode", ONSET_TUNE_GRID["gate_mode"])),
+        }
+    )
+    if detector_key == "paano_feat":
+        cfg["fusion_weight_short"] = float(
+            trial.suggest_categorical("fusion_weight_short", PAANO_WEIGHT_GRID)
+        )
+    return cfg
+
+
+def _tune_config_with_optuna(
+    anomaly_key: str,
+    detector_key: str,
+    train_runs: dict[str, PreparedDetectorRun],
+    train_intervals: pd.DataFrame,
+    verbose: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if optuna is None:  # pragma: no cover - runtime fallback
+        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
+
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    sampler = optuna.samplers.TPESampler(seed=2027)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
+    n_trials = 48 if detector_key == "paano_feat" else 36
+
+    def objective(trial: Any) -> float:
+        cfg = _suggest_optuna_config(trial, detector_key)
+        predicted: dict[str, list[pd.Timestamp]] = {}
+        for well_id, run in train_runs.items():
+            _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
+            predicted[well_id] = starts
+        pred_df = predicted_from_mapping(predicted)
+        summary, _ = evaluate_predictions(
+            train_intervals,
+            pred_df,
+            scores=None,
+            prestart_hours=PRESTART_TOLERANCE_HOURS,
+        )
+        score_key = _operational_score_key(anomaly_key, detector_key, summary)
+        trial.set_user_attr("config", cfg)
+        trial.set_user_attr("summary", summary)
+        trial.set_user_attr("score_key", list(score_key))
+        return _optuna_objective_value(anomaly_key, detector_key, summary)
+
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+
+    leaderboard = []
+    for trial in study.trials:
+        if trial.state != optuna.trial.TrialState.COMPLETE:
+            continue
+        cfg = trial.user_attrs.get("config")
+        summary = trial.user_attrs.get("summary")
+        score_key = trial.user_attrs.get("score_key")
+        if not cfg or not summary or score_key is None:
+            continue
+        leaderboard.append(
+            {
+                "score_key": list(score_key),
+                "objective": float(trial.value) if trial.value is not None else None,
+                "config": cfg,
+                "summary": summary,
+            }
+        )
+
+    leaderboard.sort(key=lambda row: tuple(row["score_key"]), reverse=True)
+    if not leaderboard:
+        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
+
+    best_cfg = dict(leaderboard[0]["config"])
+    best_key = tuple(leaderboard[0]["score_key"])
+    tuning_summary = {
+        "backend": "optuna_tpe",
+        "n_trials": n_trials,
+        "best_score_key": list(best_key),
+        "top10": leaderboard[:10],
+    }
+    if verbose and tuning_summary["top10"]:
+        print("  Auto-tune top configs:")
+        for idx, row in enumerate(tuning_summary["top10"][:5], 1):
+            summary = row["summary"]
+            cfg = row["config"]
+            print(
+                f"    {idx}. hit={summary['hit_count']}/{summary['interval_count']}, "
+                f"p90_delay_ratio={summary['p90_delay_ratio']:.3f}, "
+                f"FAR/day={summary['false_alarms_per_day']:.3f}, "
+                f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
+                f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
+                f"ema={cfg['ema_alpha']:.2f}"
+                + (
+                    f", w={cfg['fusion_weight_short']:.2f}"
+                    if "fusion_weight_short" in cfg
+                    else ""
+                )
+            )
+    return best_cfg, tuning_summary
+
+
+def _tune_config_with_grid(
     anomaly_key: str,
     detector_key: str,
     train_runs: dict[str, PreparedDetectorRun],
@@ -413,7 +560,7 @@ def _tune_config(
         return cfg, {"message": "No train runs available"}
 
     best_cfg: dict[str, Any] | None = None
-    best_key: tuple[float, float, float, float, float] | None = None
+    best_key: tuple[float, ...] | None = None
     leaderboard: list[dict[str, Any]] = []
 
     for cfg in _candidate_configs(detector_key):
@@ -460,6 +607,18 @@ def _tune_config(
                 )
             )
     return best_cfg, tuning_summary
+
+
+def _tune_config(
+    anomaly_key: str,
+    detector_key: str,
+    train_runs: dict[str, PreparedDetectorRun],
+    train_intervals: pd.DataFrame,
+    verbose: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if optuna is None:
+        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
+    return _tune_config_with_optuna(anomaly_key, detector_key, train_runs, train_intervals, verbose)
 
 
 def _load_or_build_config(

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-import openpyxl
-
 from alma_service.paths import MODEL_PARAMS_PATH, NEGREMET_RAW_DIR, PRITOK_RAW_DIR, SALT_RAW_DIR
+from alma_service.tabular_io import read_excel_sheet
 
 
 PARAM_RENAME = {
@@ -46,17 +45,22 @@ TEST_WELLS = {
 
 @lru_cache(maxsize=1)
 def load_model_parameters() -> frozenset[str]:
-    wb = openpyxl.load_workbook(MODEL_PARAMS_PATH, read_only=True, data_only=True)
-    ws = wb[wb.sheetnames[0]]
+    df = read_excel_sheet(
+        MODEL_PARAMS_PATH,
+        sheet_id=1,
+        has_header=False,
+        infer_schema_length=50,
+        raise_if_empty=False,
+    )
     params = []
-    for row in ws.iter_rows(values_only=True):
-        value = row[0] if row else None
-        if value is None:
-            continue
-        value = str(value).strip()
-        if value:
-            params.append(value)
-    wb.close()
+    if not df.empty:
+        first_col = df.iloc[:, 0]
+        for value in first_col.tolist():
+            if value is None:
+                continue
+            value = str(value).strip()
+            if value:
+                params.append(value)
     return frozenset(params)
 
 

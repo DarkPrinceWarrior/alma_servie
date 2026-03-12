@@ -1,19 +1,19 @@
 # Система обнаружения аномалий в нефтяных скважинах
 
-Проект собирает датасеты по Excel-выгрузкам, запускает единый blind detection pipeline по трём типам аномалий и генерирует HTML-отчёты.
+Проект собирает датасеты по Excel-выгрузкам, запускает единый blind detection pipeline по трём типам аномалий и генерирует интерактивные HTML-отчёты.
 
 ## Структура
 
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
-- `scripts/datasets/` — сборка CSV-датасетов и интервалов из исходных Excel-файлов.
+- `scripts/datasets/` — сборка Parquet/CSV-датасетов и интервалов из исходных Excel-файлов.
 - `scripts/detection/` — новый unified detector stack (`paano_feat`, `pca_spe`, `lof`, `iforest`, `fused`, `tranad_global`) и legacy PaAno-обёртки.
 - `scripts/reports/` — HTML-отчёты по результатам blind-детекции и legacy feature-importance отчёты.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
 - `data/reference/` — общие справочные Excel-файлы.
   - `Параметры для модели.xlsx` — эталонный список признаков, который используют dataset builders.
-- `db/` — подготовленные датасеты, интервалы, скоры и конфиги детекторов.
+- `db/` — подготовленные датасеты (`.parquet` + `.csv`), интервалы, скоры и конфиги детекторов.
 - `models/` — сохранённые веса моделей PaAno.
 - `artifacts/results/` — итоговые таблицы детекции.
 - `artifacts/reports/` — HTML-отчёты.
@@ -27,6 +27,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Ключевые runtime-зависимости нового стека:
+
+- `polars + fastexcel` — быстрый Excel/Parquet I/O через `calamine`
+- `optuna` — TPE-тюнинг onset-конфигов
+- `plotly` — интерактивные графики в HTML-репортах
+
 ## Базовый workflow
 
 ### 1. Сборка датасетов
@@ -39,11 +45,13 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 
 Результат:
 
+- `db/*_anomaly_database_*.parquet`
 - `db/*_anomaly_database_*.csv`
 - `db/*_intervals.csv`
 
 Примечания:
 
+- builders читают Excel через `polars.read_excel(..., engine="calamine")` и сохраняют датасет в `Parquet` с `CSV`-sidecar;
 - builders собирают полный набор параметров, который реально есть в Excel по конкретной скважине;
 - каналы, которых нет у конкретной скважины, остаются `NaN` в общем CSV, но позже не подаются в blind PaAno для этой скважины;
 - в `db/*_intervals.csv` пишется колонка `split`, где train/test-скважины задаются через `alma_service/dataset_config.py`.
@@ -89,7 +97,7 @@ python scripts/detection/detect_salt_paano.py
 Примечания:
 
 - у всех трёх аномалий теперь один и тот же staged blind pipeline: causal preprocessing, instability mask, engineered features, unified onset layer;
-- конфигурация onset-детектора тюнится только по `train`-скважинам и затем применяется к `train` и `test`;
+- конфигурация onset-детектора тюнится только по `train`-скважинам через `Optuna/TPE` и затем применяется к `train` и `test`;
 - `salt` больше не использует `dev`/LOIO режим и не вырезает аномальные интервалы из train-mask по ground truth;
 - дефолтный production-кандидат выбирается через `artifacts/results/*_benchmark_summary.json`.
 
@@ -138,5 +146,6 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 
 - Скрипты больше не зависят от запуска строго из корня: пути резолвятся относительно репозитория.
 - Новые отчёты и итоговые CSV по умолчанию больше не складываются в корень проекта.
-- HTML-отчёты читают те же CSV/JSON, которые пишет детектор, поэтому summary в HTML, `results.csv` и `summary.json` синхронизированы.
-- `db/*_anomaly_database_*.csv` остаётся raw-источником; engineered features считаются поверх него внутри detection pipeline.
+- HTML-отчёты теперь интерактивные: Plotly-графики поддерживают zoom/pan и читают те же CSV/JSON, которые пишет детектор, поэтому summary в HTML, `results.csv` и `summary.json` синхронизированы.
+- `db/*_anomaly_database_*.parquet` является приоритетным raw-источником для detection/report; `CSV` сохраняется как sidecar для совместимости и ручного просмотра.
+- `torch.compile` включён для кастомного `TranAD`-benchmark и для локального `PatchEncoder` в blind PaAno stack, с безопасным fallback если backend не поддерживается.

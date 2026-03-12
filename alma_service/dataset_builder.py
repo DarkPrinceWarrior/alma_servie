@@ -4,12 +4,12 @@ import itertools
 from pathlib import Path
 
 import numpy as np
-import openpyxl
 import pandas as pd
 
 from alma_service.anomaly_specs import DatasetSpec
 from alma_service.dataset_config import normalize_param_name, split_for_well
 from alma_service.paths import DB_DIR, SUMMARY_INFO_PATH, ensure_dir
+from alma_service.tabular_io import read_excel_sheet, read_excel_workbook, write_dataset_tables
 
 
 def _looks_like_datetime(value: object) -> bool:
@@ -24,34 +24,37 @@ def _looks_like_datetime(value: object) -> bool:
 
 def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
     print(f"  Парсинг {well_id} из {filepath}...")
-    wb = openpyxl.load_workbook(filepath, read_only=True)
     series_list: list[pd.Series] = []
+    workbook = read_excel_workbook(filepath, has_header=False, infer_schema_length=20)
 
-    for sname in wb.sheetnames:
-        ws = wb[sname]
-        row_iter = ws.iter_rows(values_only=True)
+    for sname, sheet_df in workbook.items():
+        rows = list(sheet_df.itertuples(index=False, name=None))
+        row_iter = iter(rows)
         _ = next(row_iter, None)
         header_row = next(row_iter, None)
         third_row = next(row_iter, None)
         if header_row is None:
             continue
 
-        full_name = str(header_row[0]) if header_row[0] else ""
+        full_name = str(header_row[0]) if len(header_row) > 0 and header_row[0] else ""
         parts = full_name.rsplit(".", 1)
         param_name = parts[-1].strip() if len(parts) > 1 else full_name.strip()
         param_name = normalize_param_name(param_name)
 
-        if _looks_like_datetime(third_row[0] if third_row else None):
+        third_value = third_row[0] if third_row and len(third_row) > 0 else None
+        if _looks_like_datetime(third_value):
             row_iter = itertools.chain([third_row], row_iter)
 
         times: list[pd.Timestamp] = []
         values: list[float] = []
         for row in row_iter:
-            if not row or row[0] is None:
+            ts_value = row[0] if row and len(row) > 0 else None
+            val_value = row[1] if row and len(row) > 1 else None
+            if ts_value is None:
                 continue
             try:
-                ts = pd.to_datetime(row[0], dayfirst=True)
-                val = float(row[1]) if row[1] is not None else np.nan
+                ts = pd.to_datetime(ts_value, dayfirst=True)
+                val = float(val_value) if val_value is not None else np.nan
             except (TypeError, ValueError):
                 continue
             times.append(ts)
@@ -63,15 +66,19 @@ def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
         series = pd.Series(values, index=pd.DatetimeIndex(times), name=param_name)
         series = series[~series.index.duplicated(keep="first")].sort_index()
         series_list.append(series)
-
-    wb.close()
     print(f"    {well_id}: {len(series_list)} параметров из xlsx")
     return series_list
 
 
 def build_intervals(spec: DatasetSpec) -> pd.DataFrame:
     print("Парсинг сводной информации...")
-    svod = pd.read_excel(SUMMARY_INFO_PATH, header=None)
+    svod = read_excel_sheet(
+        SUMMARY_INFO_PATH,
+        sheet_id=1,
+        has_header=False,
+        infer_schema_length=50,
+        raise_if_empty=False,
+    )
 
     header_row = None
     for i in range(min(10, len(svod))):
@@ -204,9 +211,14 @@ def build_dataset(spec: DatasetSpec, freq: str | None = None) -> tuple[pd.DataFr
     result = result[["timestamp", "well_id"] + [c for c in numeric_cols if c in result.columns]]
 
     freq_label = freq.replace(" ", "")
-    out_path = DB_DIR / f"{spec.output_prefix}_anomaly_database_{freq_label}.csv"
-    result.to_csv(out_path, index=False)
-    print(f"\nDatabase: {out_path} ({len(result)} rows)")
+    parquet_out_path = DB_DIR / f"{spec.output_prefix}_anomaly_database_{freq_label}.parquet"
+    csv_out_path = DB_DIR / f"{spec.output_prefix}_anomaly_database_{freq_label}.csv"
+    write_dataset_tables(
+        result,
+        parquet_path=parquet_out_path,
+        csv_path=csv_out_path,
+    )
+    print(f"\nDatabase: {parquet_out_path} ({len(result)} rows)")
 
     intervals = build_intervals(spec)
     intervals_path = DB_DIR / f"{spec.output_prefix}_intervals.csv"
