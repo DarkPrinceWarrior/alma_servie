@@ -1,14 +1,14 @@
 # Система обнаружения аномалий в нефтяных скважинах
 
-Проект собирает датасеты по Excel-выгрузкам, запускает PaAno-детекторы по трём типам аномалий и генерирует HTML-отчёты.
+Проект собирает датасеты по Excel-выгрузкам, запускает единый blind PaAno-пайплайн по трём типам аномалий и генерирует HTML-отчёты.
 
 ## Структура
 
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
 - `scripts/datasets/` — сборка CSV-датасетов и интервалов из исходных Excel-файлов.
-- `scripts/detection/` — запуск PaAno-детекторов для `negermet`, `pritok` и `salt`.
-- `scripts/reports/` — HTML-отчёты и feature-importance отчёты.
+- `scripts/detection/` — единый blind PaAno-детектор для `negermet`, `pritok` и `salt`.
+- `scripts/reports/` — HTML-отчёты по результатам blind-детекции и feature-importance отчёты.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
 - `data/reference/` — общие справочные Excel-файлы.
@@ -44,22 +44,32 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 
 Примечания:
 
-- builders читают только те параметры, которые перечислены в `data/reference/Параметры для модели.xlsx`;
-- в `db/*_intervals.csv` пишется колонка `split`, где тестовые скважины размечаются через `alma_service/dataset_config.py`.
+- builders собирают полный набор параметров, который реально есть в Excel по конкретной скважине;
+- каналы, которых нет у конкретной скважины, остаются `NaN` в общем CSV, но позже не подаются в blind PaAno для этой скважины;
+- в `db/*_intervals.csv` пишется колонка `split`, где train/test-скважины задаются через `alma_service/dataset_config.py`.
 
 ### 2. Запуск детекции
 
 ```bash
 python scripts/detection/detect_negermet_paano.py
 python scripts/detection/detect_pritok_paano.py
-python scripts/detection/detect_salt_paano.py --mode dev
+python scripts/detection/detect_salt_paano.py
 ```
 
 Результат:
 
 - `artifacts/results/*_paano_results.csv`
+- `artifacts/results/*_paano_results.summary.json`
 - `db/*_paano_scores.csv`
 - `db/*_paano_predicted_starts.csv`
+- `db/*_paano_config.json`
+- `db/*_paano_tuning.json`
+
+Примечания:
+
+- у всех трёх аномалий теперь один и тот же blind PaAno-пайплайн;
+- конфигурация onset-детектора тюнится только по `train`-скважинам и затем применяется к `train` и `test`;
+- `salt` больше не использует `dev`/LOIO режим и не вырезает аномальные интервалы из train-mask по ground truth.
 
 ### 3. Генерация HTML-отчётов
 
@@ -80,16 +90,17 @@ python scripts/evaluation/evaluate_onset_metrics.py \
   --intervals db/salt_intervals.csv \
   --predicted-starts db/salt_paano_predicted_starts.csv \
   --scores db/salt_paano_scores.csv \
-  --name salt-dev
+  --name salt
 ```
 
 ## Типы аномалий
 
 - `Негерметичность` — резкие изменения давления.
 - `Приток` — устойчивые постепенные тренды.
-- `Солеотложение` — многоканальная детекция с multiscale-fusion и dev/blind режимами.
+- `Солеотложение` — blind multivariate детекция тем же unified PaAno-пайплайном, что и другие аномалии.
 
 ## Примечания
 
 - Скрипты больше не зависят от запуска строго из корня: пути резолвятся относительно репозитория.
 - Новые отчёты и итоговые CSV по умолчанию больше не складываются в корень проекта.
+- HTML-отчёты читают те же CSV/JSON, которые пишет детектор, поэтому summary в HTML, `results.csv` и `summary.json` синхронизированы.

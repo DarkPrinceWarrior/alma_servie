@@ -1,11 +1,11 @@
 """
-Evaluate onset-detection quality from predicted anomaly starts.
+Evaluate unified blind onset-detection quality from predicted anomaly starts.
 
 Metrics:
 - Interval hit rate
-- Start-delay MAE / median / P90 (hours)
+- Absolute start-delay MAE / median / P90 (hours)
 - False alarms per day
-- Early false alarms per day
+- Split-wise summaries (train/test/all)
 """
 
 from __future__ import annotations
@@ -33,6 +33,10 @@ def load_intervals(path: str) -> pd.DataFrame:
         df["data_end"] = pd.to_datetime(df["data_end"], errors="coerce")
     else:
         df["data_end"] = pd.NaT
+    if "split" in df.columns:
+        df["split"] = df["split"].astype(str).str.strip().str.lower()
+    else:
+        df["split"] = "train"
     return df.dropna(subset=["well_id", "start_date", "end_date"]).sort_values(
         ["well_id", "start_date", "interval_idx"]
     )
@@ -66,16 +70,26 @@ def _is_inside_any(ts: pd.Timestamp, intervals: pd.DataFrame) -> bool:
     return False
 
 
+def _select_interval_detection(
+    predicted_times: list[pd.Timestamp],
+    start_dt: pd.Timestamp,
+    end_dt: pd.Timestamp,
+    prestart_hours: float,
+) -> pd.Timestamp | pd.NaT:
+    pre_tol = pd.Timedelta(hours=prestart_hours)
+    inside = [ts for ts in predicted_times if start_dt - pre_tol <= ts <= end_dt]
+    return min(inside) if inside else pd.NaT
+
+
 def evaluate(
     intervals: pd.DataFrame,
     predictions: pd.DataFrame,
     scores: pd.DataFrame,
+    prestart_hours: float,
 ) -> tuple[dict, pd.DataFrame]:
     interval_rows = []
     false_alarms = 0
-    early_false_alarms = 0
     observed_days_total = 0.0
-    pre_anomaly_days_total = 0.0
 
     all_wells = sorted(set(intervals["well_id"].unique()).union(predictions["well_id"].unique()))
 
@@ -103,25 +117,15 @@ def evaluate(
         if pd.notna(obs_start) and pd.notna(obs_end) and obs_end > obs_start:
             observed_days_total += (obs_end - obs_start).total_seconds() / 86400.0
 
-        if not wi.empty and pd.notna(obs_start):
-            first_start = wi["start_date"].min()
-            if first_start > obs_start:
-                pre_anomaly_days_total += (first_start - obs_start).total_seconds() / 86400.0
-
-        pred_list = list(wp["detected_time"].to_numpy())
+        pred_list = [pd.Timestamp(ts) for ts in wp["detected_time"].to_numpy()]
         for ts in pred_list:
-            ts = pd.Timestamp(ts)
-            inside = _is_inside_any(ts, wi)
-            if not inside:
+            if not _is_inside_any(ts, wi):
                 false_alarms += 1
-                if wi.empty or ts < wi["start_date"].min():
-                    early_false_alarms += 1
 
         for _, row in wi.iterrows():
             start_dt = row["start_date"]
             end_dt = row["end_date"]
-            inside = [pd.Timestamp(ts) for ts in pred_list if start_dt <= pd.Timestamp(ts) <= end_dt]
-            first_hit = min(inside) if inside else pd.NaT
+            first_hit = _select_interval_detection(pred_list, start_dt, end_dt, prestart_hours)
             delay_h = (
                 float((first_hit - start_dt).total_seconds() / 3600.0) if pd.notna(first_hit) else np.nan
             )
@@ -132,6 +136,7 @@ def evaluate(
                     "actual_start": start_dt,
                     "actual_end": end_dt,
                     "detected_time": first_hit,
+                    "split": str(row.get("split", "train")),
                     "hit": int(pd.notna(first_hit)),
                     "delay_hours": delay_h,
                 }
@@ -147,16 +152,11 @@ def evaluate(
         "hit_count": n_hits,
         "hit_rate": float(n_hits / n_intervals) if n_intervals else 0.0,
         "delay_mae_hours": float(np.mean(np.abs(delays))) if len(delays) else np.nan,
-        "delay_median_hours": float(np.median(delays)) if len(delays) else np.nan,
-        "delay_p90_hours": float(np.quantile(delays, 0.9)) if len(delays) else np.nan,
+        "delay_median_hours": float(np.median(np.abs(delays))) if len(delays) else np.nan,
+        "delay_p90_hours": float(np.quantile(np.abs(delays), 0.9)) if len(delays) else np.nan,
         "false_alarms": int(false_alarms),
         "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,
-        "early_false_alarms": int(early_false_alarms),
-        "early_false_alarms_per_day": (
-            float(early_false_alarms / pre_anomaly_days_total) if pre_anomaly_days_total > 0 else np.nan
-        ),
         "observed_days_total": float(observed_days_total),
-        "pre_anomaly_days_total": float(pre_anomaly_days_total),
     }
     return summary, interval_df
 
@@ -166,6 +166,7 @@ def main():
     parser.add_argument("--intervals", required=True, help="Path to *_intervals.csv")
     parser.add_argument("--predicted-starts", required=True, help="Path to *_paano_predicted_starts.csv")
     parser.add_argument("--scores", default=None, help="Path to *_paano_scores.csv (optional)")
+    parser.add_argument("--prestart-hours", type=float, default=2.0, help="Early-detection tolerance for interval hit.")
     parser.add_argument("--name", default="run", help="Label for outputs")
     parser.add_argument("--output-prefix", default=None, help="If set, writes JSON summary and per-interval CSV")
     args = parser.parse_args()
@@ -174,8 +175,29 @@ def main():
     predictions = load_predicted_starts(args.predicted_starts)
     scores = load_scores(args.scores)
 
-    summary, interval_df = evaluate(intervals, predictions, scores)
-    summary["name"] = args.name
+    all_summary, interval_df = evaluate(intervals, predictions, scores, prestart_hours=args.prestart_hours)
+    split_summaries = {}
+    for split_name in ["train", "test"]:
+        subset = intervals[intervals["split"] == split_name]
+        if subset.empty:
+            continue
+        subset_pred = predictions[predictions["well_id"].isin(subset["well_id"].unique())]
+        subset_scores = scores[scores["well_id"].isin(subset["well_id"].unique())]
+        split_summaries[split_name], _ = evaluate(
+            subset,
+            subset_pred,
+            subset_scores,
+            prestart_hours=args.prestart_hours,
+        )
+
+    summary = {
+        "name": args.name,
+        "prestart_hours": args.prestart_hours,
+        "splits": {
+            "all": all_summary,
+            **split_summaries,
+        },
+    }
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
