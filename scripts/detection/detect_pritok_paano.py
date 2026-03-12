@@ -35,6 +35,7 @@ from alma_service.onset_detection import (
     detect_causal_onsets,
 )
 from alma_service.paths import DB_DIR, RESULTS_DIR, ensure_dir, ensure_parent
+from alma_service.well_features import get_well_feature_columns
 
 warnings.filterwarnings("ignore")
 
@@ -120,7 +121,7 @@ def _fill_nans_forward(arr):
 def prepare_well_matrix(well_df):
     wd = well_df.sort_values("timestamp").reset_index(drop=True)
     timestamps = wd["timestamp"].to_numpy()
-    numeric_cols = [c for c in wd.columns if c not in ("timestamp", "well_id")]
+    numeric_cols = get_well_feature_columns(wd)
     data = wd[numeric_cols].to_numpy(dtype=np.float32)
     data = _fill_nans_forward(data)
     return data, timestamps
@@ -191,6 +192,8 @@ def detect_pritok_paano_well(well_df, well_id, verbose=True):
     set_seed()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data, timestamps = prepare_well_matrix(well_df)
+    if data.shape[1] == 0:
+        return None, timestamps, "No usable channels for this well"
 
     if len(data) < PATCH_SIZE_LONG * 4:
         return None, timestamps, "Not enough data for PaAno"

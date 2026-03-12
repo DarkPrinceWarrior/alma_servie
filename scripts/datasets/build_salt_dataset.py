@@ -23,7 +23,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from alma_service.dataset_config import (
     SALT_WELL_FILES,
-    load_model_parameters,
     normalize_param_name,
     split_for_well,
 )
@@ -32,14 +31,12 @@ from alma_service.paths import DB_DIR, SUMMARY_INFO_PATH, ensure_dir
 warnings.filterwarnings('ignore')
 
 WELL_FILES = SALT_WELL_FILES
-ALLOWED_PARAMS = load_model_parameters()
 
 
 def parse_xlsx(well_id, filepath):
     print(f'  Парсинг {well_id} из {filepath}...')
     wb = openpyxl.load_workbook(filepath, read_only=True)
     series_list = []
-    skipped_params = set()
 
     for sname in wb.sheetnames:
         ws = wb[sname]
@@ -54,9 +51,6 @@ def parse_xlsx(well_id, filepath):
         parts = full_name.rsplit('.', 1)
         param_name = parts[-1].strip() if len(parts) > 1 else full_name.strip()
         param_name = normalize_param_name(param_name)
-        if param_name not in ALLOWED_PARAMS:
-            skipped_params.add(param_name)
-            continue
 
         times = []
         values = []
@@ -81,8 +75,6 @@ def parse_xlsx(well_id, filepath):
 
     wb.close()
     print(f'    {well_id}: {len(series_list)} параметров из xlsx')
-    if skipped_params:
-        print(f'    {well_id}: пропущены параметры вне списка модели: {sorted(skipped_params)}')
     return series_list
 
 

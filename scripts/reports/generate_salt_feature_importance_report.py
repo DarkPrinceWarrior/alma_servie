@@ -37,6 +37,7 @@ from utils.data_preprocess import PatchCreator, preprocess_to_patches
 from utils.utils import create_memory_bank
 from utils.evaluation import calculate_anomaly_scores, distribute_patch_scores_to_points
 from alma_service.paths import DB_DIR, REPORTS_DIR, ensure_parent
+from alma_service.well_features import get_well_feature_columns
 
 warnings.filterwarnings('ignore')
 
@@ -79,7 +80,7 @@ def load_salt_intervals():
 def prepare_well_arrays(well_df, intervals_df, well_id):
     wd = well_df.sort_values('timestamp').reset_index(drop=True)
     timestamps = wd['timestamp'].values
-    numeric_cols = [c for c in wd.columns if c not in ('timestamp', 'well_id')]
+    numeric_cols = get_well_feature_columns(wd)
     data = wd[numeric_cols].values.astype(np.float32)
 
     for col_idx in range(data.shape[1]):
@@ -141,6 +142,11 @@ def compute_feature_importance(well_df, intervals_df, well_id, device, verbose=T
     set_seed()
     data, labels, timestamps, train_data, col_names = prepare_well_arrays(
         well_df, intervals_df, well_id)
+
+    if not col_names:
+        if verbose:
+            print(f'  {well_id}: нет пригодных каналов для анализа')
+        return None
 
     if len(data) < PATCH_SIZE * 3:
         return None

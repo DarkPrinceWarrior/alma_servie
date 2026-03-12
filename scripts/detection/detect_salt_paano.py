@@ -33,6 +33,7 @@ from alma_service.onset_detection import (
     robust_scale_for_fusion_mask,
 )
 from alma_service.paths import DB_DIR, RESULTS_DIR, ensure_dir, ensure_parent
+from alma_service.well_features import get_well_feature_columns
 
 warnings.filterwarnings("ignore")
 
@@ -150,7 +151,7 @@ def _fill_nans_forward(arr):
 def prepare_well_matrix(well_df):
     wd = well_df.sort_values("timestamp").reset_index(drop=True)
     timestamps = wd["timestamp"].to_numpy()
-    numeric_cols = [c for c in wd.columns if c not in ("timestamp", "well_id")]
+    numeric_cols = get_well_feature_columns(wd)
     data = wd[numeric_cols].to_numpy(dtype=np.float32)
     data = _fill_nans_forward(data)
     return data, timestamps
