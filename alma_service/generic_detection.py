@@ -84,57 +84,15 @@ BASE_ONSET_TUNE_GRID = {
 }
 
 ANOMALY_ONSET_PROFILES = {
-    "negermet": {
-        "defaults": {
-            "target_far_per_day": 0.25,
-            "min_run_points": 2,
-            "cooldown_hours": 8.0,
-            "rearm_window_minutes": 30.0,
-            "gate_mode": "relaxed",
-            "hysteresis_scale": 0.55,
-        },
-        "grid": {
-            "target_far_per_day": [0.10, 0.25, 0.50],
-            "min_run_points": [2, 3, 4],
-            "cooldown_hours": [6.0, 8.0, 12.0],
-            "rearm_window_minutes": [20.0, 30.0, 60.0],
-            "gate_mode": ["relaxed", "score_ema", "strict"],
-        },
-    },
+    "negermet": {},
     "pritok": {
-        "defaults": {
-            "target_far_per_day": 0.50,
-            "min_run_points": 2,
-            "cooldown_hours": 6.0,
-            "rearm_window_minutes": 20.0,
-            "gate_mode": "relaxed",
-            "hysteresis_scale": 0.50,
-        },
         "grid": {
-            "target_far_per_day": [0.25, 0.50, 0.75],
             "min_run_points": [2, 3, 4],
-            "cooldown_hours": [4.0, 6.0, 8.0],
-            "rearm_window_minutes": [15.0, 20.0, 30.0],
-            "gate_mode": ["relaxed", "score_ema"],
-        },
-    },
-    "salt": {
-        "defaults": {
-            "target_far_per_day": 0.25,
-            "min_run_points": 3,
-            "cooldown_hours": 12.0,
-            "rearm_window_minutes": 120.0,
-            "gate_mode": "score_ema",
-            "hysteresis_scale": 0.65,
-        },
-        "grid": {
-            "target_far_per_day": [0.10, 0.25, 0.50],
-            "min_run_points": [3, 4, 6],
             "cooldown_hours": [8.0, 12.0, 24.0],
-            "rearm_window_minutes": [60.0, 120.0, 180.0],
-            "gate_mode": ["score_ema", "relaxed"],
+            "rearm_window_minutes": [30.0, 60.0, 120.0],
         },
     },
+    "salt": {},
 }
 
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
@@ -145,6 +103,7 @@ ANOMALY_RUNTIME_CONFIG = {
         "paano_patch_long": 64,
         "max_far_per_day": 0.25,
         "max_starts_per_interval": 2.0,
+        "max_p90_delay_ratio": 0.25,
     },
     "pritok": {
         "prepare_patch_size": 96,
@@ -152,6 +111,7 @@ ANOMALY_RUNTIME_CONFIG = {
         "paano_patch_long": 96,
         "max_far_per_day": 0.25,
         "max_starts_per_interval": 6.0,
+        "max_p90_delay_ratio": 0.40,
     },
     "salt": {
         "prepare_patch_size": 96,
@@ -159,6 +119,7 @@ ANOMALY_RUNTIME_CONFIG = {
         "paano_patch_long": 96,
         "max_far_per_day": 0.40,
         "max_starts_per_interval": 10.0,
+        "max_p90_delay_ratio": 0.20,
     },
 }
 LOCAL_DEFAULT_PRIORITY = {
@@ -211,25 +172,30 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     runtime_cfg = _runtime_config(anomaly_key)
     max_far = float(runtime_cfg["max_far_per_day"])
     max_starts = float(runtime_cfg["max_starts_per_interval"])
+    max_delay_ratio = float(runtime_cfg["max_p90_delay_ratio"])
     far = _safe_metric(summary.get("false_alarms_per_day"), large=1e9)
     starts = _safe_metric(summary.get("avg_starts_per_interval"), large=1e9)
     p90_ratio = _safe_metric(summary.get("p90_delay_ratio"), large=1e9)
     p90_abs_delay = _safe_metric(summary.get("p90_abs_delay_hours"), large=1e9)
     feasible_far = int(far <= max_far)
     feasible_starts = int(starts <= max_starts)
+    feasible_delay = int(p90_ratio <= max_delay_ratio)
     far_over = max(far - max_far, 0.0)
     starts_over = max(starts - max_starts, 0.0)
+    delay_over = max(p90_ratio - max_delay_ratio, 0.0)
     priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
     return (
         float(summary.get("hit_count", 0)),
+        float(feasible_delay),
         float(feasible_starts),
         float(feasible_far),
-        -starts_over,
+        -delay_over,
         -far_over,
-        -starts,
-        -far,
+        -starts_over,
         -p90_ratio,
+        -starts,
         -p90_abs_delay,
+        -far,
         float(priority),
     )
 
@@ -427,6 +393,7 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     runtime_cfg = _runtime_config(anomaly_key)
     max_far = float(runtime_cfg["max_far_per_day"])
     max_starts = float(runtime_cfg["max_starts_per_interval"])
+    max_delay_ratio = float(runtime_cfg["max_p90_delay_ratio"])
     far = _safe_metric(summary.get("false_alarms_per_day"), large=1e6)
     starts = _safe_metric(summary.get("avg_starts_per_interval"), large=1e6)
     p90_ratio = _safe_metric(summary.get("p90_delay_ratio"), large=1e6)
@@ -434,19 +401,23 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     hits = float(summary.get("hit_count", 0))
     feasible_far = 1.0 if far <= max_far else 0.0
     feasible_starts = 1.0 if starts <= max_starts else 0.0
+    feasible_delay = 1.0 if p90_ratio <= max_delay_ratio else 0.0
     far_over = max(far - max_far, 0.0)
     starts_over = max(starts - max_starts, 0.0)
+    delay_over = max(p90_ratio - max_delay_ratio, 0.0)
     priority = float(LOCAL_DEFAULT_PRIORITY.get(detector_key, 0))
     return (
         hits * 1_000_000_000.0
-        + feasible_starts * 10_000_000.0
-        + feasible_far * 1_000_000.0
-        - starts_over * 1_000_000.0
-        - far_over * 100_000.0
-        - starts * 1_000.0
+        + feasible_delay * 10_000_000.0
+        + feasible_starts * 1_000_000.0
+        + feasible_far * 100_000.0
+        - delay_over * 1_000_000.0
+        - starts_over * 100_000.0
+        - far_over * 10_000.0
+        - p90_ratio * 10_000.0
+        - starts * 100.0
+        - p90_abs_delay
         - far * 100.0
-        - p90_ratio * 10.0
-        - p90_abs_delay * 0.1
         + priority * 1e-3
     )
 

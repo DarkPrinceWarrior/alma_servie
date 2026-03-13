@@ -48,6 +48,27 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
             _operational_score_key("salt", "fused", noisy),
         )
 
+    def test_operational_score_key_penalizes_extreme_delay_before_small_far_gain(self) -> None:
+        too_late = {
+            "hit_count": 9,
+            "p90_delay_ratio": 0.50,
+            "false_alarms_per_day": 0.14,
+            "avg_starts_per_interval": 19.0,
+            "p90_abs_delay_hours": 370.0,
+        }
+        on_time = {
+            "hit_count": 9,
+            "p90_delay_ratio": 0.14,
+            "false_alarms_per_day": 0.18,
+            "avg_starts_per_interval": 23.0,
+            "p90_abs_delay_hours": 70.0,
+        }
+
+        self.assertGreater(
+            _operational_score_key("salt", "pca_spe", on_time),
+            _operational_score_key("salt", "fused", too_late),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
