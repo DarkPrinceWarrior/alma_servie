@@ -462,7 +462,7 @@ def prepare_engineered_well(
     if chosen_masked_fraction > float(mask_target["hard_max_fraction"]):
         onset_allowed_mask = np.ones(len(wd), dtype=bool)
         onset_allowed_mask[:reference_end_idx] = False
-    else:
+    elif anomaly_key == "negermet":
         onset_allowed_mask, _ = _build_instability_mask(
             raw_df=raw_df,
             filled_matrix=raw_matrix,
@@ -479,6 +479,8 @@ def prepare_engineered_well(
             include_start_stop_events=False,
         )
         onset_allowed_mask[:reference_end_idx] = False
+    else:
+        onset_allowed_mask = stability_mask.copy()
 
     feature_mode, feature_windows, slope_windows, include_stale = _feature_mode(
         reference_points=int(reference_mask.sum()),

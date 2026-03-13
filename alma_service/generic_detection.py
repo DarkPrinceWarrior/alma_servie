@@ -87,9 +87,8 @@ ANOMALY_ONSET_PROFILES = {
     "negermet": {},
     "pritok": {
         "grid": {
-            "target_far_per_day": [0.10, 0.25, 0.50, 1.00],
             "min_run_points": [2, 3, 4],
-            "cooldown_hours": [4.0, 8.0, 12.0, 24.0],
+            "cooldown_hours": [8.0, 12.0, 24.0],
             "rearm_window_minutes": [30.0, 60.0, 120.0],
         },
     },
@@ -110,8 +109,8 @@ ANOMALY_RUNTIME_CONFIG = {
         "prepare_patch_size": 96,
         "paano_patch_short": 48,
         "paano_patch_long": 96,
-        "max_far_per_day": 0.30,
-        "max_starts_per_interval": 8.0,
+        "max_far_per_day": 0.25,
+        "max_starts_per_interval": 6.0,
         "max_p90_delay_ratio": 0.40,
     },
     "salt": {
