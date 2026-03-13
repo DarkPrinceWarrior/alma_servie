@@ -151,6 +151,101 @@ def _quantile_for_target_far(
     return float(np.clip(q, min_q, max_q))
 
 
+def _scaled_down_threshold(threshold: float, scale: float) -> float:
+    value = float(threshold)
+    factor = float(np.clip(scale, 1e-3, 1.0))
+    if value >= 0.0:
+        return value * factor
+    return value / factor
+
+
+def _build_gate_condition(
+    scores: np.ndarray,
+    ema_z: np.ndarray,
+    cusum: np.ndarray,
+    *,
+    score_threshold: float,
+    ema_threshold: float,
+    cusum_threshold: float,
+    gate_mode: str,
+) -> np.ndarray:
+    score_cond = np.asarray(scores, dtype=np.float32) >= float(score_threshold)
+    ema_cond = np.asarray(ema_z, dtype=np.float32) >= float(ema_threshold)
+    cusum_cond = np.asarray(cusum, dtype=np.float32) >= float(cusum_threshold)
+
+    if gate_mode == "strict":
+        return score_cond & ema_cond & cusum_cond
+    if gate_mode == "score_ema":
+        return score_cond & ema_cond
+    return score_cond & (ema_cond | cusum_cond)
+
+
+def _detect_onsets_stateful(
+    entry_cond: np.ndarray,
+    sustain_cond: np.ndarray,
+    timestamps: np.ndarray,
+    *,
+    start_i: int,
+    min_run_points: int,
+    cooldown_hours: float,
+    rearm_window_minutes: float,
+) -> List[pd.Timestamp]:
+    starts: List[pd.Timestamp] = []
+    if len(entry_cond) == 0:
+        return starts
+
+    ts = pd.to_datetime(timestamps)
+    step_seconds = infer_step_seconds(timestamps)
+    clear_points = max(
+        int(np.ceil((float(rearm_window_minutes) * 60.0) / max(step_seconds, 1.0))),
+        int(min_run_points),
+    )
+    cooldown = pd.Timedelta(hours=float(cooldown_hours))
+
+    armed = True
+    run_start = None
+    run_len = 0
+    clear_len = 0
+    last_start: pd.Timestamp | None = None
+
+    for i in range(int(np.clip(start_i, 0, len(entry_cond))), len(entry_cond)):
+        current_ts = pd.Timestamp(ts[i])
+        if armed:
+            if entry_cond[i]:
+                if run_start is None:
+                    run_start = i
+                    run_len = 1
+                else:
+                    run_len += 1
+                if run_len >= int(min_run_points):
+                    start_ts = pd.Timestamp(ts[run_start])
+                    if last_start is None or start_ts - last_start >= cooldown:
+                        starts.append(start_ts)
+                        last_start = start_ts
+                    armed = False
+                    run_start = None
+                    run_len = 0
+                    clear_len = 0
+            else:
+                run_start = None
+                run_len = 0
+            continue
+
+        if sustain_cond[i]:
+            clear_len = 0
+        else:
+            clear_len += 1
+
+        cooldown_ok = last_start is None or (current_ts - last_start) >= cooldown
+        if clear_len >= clear_points and cooldown_ok:
+            armed = True
+            run_start = None
+            run_len = 0
+            clear_len = 0
+
+    return starts
+
+
 def calibrate_causal_thresholds(
     scores: np.ndarray,
     timestamps: np.ndarray,
@@ -214,45 +309,41 @@ def detect_causal_onsets(
     min_run_points: int,
     cooldown_hours: float,
     gate_mode: str = "relaxed",
+    rearm_window_minutes: float = 60.0,
+    hysteresis_scale: float = 0.60,
 ) -> List[pd.Timestamp]:
     x = np.asarray(scores, dtype=np.float32)
     z_ema = diagnostics["ema_z"]
     cusum = diagnostics["cusum"]
 
-    score_cond = x >= thresholds.score_threshold
-    ema_cond = z_ema >= thresholds.ema_z_threshold
-    cusum_cond = cusum >= thresholds.cusum_threshold
-
-    if gate_mode == "strict":
-        cond = score_cond & ema_cond & cusum_cond
-    elif gate_mode == "score_ema":
-        cond = score_cond & ema_cond
-    else:
-        # Relaxed: score must be high, then either smooth level (EMA) or shift evidence (CUSUM).
-        cond = score_cond & (ema_cond | cusum_cond)
-
-    starts: List[pd.Timestamp] = []
-    cooldown = pd.Timedelta(hours=float(cooldown_hours))
-    run_start = None
-    run_len = 0
-
-    start_i = int(np.clip(reference_end_idx, 0, len(cond)))
-    for i in range(start_i, len(cond)):
-        if cond[i]:
-            if run_start is None:
-                run_start = i
-                run_len = 1
-            else:
-                run_len += 1
-            if run_len == min_run_points:
-                ts = pd.Timestamp(timestamps[run_start])
-                if not starts or ts - starts[-1] >= cooldown:
-                    starts.append(ts)
-        else:
-            run_start = None
-            run_len = 0
-
-    return starts
+    entry_cond = _build_gate_condition(
+        x,
+        z_ema,
+        cusum,
+        score_threshold=thresholds.score_threshold,
+        ema_threshold=thresholds.ema_z_threshold,
+        cusum_threshold=thresholds.cusum_threshold,
+        gate_mode=gate_mode,
+    )
+    sustain_cond = _build_gate_condition(
+        x,
+        z_ema,
+        cusum,
+        score_threshold=_scaled_down_threshold(thresholds.score_threshold, hysteresis_scale),
+        ema_threshold=_scaled_down_threshold(thresholds.ema_z_threshold, hysteresis_scale),
+        cusum_threshold=_scaled_down_threshold(thresholds.cusum_threshold, hysteresis_scale),
+        gate_mode=gate_mode,
+    )
+    start_i = int(np.clip(reference_end_idx, 0, len(entry_cond)))
+    return _detect_onsets_stateful(
+        entry_cond,
+        sustain_cond,
+        timestamps,
+        start_i=start_i,
+        min_run_points=min_run_points,
+        cooldown_hours=cooldown_hours,
+        rearm_window_minutes=rearm_window_minutes,
+    )
 
 
 def detect_causal_onsets_masked(
@@ -265,6 +356,8 @@ def detect_causal_onsets_masked(
     min_run_points: int,
     cooldown_hours: float,
     gate_mode: str = "relaxed",
+    rearm_window_minutes: float = 60.0,
+    hysteresis_scale: float = 0.60,
 ) -> List[pd.Timestamp]:
     x = np.asarray(scores, dtype=np.float32)
     ref_mask = np.asarray(reference_mask, dtype=bool)
@@ -275,42 +368,36 @@ def detect_causal_onsets_masked(
     z_ema = diagnostics["ema_z"]
     cusum = diagnostics["cusum"]
 
-    score_cond = x >= thresholds.score_threshold
-    ema_cond = z_ema >= thresholds.ema_z_threshold
-    cusum_cond = cusum >= thresholds.cusum_threshold
-
-    if gate_mode == "strict":
-        cond = score_cond & ema_cond & cusum_cond
-    elif gate_mode == "score_ema":
-        cond = score_cond & ema_cond
-    else:
-        cond = score_cond & (ema_cond | cusum_cond)
-
-    cond &= valid_mask
-
-    starts: List[pd.Timestamp] = []
-    cooldown = pd.Timedelta(hours=float(cooldown_hours))
-    run_start = None
-    run_len = 0
+    entry_cond = _build_gate_condition(
+        x,
+        z_ema,
+        cusum,
+        score_threshold=thresholds.score_threshold,
+        ema_threshold=thresholds.ema_z_threshold,
+        cusum_threshold=thresholds.cusum_threshold,
+        gate_mode=gate_mode,
+    ) & valid_mask
+    sustain_cond = _build_gate_condition(
+        x,
+        z_ema,
+        cusum,
+        score_threshold=_scaled_down_threshold(thresholds.score_threshold, hysteresis_scale),
+        ema_threshold=_scaled_down_threshold(thresholds.ema_z_threshold, hysteresis_scale),
+        cusum_threshold=_scaled_down_threshold(thresholds.cusum_threshold, hysteresis_scale),
+        gate_mode=gate_mode,
+    ) & valid_mask
 
     ref_indices = np.flatnonzero(ref_mask)
     start_i = int(ref_indices[-1] + 1) if len(ref_indices) else 0
-    for i in range(start_i, len(cond)):
-        if cond[i]:
-            if run_start is None:
-                run_start = i
-                run_len = 1
-            else:
-                run_len += 1
-            if run_len == min_run_points:
-                ts = pd.Timestamp(timestamps[run_start])
-                if not starts or ts - starts[-1] >= cooldown:
-                    starts.append(ts)
-        else:
-            run_start = None
-            run_len = 0
-
-    return starts
+    return _detect_onsets_stateful(
+        entry_cond,
+        sustain_cond,
+        timestamps,
+        start_i=start_i,
+        min_run_points=min_run_points,
+        cooldown_hours=cooldown_hours,
+        rearm_window_minutes=rearm_window_minutes,
+    )
 
 
 def robust_scale_for_fusion(scores: np.ndarray, reference_end_idx: int) -> np.ndarray:

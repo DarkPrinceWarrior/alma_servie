@@ -70,14 +70,17 @@ DEFAULT_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
     "min_run_points": 3,
     "cooldown_hours": 12.0,
+    "rearm_window_minutes": 60.0,
     "ema_alpha": 0.08,
     "gate_mode": "score_ema",
+    "hysteresis_scale": 0.60,
 }
 
 ONSET_TUNE_GRID = {
     "target_far_per_day": [0.10, 0.25, 0.50],
     "min_run_points": [3, 4, 6],
     "cooldown_hours": [8.0, 12.0, 24.0],
+    "rearm_window_minutes": [30.0, 60.0, 120.0],
     "ema_alpha": [0.04, 0.08, 0.12],
     "gate_mode": ["score_ema", "relaxed", "strict"],
 }
@@ -89,21 +92,21 @@ ANOMALY_RUNTIME_CONFIG = {
         "paano_patch_short": 32,
         "paano_patch_long": 64,
         "max_far_per_day": 0.25,
-        "max_starts_per_interval": 3.0,
+        "max_starts_per_interval": 2.0,
     },
     "pritok": {
         "prepare_patch_size": 96,
         "paano_patch_short": 48,
         "paano_patch_long": 96,
         "max_far_per_day": 0.25,
-        "max_starts_per_interval": 10.0,
+        "max_starts_per_interval": 6.0,
     },
     "salt": {
         "prepare_patch_size": 96,
         "paano_patch_short": 48,
         "paano_patch_long": 96,
         "max_far_per_day": 0.40,
-        "max_starts_per_interval": 20.0,
+        "max_starts_per_interval": 10.0,
     },
 }
 LOCAL_DEFAULT_PRIORITY = {
@@ -150,12 +153,13 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
     return (
         float(summary.get("hit_count", 0)),
-        float(feasible_far + feasible_starts),
-        -far_over,
+        float(feasible_starts),
+        float(feasible_far),
         -starts_over,
-        -p90_ratio,
-        -far,
+        -far_over,
         -starts,
+        -far,
+        -p90_ratio,
         -p90_abs_delay,
         float(priority),
     )
@@ -360,6 +364,7 @@ def _detect_starts_for_run(
     run: PreparedDetectorRun,
     cfg: dict[str, Any],
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp]]:
+    cfg = {**DEFAULT_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
     thresholds, diagnostics = calibrate_causal_thresholds_from_reference_mask(
         scores=score,
@@ -378,7 +383,9 @@ def _detect_starts_for_run(
         onset_mask=run.prepared.onset_allowed_mask,
         min_run_points=int(cfg["min_run_points"]),
         cooldown_hours=float(cfg["cooldown_hours"]),
+        rearm_window_minutes=float(cfg["rearm_window_minutes"]),
         gate_mode=str(cfg["gate_mode"]),
+        hysteresis_scale=float(cfg["hysteresis_scale"]),
     )
     return score, thresholds, starts
 
@@ -389,22 +396,24 @@ def _candidate_configs(detector_key: str) -> list[dict[str, Any]]:
     for target_far_per_day in ONSET_TUNE_GRID["target_far_per_day"]:
         for min_run_points in ONSET_TUNE_GRID["min_run_points"]:
             for cooldown_hours in ONSET_TUNE_GRID["cooldown_hours"]:
-                for ema_alpha in ONSET_TUNE_GRID["ema_alpha"]:
-                    for gate_mode in ONSET_TUNE_GRID["gate_mode"]:
-                        for fusion_weight_short in weight_grid:
-                            cfg = DEFAULT_ONSET_CONFIG.copy()
-                            cfg.update(
-                                {
-                                    "target_far_per_day": float(target_far_per_day),
-                                    "min_run_points": int(min_run_points),
-                                    "cooldown_hours": float(cooldown_hours),
-                                    "ema_alpha": float(ema_alpha),
-                                    "gate_mode": str(gate_mode),
-                                }
-                            )
-                            if fusion_weight_short is not None:
-                                cfg["fusion_weight_short"] = float(fusion_weight_short)
-                            candidates.append(cfg)
+                for rearm_window_minutes in ONSET_TUNE_GRID["rearm_window_minutes"]:
+                    for ema_alpha in ONSET_TUNE_GRID["ema_alpha"]:
+                        for gate_mode in ONSET_TUNE_GRID["gate_mode"]:
+                            for fusion_weight_short in weight_grid:
+                                cfg = DEFAULT_ONSET_CONFIG.copy()
+                                cfg.update(
+                                    {
+                                        "target_far_per_day": float(target_far_per_day),
+                                        "min_run_points": int(min_run_points),
+                                        "cooldown_hours": float(cooldown_hours),
+                                        "rearm_window_minutes": float(rearm_window_minutes),
+                                        "ema_alpha": float(ema_alpha),
+                                        "gate_mode": str(gate_mode),
+                                    }
+                                )
+                                if fusion_weight_short is not None:
+                                    cfg["fusion_weight_short"] = float(fusion_weight_short)
+                                candidates.append(cfg)
     return candidates
 
 
@@ -424,13 +433,14 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     priority = float(LOCAL_DEFAULT_PRIORITY.get(detector_key, 0))
     return (
         hits * 1_000_000_000.0
-        + (feasible_far + feasible_starts) * 1_000_000.0
+        + feasible_starts * 10_000_000.0
+        + feasible_far * 1_000_000.0
+        - starts_over * 1_000_000.0
         - far_over * 100_000.0
-        - starts_over * 10_000.0
-        - p90_ratio * 100.0
-        - far * 10.0
-        - starts
-        - p90_abs_delay * 0.01
+        - starts * 1_000.0
+        - far * 100.0
+        - p90_ratio * 10.0
+        - p90_abs_delay * 0.1
         + priority * 1e-3
     )
 
@@ -447,6 +457,9 @@ def _suggest_optuna_config(trial: Any, detector_key: str) -> dict[str, Any]:
             ),
             "cooldown_hours": float(
                 trial.suggest_categorical("cooldown_hours", ONSET_TUNE_GRID["cooldown_hours"])
+            ),
+            "rearm_window_minutes": float(
+                trial.suggest_categorical("rearm_window_minutes", ONSET_TUNE_GRID["rearm_window_minutes"])
             ),
             "ema_alpha": float(trial.suggest_categorical("ema_alpha", ONSET_TUNE_GRID["ema_alpha"])),
             "gate_mode": str(trial.suggest_categorical("gate_mode", ONSET_TUNE_GRID["gate_mode"])),
@@ -536,6 +549,7 @@ def _tune_config_with_optuna(
                 f"FAR/day={summary['false_alarms_per_day']:.3f}, "
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
+                f"rearm={cfg['rearm_window_minutes']:.0f}m, "
                 f"ema={cfg['ema_alpha']:.2f}"
                 + (
                     f", w={cfg['fusion_weight_short']:.2f}"
@@ -599,6 +613,7 @@ def _tune_config_with_grid(
                 f"FAR/day={summary['false_alarms_per_day']:.3f}, "
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
+                f"rearm={cfg['rearm_window_minutes']:.0f}m, "
                 f"ema={cfg['ema_alpha']:.2f}"
                 + (
                     f", w={cfg['fusion_weight_short']:.2f}"
@@ -634,9 +649,9 @@ def _load_or_build_config(
     if cfg_path.exists() and not retune:
         payload = load_json(cfg_path)
         if isinstance(payload, dict) and "config" in payload:
-            return payload["config"]
+            return {**DEFAULT_ONSET_CONFIG, **payload["config"]}
         if payload:
-            return payload
+            return {**DEFAULT_ONSET_CONFIG, **payload}
 
     cfg, tuning_summary = _tune_config(
         spec.anomaly_key,
@@ -950,7 +965,7 @@ def run_single_well(
         run = detector_runs[well_id]
 
     cfg_payload = load_json(config_path(spec, detector_key))
-    cfg = cfg_payload.get("config", cfg_payload) if cfg_payload else DEFAULT_ONSET_CONFIG.copy()
+    cfg = {**DEFAULT_ONSET_CONFIG, **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
     if detector_key == "paano_feat" and "fusion_weight_short" not in cfg:
         cfg["fusion_weight_short"] = 0.60
 
