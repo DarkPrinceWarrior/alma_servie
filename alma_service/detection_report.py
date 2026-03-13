@@ -34,7 +34,16 @@ COLOR_THEMES = {
     "pritok": {"accent": "#c2410c", "soft": "#fff7ed", "soft_alt": "#fffbf5"},
     "salt": {"accent": "#0f766e", "soft": "#f0fdfa", "soft_alt": "#f8fffd"},
 }
-SPLIT_LABELS = {"train": "Train", "test": "Test", "all": "All"}
+SPLIT_LABELS = {"train": "Обучающие скважины", "test": "Тестовые скважины", "all": "Все скважины"}
+SPLIT_SHORT_LABELS = {"train": "Обучение", "test": "Тест", "all": "Все"}
+STATUS_LABELS = {"Detected": "Обнаружено", "Not found": "Не обнаружено"}
+DETECTOR_LABELS = {
+    "pca_spe": "PCA/SPE",
+    "fused": "Комбинированный детектор",
+    "lof": "LOF",
+    "iforest": "Isolation Forest",
+    "paano_feat": "PaAno + признаки",
+}
 
 
 def _pick_existing_source(spec, source_path: str | None) -> Path:
@@ -138,6 +147,14 @@ def _format_float(value: Any, digits: int = 2, suffix: str = "") -> str:
     if not np.isfinite(numeric):
         return "—"
     return f"{numeric:.{digits}f}{suffix}"
+
+
+def _detector_label(detector_key: str) -> str:
+    return DETECTOR_LABELS.get(detector_key, detector_key)
+
+
+def _status_label(status: Any) -> str:
+    return STATUS_LABELS.get(str(status), str(status))
 
 
 def _pick_plot_columns(well_df: pd.DataFrame) -> list[str]:
@@ -260,8 +277,7 @@ def _create_plot_html(
         plot_bgcolor="#ffffff",
         title={
             "text": (
-                f"Скважина {result_row['well_id']} | интервал {int(result_row['interval_idx'])} "
-                f"| split={result_row['split']}"
+                f"Скважина {result_row['well_id']} | интервал {int(result_row['interval_idx'])}"
             ),
             "x": 0.01,
         },
@@ -345,12 +361,11 @@ def generate_report(
             <section class="card">
               <h3>{SPLIT_LABELS[split_name]}</h3>
               <div class="metrics">
-                <span><b>Hit</b> {f"{split_payload.get('hit_count', 0)}/{split_payload.get('interval_count', 0)}"}</span>
-                <span><b>Hit rate</b> {_format_float(100.0 * float(split_payload.get('hit_rate', 0.0)), 1, '%')}</span>
-                <span><b>P90 delay ratio</b> {_format_float(split_payload.get('p90_delay_ratio'), 3)}</span>
-                <span><b>P90 |delay|</b> {_format_float(split_payload.get('p90_abs_delay_hours'), 1, ' h')}</span>
-                <span><b>FAR/day</b> {_format_float(split_payload.get('false_alarms_per_day'), 3)}</span>
-                <span><b>Starts/interval</b> {_format_float(split_payload.get('avg_starts_per_interval'), 2)}</span>
+                <span><b>Интервалы:</b> {escape(str(split_payload.get('interval_count', 0)))}</span>
+                <span><b>Найдено:</b> {f"{split_payload.get('hit_count', 0)}/{split_payload.get('interval_count', 0)}"}</span>
+                <span><b>Доля найденных:</b> {_format_float(100.0 * float(split_payload.get('hit_rate', 0.0)), 1, '%')}</span>
+                <span><b>P90 задержка:</b> {_format_float(split_payload.get('p90_abs_delay_hours'), 1, ' ч')}</span>
+                <span><b>Ложные срабатывания в сутки:</b> {_format_float(split_payload.get('false_alarms_per_day'), 3)}</span>
               </div>
             </section>
             """
@@ -367,27 +382,25 @@ def generate_report(
             scores_df=scores_by_well.get(well_id),
             include_plotlyjs=(idx == 0),
         )
-        detail_text = escape(str(result_row.get("detail", "—")))
+        status_text = _status_label(result_row["status"])
+        split_text = SPLIT_SHORT_LABELS.get(str(result_row["split"]), str(result_row["split"]))
         sections.append(
             f"""
             <article class="interval-card">
               <header>
                 <div>
-                  <h3>{escape(well_id)} / interval {int(result_row['interval_idx'])}</h3>
-                  <p class="meta">split={escape(str(result_row['split']))} | status={escape(str(result_row['status']))}</p>
+                  <h3>Скважина {escape(well_id)} / интервал {int(result_row['interval_idx'])}</h3>
+                  <p class="meta">{escape(split_text)} | {escape(status_text)}</p>
                 </div>
-                <div class="pill {'ok' if result_row['status'] == 'Detected' else 'miss'}">{escape(str(result_row['status']))}</div>
+                <div class="pill {'ok' if result_row['status'] == 'Detected' else 'miss'}">{escape(status_text)}</div>
               </header>
               <div class="interval-meta">
-                <span><b>Actual start:</b> {_format_dt(result_row['actual_start'])}</span>
-                <span><b>Actual end:</b> {_format_dt(result_row['actual_end'])}</span>
-                <span><b>Detected:</b> {_format_dt(result_row['detected_time'])}</span>
-                <span><b>Delay:</b> {_format_float(result_row.get('delay_hours'), 2, ' h')}</span>
-                <span><b>Channels:</b> {escape(str(result_row.get('n_channels', '—')))}</span>
-                <span><b>Features:</b> {escape(str(result_row.get('n_features', '—')))}</span>
-                <span><b>Pred starts:</b> {escape(str(result_row.get('n_predicted_starts', '—')))}</span>
+                <span><b>Фактическое начало:</b> {_format_dt(result_row['actual_start'])}</span>
+                <span><b>Фактическое окончание:</b> {_format_dt(result_row['actual_end'])}</span>
+                <span><b>Время обнаружения:</b> {_format_dt(result_row['detected_time'])}</span>
+                <span><b>Задержка:</b> {_format_float(result_row.get('delay_hours'), 2, ' ч')}</span>
               </div>
-              <pre>{detail_text}</pre>
+              <p class="note">Зелёная линия показывает начало интервала аномалии, красная зона показывает её длительность, фиолетовая пунктирная линия показывает момент обнаружения.</p>
               <div class="plot-wrap">{plot_html}</div>
             </article>
             """
@@ -398,7 +411,7 @@ def generate_report(
     <html lang="ru">
       <head>
         <meta charset="utf-8">
-        <title>{escape(spec.display_name)} report [{escape(detector_key)}]</title>
+        <title>{escape(spec.display_name)}: отчёт по детекции</title>
         <style>
           :root {{
             --accent: {theme['accent']};
@@ -462,6 +475,11 @@ def generate_report(
             margin: 14px 0 16px;
             color: var(--muted);
           }}
+          .note {{
+            margin: 0 0 12px;
+            color: var(--muted);
+            font-size: 13px;
+          }}
           .pill {{
             border-radius: 999px;
             padding: 8px 12px;
@@ -485,21 +503,12 @@ def generate_report(
             border-radius: 14px;
             overflow: hidden;
           }}
-          pre {{
-            white-space: pre-wrap;
-            word-break: break-word;
-            padding: 12px 14px;
-            background: rgba(16, 24, 40, 0.04);
-            border-radius: 12px;
-            color: var(--muted);
-            font-size: 12px;
-          }}
         </style>
       </head>
       <body>
         <main class="page">
           <h1>{escape(spec.display_name)}</h1>
-          <p class="subtitle">Detector: <b>{escape(detector_key)}</b> | source: {escape(str(source.name))}</p>
+          <p class="subtitle">Итоговый отчёт по аномалиям. Используемый детектор: <b>{escape(_detector_label(detector_key))}</b>.</p>
           <div class="cards">
             {''.join(cards)}
           </div>
