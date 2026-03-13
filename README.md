@@ -7,7 +7,7 @@
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
 - `scripts/datasets/` — сборка Parquet-датасетов и интервалов из исходных Excel-файлов.
-- `scripts/detection/` — новый unified detector stack (`paano_feat`, `pca_spe`, `lof`, `iforest`, `fused`, `tranad_global`) и legacy PaAno-обёртки.
+- `scripts/detection/` — новый unified detector stack (`paano_feat`, `pca_spe`, `lof`, `iforest`, `fused`) и legacy PaAno-обёртки.
 - `scripts/reports/` — HTML-отчёты по результатам blind-детекции и legacy feature-importance отчёты.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
@@ -61,9 +61,9 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 Новый основной CLI:
 
 ```bash
-python scripts/detection/detect_negermet.py --detector fused
-python scripts/detection/detect_pritok.py --detector fused
-python scripts/detection/detect_salt.py --detector fused
+python scripts/detection/detect_negermet.py --detector pca_spe
+python scripts/detection/detect_pritok.py --detector pca_spe
+python scripts/detection/detect_salt.py --detector pca_spe
 ```
 
 Доступные детекторы:
@@ -73,7 +73,6 @@ python scripts/detection/detect_salt.py --detector fused
 - `lof` — Local Outlier Factor
 - `iforest` — Isolation Forest
 - `fused` — weighted fusion локальных детекторов
-- `tranad_global` — глобальный transformer benchmark по train-скважинам
 
 Legacy baseline сохранён отдельно:
 
@@ -92,7 +91,6 @@ python scripts/detection/detect_salt_paano.py
 - `db/*_<detector>_predicted_starts.parquet`
 - `db/*_<detector>_config.json`
 - `db/*_<detector>_tuning.json`
-- `models/*_tranad_global.pt` для глобального benchmark-моделя
 
 Примечания:
 
@@ -124,8 +122,8 @@ python scripts/reports/generate_negermet_paano_report.py --detector pca_spe
 ```bash
 python scripts/evaluation/evaluate_onset_metrics.py \
   --anomaly salt \
-  --detector fused \
-  --name salt_fused
+  --detector pca_spe \
+  --name salt_pca_spe
 ```
 
 Метрики теперь единые для всех детекторов:
@@ -149,4 +147,4 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 - HTML-отчёты теперь интерактивные: Plotly-графики поддерживают zoom/pan и читают те же Parquet/JSON, которые пишет детектор, поэтому summary в HTML, `results.parquet` и `summary.json` синхронизированы.
 - `db/*_anomaly_database_*.parquet` является единственным raw-источником для detection/report.
 - Интервалы, результаты, per-point scores и predicted starts тоже хранятся в `Parquet`; `JSON` остаётся только для summary/config/tuning.
-- `torch.compile` включён для кастомного `TranAD`-benchmark и для локального `PatchEncoder` в blind PaAno stack, с безопасным fallback если backend не поддерживается.
+- `torch.compile` включён только для локального `PatchEncoder` в blind PaAno stack, с безопасным fallback если backend не поддерживается.

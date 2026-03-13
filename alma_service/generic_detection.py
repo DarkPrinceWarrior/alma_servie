@@ -30,7 +30,6 @@ from alma_service.detection_artifacts import (
     config_path,
     legacy_summary_path,
     load_json,
-    model_path,
     normalize_detector_key,
     predicted_starts_path,
     report_path,
@@ -47,7 +46,6 @@ from alma_service.generic_detectors import (
     LOFDetector,
     PCASPEDetector,
     PaAnoFeatureDetector,
-    TranADGlobalDetector,
     set_seed,
 )
 from alma_service.onset_detection import (
@@ -66,7 +64,7 @@ from alma_service.paano_defaults import (
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
 from alma_service.tabular_io import read_table, write_table
 
-DEFAULT_ONSET_CONFIG = {
+BASE_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
     "min_run_points": 3,
     "cooldown_hours": 12.0,
@@ -76,13 +74,67 @@ DEFAULT_ONSET_CONFIG = {
     "hysteresis_scale": 0.60,
 }
 
-ONSET_TUNE_GRID = {
+BASE_ONSET_TUNE_GRID = {
     "target_far_per_day": [0.10, 0.25, 0.50],
     "min_run_points": [3, 4, 6],
     "cooldown_hours": [8.0, 12.0, 24.0],
     "rearm_window_minutes": [30.0, 60.0, 120.0],
     "ema_alpha": [0.04, 0.08, 0.12],
     "gate_mode": ["score_ema", "relaxed", "strict"],
+}
+
+ANOMALY_ONSET_PROFILES = {
+    "negermet": {
+        "defaults": {
+            "target_far_per_day": 0.25,
+            "min_run_points": 2,
+            "cooldown_hours": 8.0,
+            "rearm_window_minutes": 30.0,
+            "gate_mode": "relaxed",
+            "hysteresis_scale": 0.55,
+        },
+        "grid": {
+            "target_far_per_day": [0.10, 0.25, 0.50],
+            "min_run_points": [2, 3, 4],
+            "cooldown_hours": [6.0, 8.0, 12.0],
+            "rearm_window_minutes": [20.0, 30.0, 60.0],
+            "gate_mode": ["relaxed", "score_ema", "strict"],
+        },
+    },
+    "pritok": {
+        "defaults": {
+            "target_far_per_day": 0.50,
+            "min_run_points": 2,
+            "cooldown_hours": 6.0,
+            "rearm_window_minutes": 20.0,
+            "gate_mode": "relaxed",
+            "hysteresis_scale": 0.50,
+        },
+        "grid": {
+            "target_far_per_day": [0.25, 0.50, 0.75],
+            "min_run_points": [2, 3, 4],
+            "cooldown_hours": [4.0, 6.0, 8.0],
+            "rearm_window_minutes": [15.0, 20.0, 30.0],
+            "gate_mode": ["relaxed", "score_ema"],
+        },
+    },
+    "salt": {
+        "defaults": {
+            "target_far_per_day": 0.25,
+            "min_run_points": 3,
+            "cooldown_hours": 12.0,
+            "rearm_window_minutes": 120.0,
+            "gate_mode": "score_ema",
+            "hysteresis_scale": 0.65,
+        },
+        "grid": {
+            "target_far_per_day": [0.10, 0.25, 0.50],
+            "min_run_points": [3, 4, 6],
+            "cooldown_hours": [8.0, 12.0, 24.0],
+            "rearm_window_minutes": [60.0, 120.0, 180.0],
+            "gate_mode": ["score_ema", "relaxed"],
+        },
+    },
 }
 
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
@@ -126,6 +178,23 @@ class PreparedDetectorRun:
 
 def _runtime_config(anomaly_key: str) -> dict[str, float | int]:
     return ANOMALY_RUNTIME_CONFIG.get(anomaly_key, ANOMALY_RUNTIME_CONFIG["salt"])
+
+
+def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]:
+    cfg = BASE_ONSET_CONFIG.copy()
+    profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
+    cfg.update(profile.get("defaults", {}))
+    if detector_key == "paano_feat":
+        cfg["fusion_weight_short"] = 0.60
+    return cfg
+
+
+def _onset_tune_grid(anomaly_key: str) -> dict[str, list[Any]]:
+    grid = {key: list(values) for key, values in BASE_ONSET_TUNE_GRID.items()}
+    profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
+    for key, values in profile.get("grid", {}).items():
+        grid[key] = list(values)
+    return grid
 
 
 def _safe_metric(value: Any, large: float = 1e9) -> float:
@@ -265,22 +334,6 @@ def _prepare_all_wells(
     return prepared_runs
 
 
-def _align_features(prepared_runs: dict[str, PreparedWellData]) -> tuple[list[str], dict[str, np.ndarray]]:
-    all_columns = sorted({column for prepared in prepared_runs.values() for column in prepared.feature_columns})
-    lookup = {column: idx for idx, column in enumerate(all_columns)}
-    aligned: dict[str, np.ndarray] = {}
-    for well_id, prepared in prepared_runs.items():
-        matrix = np.zeros((len(prepared.feature_matrix), len(all_columns)), dtype=np.float32)
-        local_lookup = {column: idx for idx, column in enumerate(prepared.feature_columns)}
-        for column, global_idx in lookup.items():
-            local_idx = local_lookup.get(column)
-            if local_idx is None:
-                continue
-            matrix[:, global_idx] = prepared.feature_matrix[:, local_idx]
-        aligned[well_id] = matrix
-    return all_columns, aligned
-
-
 def _build_local_runs(
     anomaly_key: str,
     detector_key: str,
@@ -294,55 +347,6 @@ def _build_local_runs(
         X_ref = prepared.feature_matrix[prepared.reference_mask]
         detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
         score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
-        out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
-    return out
-
-
-def _fit_or_load_tranad_global(
-    spec: DetectionSpec,
-    prepared_runs: dict[str, PreparedWellData],
-    aligned_features: dict[str, np.ndarray],
-    device: torch.device,
-    retune: bool,
-    verbose: bool,
-) -> tuple[TranADGlobalDetector, list[str]]:
-    train_wells = [well_id for well_id, prepared in prepared_runs.items() if prepared.split == "train"]
-    detector = TranADGlobalDetector(device=device, verbose=verbose)
-    model_file = ensure_parent(model_path(spec, "tranad_global"))
-    if model_file.exists() and not retune:
-        detector.load(model_file)
-        return detector, train_wells
-
-    train_series = [aligned_features[well_id] for well_id in train_wells]
-    train_masks = [
-        prepared_runs[well_id].reference_mask & prepared_runs[well_id].onset_allowed_mask for well_id in train_wells
-    ]
-    detector.fit_global(train_series, train_masks)
-    detector.save(model_file)
-    if verbose:
-        print(f"Saved TranAD global model to {model_file}")
-    return detector, train_wells
-
-
-def _build_tranad_runs(
-    spec: DetectionSpec,
-    prepared_runs: dict[str, PreparedWellData],
-    device: torch.device,
-    retune: bool,
-    verbose: bool,
-) -> dict[str, PreparedDetectorRun]:
-    _, aligned = _align_features(prepared_runs)
-    detector, _ = _fit_or_load_tranad_global(
-        spec=spec,
-        prepared_runs=prepared_runs,
-        aligned_features=aligned,
-        device=device,
-        retune=retune,
-        verbose=verbose,
-    )
-    out: dict[str, PreparedDetectorRun] = {}
-    for well_id, prepared in prepared_runs.items():
-        score_output = detector.score_stream(aligned[well_id], mask_all=prepared.stability_mask)
         out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
     return out
 
@@ -364,7 +368,7 @@ def _detect_starts_for_run(
     run: PreparedDetectorRun,
     cfg: dict[str, Any],
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp]]:
-    cfg = {**DEFAULT_ONSET_CONFIG, **cfg}
+    cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
     thresholds, diagnostics = calibrate_causal_thresholds_from_reference_mask(
         scores=score,
@@ -390,17 +394,19 @@ def _detect_starts_for_run(
     return score, thresholds, starts
 
 
-def _candidate_configs(detector_key: str) -> list[dict[str, Any]]:
+def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     weight_grid = PAANO_WEIGHT_GRID if detector_key == "paano_feat" else [None]
-    for target_far_per_day in ONSET_TUNE_GRID["target_far_per_day"]:
-        for min_run_points in ONSET_TUNE_GRID["min_run_points"]:
-            for cooldown_hours in ONSET_TUNE_GRID["cooldown_hours"]:
-                for rearm_window_minutes in ONSET_TUNE_GRID["rearm_window_minutes"]:
-                    for ema_alpha in ONSET_TUNE_GRID["ema_alpha"]:
-                        for gate_mode in ONSET_TUNE_GRID["gate_mode"]:
+    grid = _onset_tune_grid(anomaly_key)
+    default_cfg = _default_onset_config(anomaly_key, detector_key)
+    for target_far_per_day in grid["target_far_per_day"]:
+        for min_run_points in grid["min_run_points"]:
+            for cooldown_hours in grid["cooldown_hours"]:
+                for rearm_window_minutes in grid["rearm_window_minutes"]:
+                    for ema_alpha in grid["ema_alpha"]:
+                        for gate_mode in grid["gate_mode"]:
                             for fusion_weight_short in weight_grid:
-                                cfg = DEFAULT_ONSET_CONFIG.copy()
+                                cfg = default_cfg.copy()
                                 cfg.update(
                                     {
                                         "target_far_per_day": float(target_far_per_day),
@@ -445,24 +451,25 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     )
 
 
-def _suggest_optuna_config(trial: Any, detector_key: str) -> dict[str, Any]:
-    cfg = DEFAULT_ONSET_CONFIG.copy()
+def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
+    grid = _onset_tune_grid(anomaly_key)
+    cfg = _default_onset_config(anomaly_key, detector_key)
     cfg.update(
         {
             "target_far_per_day": float(
-                trial.suggest_categorical("target_far_per_day", ONSET_TUNE_GRID["target_far_per_day"])
+                trial.suggest_categorical("target_far_per_day", grid["target_far_per_day"])
             ),
             "min_run_points": int(
-                trial.suggest_categorical("min_run_points", ONSET_TUNE_GRID["min_run_points"])
+                trial.suggest_categorical("min_run_points", grid["min_run_points"])
             ),
             "cooldown_hours": float(
-                trial.suggest_categorical("cooldown_hours", ONSET_TUNE_GRID["cooldown_hours"])
+                trial.suggest_categorical("cooldown_hours", grid["cooldown_hours"])
             ),
             "rearm_window_minutes": float(
-                trial.suggest_categorical("rearm_window_minutes", ONSET_TUNE_GRID["rearm_window_minutes"])
+                trial.suggest_categorical("rearm_window_minutes", grid["rearm_window_minutes"])
             ),
-            "ema_alpha": float(trial.suggest_categorical("ema_alpha", ONSET_TUNE_GRID["ema_alpha"])),
-            "gate_mode": str(trial.suggest_categorical("gate_mode", ONSET_TUNE_GRID["gate_mode"])),
+            "ema_alpha": float(trial.suggest_categorical("ema_alpha", grid["ema_alpha"])),
+            "gate_mode": str(trial.suggest_categorical("gate_mode", grid["gate_mode"])),
         }
     )
     if detector_key == "paano_feat":
@@ -488,7 +495,7 @@ def _tune_config_with_optuna(
     n_trials = 48 if detector_key == "paano_feat" else 36
 
     def objective(trial: Any) -> float:
-        cfg = _suggest_optuna_config(trial, detector_key)
+        cfg = _suggest_optuna_config(trial, anomaly_key, detector_key)
         predicted: dict[str, list[pd.Timestamp]] = {}
         for well_id, run in train_runs.items():
             _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
@@ -568,7 +575,7 @@ def _tune_config_with_grid(
     verbose: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not train_runs:
-        cfg = DEFAULT_ONSET_CONFIG.copy()
+        cfg = _default_onset_config(anomaly_key, detector_key)
         if detector_key == "paano_feat":
             cfg["fusion_weight_short"] = 0.60
         return cfg, {"message": "No train runs available"}
@@ -577,7 +584,7 @@ def _tune_config_with_grid(
     best_key: tuple[float, ...] | None = None
     leaderboard: list[dict[str, Any]] = []
 
-    for cfg in _candidate_configs(detector_key):
+    for cfg in _candidate_configs(anomaly_key, detector_key):
         predicted: dict[str, list[pd.Timestamp]] = {}
         for well_id, run in train_runs.items():
             _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
@@ -597,7 +604,7 @@ def _tune_config_with_grid(
 
     leaderboard = sorted(leaderboard, key=lambda row: tuple(row["score_key"]), reverse=True)
     if best_cfg is None:
-        best_cfg = DEFAULT_ONSET_CONFIG.copy()
+        best_cfg = _default_onset_config(anomaly_key, detector_key)
     tuning_summary = {
         "best_score_key": list(best_key) if best_key is not None else None,
         "top10": leaderboard[:10],
@@ -649,9 +656,9 @@ def _load_or_build_config(
     if cfg_path.exists() and not retune:
         payload = load_json(cfg_path)
         if isinstance(payload, dict) and "config" in payload:
-            return {**DEFAULT_ONSET_CONFIG, **payload["config"]}
+            return {**_default_onset_config(spec.anomaly_key, detector_key), **payload["config"]}
         if payload:
-            return {**DEFAULT_ONSET_CONFIG, **payload}
+            return {**_default_onset_config(spec.anomaly_key, detector_key), **payload}
 
     cfg, tuning_summary = _tune_config(
         spec.anomaly_key,
@@ -832,16 +839,7 @@ def run_detection(
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
 
-    if detector_key in LOCAL_DETECTOR_KEYS:
-        detector_runs = _build_local_runs(spec.anomaly_key, detector_key, prepared_runs, device=device, verbose=verbose)
-    else:
-        detector_runs = _build_tranad_runs(
-            spec=spec,
-            prepared_runs=prepared_runs,
-            device=device,
-            retune=retune,
-            verbose=verbose,
-        )
+    detector_runs = _build_local_runs(spec.anomaly_key, detector_key, prepared_runs, device=device, verbose=verbose)
 
     train_runs = {well_id: run for well_id, run in detector_runs.items() if run.prepared.split == "train"}
     train_intervals = intervals[intervals["split"].astype(str).str.lower() == "train"].copy()
@@ -947,25 +945,13 @@ def run_single_well(
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if detector_key in LOCAL_DETECTOR_KEYS:
-        detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
-        detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
-        score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
-        run = PreparedDetectorRun(prepared=prepared, score_output=score_output)
-    else:
-        train_df = load_anomaly_data(spec, source_path=source_path)
-        prepared_runs = _prepare_all_wells(spec, train_df, intervals, verbose=False)
-        detector_runs = _build_tranad_runs(
-            spec=spec,
-            prepared_runs=prepared_runs,
-            device=device,
-            retune=retune,
-            verbose=True,
-        )
-        run = detector_runs[well_id]
+    detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
+    detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
+    score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
+    run = PreparedDetectorRun(prepared=prepared, score_output=score_output)
 
     cfg_payload = load_json(config_path(spec, detector_key))
-    cfg = {**DEFAULT_ONSET_CONFIG, **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
+    cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
     if detector_key == "paano_feat" and "fusion_weight_short" not in cfg:
         cfg["fusion_weight_short"] = 0.60
 

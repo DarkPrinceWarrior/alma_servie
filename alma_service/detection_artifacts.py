@@ -13,7 +13,6 @@ DETECTOR_KEYS = (
     "lof",
     "iforest",
     "fused",
-    "tranad_global",
 )
 LOCAL_DETECTOR_KEYS = (
     "paano_feat",
@@ -22,7 +21,7 @@ LOCAL_DETECTOR_KEYS = (
     "iforest",
     "fused",
 )
-DEFAULT_DETECTOR = "fused"
+DEFAULT_DETECTOR = "pca_spe"
 
 
 def normalize_detector_key(detector: str | None) -> str:
