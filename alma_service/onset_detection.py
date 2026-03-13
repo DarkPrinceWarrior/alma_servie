@@ -207,6 +207,7 @@ def _detect_onsets_stateful(
     run_len = 0
     clear_len = 0
     last_start: pd.Timestamp | None = None
+    rearmed_after_clear = False
 
     for i in range(int(np.clip(start_i, 0, len(entry_cond))), len(entry_cond)):
         current_ts = pd.Timestamp(ts[i])
@@ -219,10 +220,15 @@ def _detect_onsets_stateful(
                     run_len += 1
                 if run_len >= int(min_run_points):
                     start_ts = pd.Timestamp(ts[run_start])
-                    if last_start is None or start_ts - last_start >= cooldown:
+                    if (
+                        last_start is None
+                        or rearmed_after_clear
+                        or start_ts - last_start >= cooldown
+                    ):
                         starts.append(start_ts)
                         last_start = start_ts
                     armed = False
+                    rearmed_after_clear = False
                     run_start = None
                     run_len = 0
                     clear_len = 0
@@ -236,9 +242,9 @@ def _detect_onsets_stateful(
         else:
             clear_len += 1
 
-        cooldown_ok = last_start is None or (current_ts - last_start) >= cooldown
-        if clear_len >= clear_points and cooldown_ok:
+        if clear_len >= clear_points:
             armed = True
+            rearmed_after_clear = True
             run_start = None
             run_len = 0
             clear_len = 0

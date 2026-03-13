@@ -159,6 +159,11 @@ def _build_instability_mask(
     base_columns: list[str],
     step_seconds: float,
     profile: dict[str, float | int | str],
+    *,
+    include_step_events: bool = True,
+    include_missing_events: bool = True,
+    include_flatline_events: bool = True,
+    include_start_stop_events: bool = True,
 ) -> tuple[np.ndarray, list[str]]:
     if len(base_columns) == 0:
         return np.ones(len(raw_df), dtype=bool), []
@@ -183,11 +188,11 @@ def _build_instability_mask(
         else:
             positive_delta = abs_delta[abs_delta > EPS]
             step_thr = max(float(np.quantile(positive_delta, 0.90)) * 0.5, EPS) if len(positive_delta) else np.inf
-        if np.isfinite(step_thr):
+        if include_step_events and np.isfinite(step_thr):
             event_mask |= np.abs(delta) > step_thr
 
         missing = raw_series.isna().to_numpy()
-        if missing.any():
+        if include_missing_events and missing.any():
             missing_run = (
                 pd.Series(missing.astype(np.int8))
                 .rolling(window=missing_run_length, min_periods=1)
@@ -202,12 +207,14 @@ def _build_instability_mask(
             if len(positive):
                 low_thr = max(float(np.quantile(positive, 0.10)) * 0.2, EPS)
                 stale = _stale_run_length(filled)
-                event_mask |= (stale >= flatline_steps) & (np.abs(filled) <= low_thr)
+                if include_flatline_events:
+                    event_mask |= (stale >= flatline_steps) & (np.abs(filled) <= low_thr)
                 prev = np.r_[filled[0], filled[:-1]]
                 start_stop = ((np.abs(prev) > low_thr) & (np.abs(filled) <= low_thr)) | (
                     (np.abs(prev) <= low_thr) & (np.abs(filled) > low_thr)
                 )
-                event_mask |= start_stop
+                if include_start_stop_events:
+                    event_mask |= start_stop
 
     unstable = _expand_event_mask(event_mask, back_steps=back_steps, forward_steps=forward_steps)
     return ~unstable, anchors
@@ -456,7 +463,22 @@ def prepare_engineered_well(
         onset_allowed_mask = np.ones(len(wd), dtype=bool)
         onset_allowed_mask[:reference_end_idx] = False
     else:
-        onset_allowed_mask = stability_mask.copy()
+        onset_allowed_mask, _ = _build_instability_mask(
+            raw_df=raw_df,
+            filled_matrix=raw_matrix,
+            base_columns=base_columns,
+            step_seconds=step_seconds,
+            profile={
+                **next(
+                    profile for profile in MASK_PROFILES if str(profile["name"]) == chosen_profile_name
+                ),
+                "back_minutes": 2,
+                "forward_minutes": 5,
+            },
+            include_step_events=False,
+            include_start_stop_events=False,
+        )
+        onset_allowed_mask[:reference_end_idx] = False
 
     feature_mode, feature_windows, slope_windows, include_stale = _feature_mode(
         reference_points=int(reference_mask.sum()),

@@ -120,6 +120,63 @@ class OnsetDetectionStatefulTests(unittest.TestCase):
             starts,
         )
 
+    def test_rearmed_episode_can_emit_inside_cooldown_window(self) -> None:
+        timestamps = pd.date_range("2026-01-01 00:00:00", periods=24, freq="1min").to_numpy()
+        scores = np.array(
+            [
+                0.0,
+                0.0,
+                2.0,
+                2.0,
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                2.0,
+                2.0,
+                2.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            dtype=np.float32,
+        )
+        diagnostics = {
+            "ema_z": scores.copy(),
+            "cusum": np.zeros_like(scores),
+        }
+
+        starts = detect_causal_onsets(
+            scores=scores,
+            timestamps=timestamps,
+            diagnostics=diagnostics,
+            thresholds=self.thresholds,
+            reference_end_idx=1,
+            min_run_points=2,
+            cooldown_hours=24.0,
+            gate_mode="score_ema",
+            rearm_window_minutes=5.0,
+            hysteresis_scale=0.60,
+        )
+
+        self.assertEqual(
+            [
+                pd.Timestamp("2026-01-01 00:02:00"),
+                pd.Timestamp("2026-01-01 00:11:00"),
+            ],
+            starts,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
