@@ -12,4 +12,5 @@ numba
 optuna
 plotly
 polars
+pyarrow
 fastexcel
