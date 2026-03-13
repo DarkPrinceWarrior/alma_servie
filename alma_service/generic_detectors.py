@@ -9,6 +9,10 @@ from typing import Any
 
 import numpy as np
 import torch
+try:
+    import torch._inductor.config as torch_inductor_config
+except Exception:  # pragma: no cover - optional runtime tuning
+    torch_inductor_config = None
 from sklearn.decomposition import PCA
 from sklearn.ensemble import IsolationForest
 from sklearn.neighbors import LocalOutlierFactor
@@ -45,6 +49,17 @@ FUSED_WEIGHTS = {
 }
 ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
 
+try:  # pragma: no branch - simple runtime guard
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
+
+if torch_inductor_config is not None:
+    try:
+        torch_inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+    except Exception:
+        pass
+
 
 def set_seed(seed: int = SEED) -> None:
     random.seed(seed)
@@ -56,7 +71,7 @@ def _maybe_compile_module(module: nn.Module, *, label: str, verbose: bool = Fals
     if not ENABLE_TORCH_COMPILE or not hasattr(torch, "compile"):
         return module
     try:
-        compiled = torch.compile(module, mode="reduce-overhead")
+        compiled = torch.compile(module, mode="reduce-overhead", dynamic=True)
         if verbose:
             print(f"    torch.compile enabled for {label}")
         return compiled

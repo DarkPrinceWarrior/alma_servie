@@ -25,6 +25,10 @@ if str(PAANO_ROOT) not in sys.path:
     sys.path.insert(0, str(PAANO_ROOT))
 
 import torch
+try:
+    import torch._inductor.config as torch_inductor_config
+except Exception:  # pragma: no cover - optional runtime tuning
+    torch_inductor_config = None
 from model import PatchEncoder
 from train import train_model
 from utils.data_preprocess import PatchCreator, preprocess_to_patches
@@ -63,6 +67,17 @@ TOP_K = 3
 MEMORY_BANK_RATIO = 0.1
 ENABLE_TORCH_COMPILE = True
 
+try:  # pragma: no branch - simple runtime guard
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
+
+if torch_inductor_config is not None:
+    try:
+        torch_inductor_config.triton.cudagraph_skip_dynamic_graphs = True
+    except Exception:
+        pass
+
 
 @dataclass
 class BlindScoreRun:
@@ -86,7 +101,7 @@ def _maybe_compile_module(module: torch.nn.Module) -> torch.nn.Module:
     if not ENABLE_TORCH_COMPILE or not hasattr(torch, "compile"):
         return module
     try:
-        return torch.compile(module, mode="reduce-overhead")
+        return torch.compile(module, mode="reduce-overhead", dynamic=True)
     except Exception:  # pragma: no cover - runtime fallback
         return module
 
