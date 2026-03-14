@@ -30,6 +30,7 @@ from alma_service.detection_artifacts import (
     benchmark_summary_path,
     load_json,
     normalize_detector_key,
+    results_path,
 )
 from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
 from alma_service.generic_detectors import (
@@ -283,6 +284,7 @@ def _make_bar_b64(result: dict[str, Any], accent: str, display_name: str, top_n:
 def _make_timeseries_b64(
     result: dict[str, Any],
     intervals_df: pd.DataFrame,
+    detections_df: pd.DataFrame,
     accent: str,
     display_name: str,
     top_n: int = 6,
@@ -297,25 +299,60 @@ def _make_timeseries_b64(
     top_channels = sorted_channels[:top_n]
 
     wi = intervals_df[intervals_df["well_id"] == well_id].sort_values("start_date")
+    wd = detections_df[detections_df["well_id"] == well_id].sort_values("detected_time") if not detections_df.empty else pd.DataFrame()
 
     n_panels = top_n + 1
     fig, axes = plt.subplots(n_panels, 1, figsize=(14, 2.8 * n_panels), sharex=True)
     ts_pd = pd.to_datetime(timestamps)
 
-    # --- Helper to draw anomaly zones on an axis ---
-    def _draw_anomaly_zones(ax):
+    # --- Helper to draw anomaly zones + detection markers on an axis ---
+    def _draw_anomaly_zones(ax, show_labels: bool = False):
+        ymin, ymax = ax.get_ylim()
         for zone_idx, (_, row) in enumerate(wi.iterrows()):
             ax.axvspan(row["start_date"], row["end_date"], color="red", alpha=0.12, zorder=0)
             ax.axvline(row["start_date"], color="#16a34a", linewidth=1.2, linestyle="-",
-                       label="Начало аномалии" if zone_idx == 0 else None)
+                       label="Начало аномалии (факт)" if zone_idx == 0 else None)
             ax.axvline(row["end_date"], color="#dc2626", linewidth=1.2, linestyle="--",
-                       label="Конец аномалии" if zone_idx == 0 else None)
+                       label="Конец аномалии (факт)" if zone_idx == 0 else None)
+            if show_labels:
+                ts_start = pd.Timestamp(row["start_date"])
+                ts_end = pd.Timestamp(row["end_date"])
+                ax.annotate(
+                    f"Факт начало\n{ts_start.strftime('%Y-%m-%d %H:%M')}",
+                    xy=(ts_start, ymax), xytext=(5, -5),
+                    textcoords="offset points", fontsize=6.5, color="#16a34a",
+                    fontweight="bold", va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#16a34a", alpha=0.85),
+                )
+                ax.annotate(
+                    f"Факт конец\n{ts_end.strftime('%Y-%m-%d %H:%M')}",
+                    xy=(ts_end, ymax), xytext=(-5, -5),
+                    textcoords="offset points", fontsize=6.5, color="#dc2626",
+                    fontweight="bold", va="top", ha="right",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#dc2626", alpha=0.85),
+                )
+        # Detection markers
+        if not wd.empty:
+            for det_idx, (_, det_row) in enumerate(wd.iterrows()):
+                if pd.notna(det_row["detected_time"]):
+                    ax.axvline(det_row["detected_time"], color="#7c3aed", linewidth=1.5,
+                               linestyle="-.",
+                               label="Обнаружено алгоритмом" if det_idx == 0 else None)
+                    if show_labels:
+                        ts_det = pd.Timestamp(det_row["detected_time"])
+                        ax.annotate(
+                            f"Обнаружено\n{ts_det.strftime('%Y-%m-%d %H:%M')}",
+                            xy=(ts_det, ymax), xytext=(5, -25),
+                            textcoords="offset points", fontsize=6.5, color="#7c3aed",
+                            fontweight="bold", va="top", ha="left",
+                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#7c3aed", alpha=0.85),
+                        )
 
     # --- Top panel: detector score ---
     ax0 = axes[0]
     ax0.fill_between(ts_pd, 0, result["baseline_scores"], color=accent, alpha=0.20)
     ax0.plot(ts_pd, result["baseline_scores"], color=accent, linewidth=0.6)
-    _draw_anomaly_zones(ax0)
+    _draw_anomaly_zones(ax0, show_labels=True)
     ax0.set_ylabel("Отклонение от\nнормы (все каналы)", fontsize=8)
     ax0.set_title(
         f"Скважина {well_id} — Показания наиболее значимых каналов",
@@ -329,8 +366,13 @@ def _make_timeseries_b64(
     start_line = plt.Line2D([0], [0], color="#16a34a", linewidth=1.2, label="Начало аномалии (факт)")
     end_line = plt.Line2D([0], [0], color="#dc2626", linewidth=1.2, linestyle="--",
                           label="Конец аномалии (факт)")
+    detect_line = plt.Line2D([0], [0], color="#7c3aed", linewidth=1.5, linestyle="-.",
+                             label="Обнаружено алгоритмом")
     score_line = plt.Line2D([0], [0], color=accent, linewidth=1, label="Степень отклонения от нормы")
-    ax0.legend(handles=[score_line, zone_patch, start_line, end_line],
+    legend_handles = [score_line, zone_patch, start_line, end_line]
+    if not wd.empty:
+        legend_handles.append(detect_line)
+    ax0.legend(handles=legend_handles,
                loc="upper right", fontsize=7, framealpha=0.9)
 
     # --- Channel panels ---
@@ -423,6 +465,7 @@ def _build_html(
     detector_key: str,
     all_results: list[dict[str, Any]],
     intervals_df: pd.DataFrame,
+    detections_df: pd.DataFrame,
 ) -> str:
     theme = COLOR_THEMES.get(spec.anomaly_key, COLOR_THEMES["salt"])
     accent = theme["accent"]
@@ -479,6 +522,7 @@ def _build_html(
             <li>🟩 <b>Зелёная вертикальная линия</b> — фактическое начало аномалии</li>
             <li>🟥 <b>Красная пунктирная линия</b> — фактическое окончание аномалии</li>
             <li>🔴 <b>Красная полоса (фон)</b> — весь период аномалии</li>
+            <li>🟣 <b>Фиолетовая штрихпунктирная линия</b> — момент, когда алгоритм обнаружил аномалию</li>
         </ul>
     </div>
 """
@@ -500,14 +544,46 @@ def _build_html(
 """
 
         # Timeseries
-        ts_b64 = _make_timeseries_b64(result, intervals_df, accent, display, top_n=6)
+        ts_b64 = _make_timeseries_b64(result, intervals_df, detections_df, accent, display, top_n=6)
         html += f"""
     <div class="plot-container">
         <img src="data:image/png;base64,{ts_b64}" alt="Показания каналов {wid}">
     </div>
 """
 
-        # Simplified table
+        # Compute delta (mean during anomaly vs mean before anomaly) per raw channel
+        channel_deltas: dict[str, str] = {}
+        raw_columns = result["raw_columns"]
+        raw_data = result["raw_data"]
+        timestamps = result["timestamps"]
+        anomaly_mask = result["anomaly_mask"]
+        # Pre-anomaly mask: everything before first anomaly start
+        well_ivls = intervals_df[intervals_df["well_id"] == wid].sort_values("start_date")
+        if not well_ivls.empty:
+            first_anomaly_start = pd.Timestamp(well_ivls.iloc[0]["start_date"])
+            pre_mask = pd.to_datetime(timestamps) < first_anomaly_start
+        else:
+            pre_mask = ~anomaly_mask
+
+        for ch_name in raw_columns:
+            col_idx = raw_columns.index(ch_name)
+            values = raw_data[:, col_idx]
+            pre_values = values[pre_mask]
+            anom_values = values[anomaly_mask]
+            pre_finite = pre_values[np.isfinite(pre_values)]
+            anom_finite = anom_values[np.isfinite(anom_values)]
+            if len(pre_finite) > 0 and len(anom_finite) > 0:
+                mean_pre = float(np.mean(pre_finite))
+                mean_anom = float(np.mean(anom_finite))
+                if abs(mean_pre) > 1e-6:
+                    delta_pct = ((mean_anom - mean_pre) / abs(mean_pre)) * 100.0
+                    channel_deltas[ch_name] = f"{delta_pct:+.1f}%"
+                else:
+                    channel_deltas[ch_name] = "—"
+            else:
+                channel_deltas[ch_name] = "—"
+
+        # Table
         sorted_imp = sorted(imp.items(), key=lambda x: x[1]["pct_drop"], reverse=True)
         html += """
     <table>
@@ -516,6 +592,7 @@ def _build_html(
             <th>Канал (датчик)</th>
             <th>Влияние на обнаружение, %</th>
             <th>Роль</th>
+            <th>Дельта (изменение показаний в аномалии)</th>
         </tr>
 """
         for rank, (ch, v) in enumerate(sorted_imp, 1):
@@ -523,18 +600,22 @@ def _build_html(
             if pct > 0.5:
                 cls = "positive"
                 role = "Помогает обнаружить"
+                delta_str = channel_deltas.get(ch, "—")
             elif pct < -0.5:
                 cls = "negative"
                 role = "Вносит помехи"
+                delta_str = "—"
             else:
                 cls = "negative"
                 role = "Не влияет"
+                delta_str = "—"
             html += f"""
         <tr>
             <td>{rank}</td>
             <td>{ch}</td>
             <td class="{cls}">{pct:+.1f}%</td>
             <td>{role}</td>
+            <td>{delta_str}</td>
         </tr>
 """
         html += "    </table>\n"
@@ -631,7 +712,19 @@ def generate_feature_importance_report(
     if not all_results:
         raise RuntimeError("Ни одна скважина не прошла анализ")
 
-    html = _build_html(spec, detector_key, all_results, intervals)
+    # Load detection results (one detection per interval, same as main report)
+    res_path = results_path(spec, detector_key)
+    if res_path.exists():
+        detections = read_table(res_path, dtypes={"well_id": str}, parse_dates=["detected_time"])
+        detections["well_id"] = detections["well_id"].astype(str).str.strip().str.lower()
+        # Keep only detected intervals
+        detections = detections.dropna(subset=["detected_time"])
+        print(f"Загружены результаты детекции: {len(detections)} обнаружений из {res_path.name}")
+    else:
+        detections = pd.DataFrame(columns=["well_id", "detected_time"])
+        print(f"Файл результатов детекции не найден: {res_path.name}")
+
+    html = _build_html(spec, detector_key, all_results, intervals, detections)
 
     if output_path is None:
         output_path = str(
