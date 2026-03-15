@@ -273,7 +273,8 @@ def _make_timeseries_b64(
     detections_df: pd.DataFrame,
     accent: str,
     display_name: str,
-    top_n: int = 6,
+    top_positive: int = 3,
+    top_negative: int = 4,
 ) -> str:
     well_id = result["well_id"]
     timestamps = result["timestamps"]
@@ -281,8 +282,17 @@ def _make_timeseries_b64(
     raw_columns = result["raw_columns"]
     raw_data = result["raw_data"]
 
-    sorted_channels = sorted(imp.keys(), key=lambda k: abs(imp[k]["pct_drop"]), reverse=True)
-    top_channels = sorted_channels[:top_n]
+    # Top positive channels (help detect anomaly) + top negative (add noise)
+    positive = sorted(
+        [k for k in imp if imp[k]["pct_drop"] > 0],
+        key=lambda k: imp[k]["pct_drop"], reverse=True,
+    )[:top_positive]
+    negative = sorted(
+        [k for k in imp if imp[k]["pct_drop"] <= 0],
+        key=lambda k: imp[k]["pct_drop"],
+    )[:top_negative]
+    top_channels = positive + negative
+    top_n = len(top_channels)
 
     wi = intervals_df[intervals_df["well_id"] == well_id].sort_values("start_date")
     wd = detections_df[detections_df["well_id"] == well_id].sort_values("detected_time") if not detections_df.empty else pd.DataFrame()
@@ -530,7 +540,7 @@ def _build_html(
 """
 
         # Timeseries
-        ts_b64 = _make_timeseries_b64(result, intervals_df, detections_df, accent, display, top_n=6)
+        ts_b64 = _make_timeseries_b64(result, intervals_df, detections_df, accent, display, top_positive=3, top_negative=4)
         html += f"""
     <div class="plot-container">
         <img src="data:image/png;base64,{ts_b64}" alt="Показания каналов {wid}">
