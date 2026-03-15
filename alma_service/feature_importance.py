@@ -35,11 +35,8 @@ from alma_service.detection_artifacts import (
 from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
 from alma_service.generic_detectors import (
     BaseDetector,
-    IsolationForestDetector,
-    LOFDetector,
     PCASPEDetector,
     PaAnoFeatureDetector,
-    FusedDetector,
     set_seed,
 )
 from alma_service.paano_defaults import (
@@ -74,9 +71,6 @@ ANOMALY_RUNTIME_CONFIG = {
 
 DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
-    "fused": "Комбинированный",
-    "lof": "LOF",
-    "iforest": "Isolation Forest",
     "paano_feat": "PaAno + признаки",
 }
 
@@ -128,14 +122,6 @@ def _build_detector(anomaly_key: str, detector_key: str, device, verbose: bool =
                                     patch_long=int(cfg["paano_patch_long"]), verbose=verbose)
     if detector_key == "pca_spe":
         return PCASPEDetector()
-    if detector_key == "lof":
-        return LOFDetector()
-    if detector_key == "iforest":
-        return IsolationForestDetector()
-    if detector_key == "fused":
-        return FusedDetector(device=device, verbose=verbose,
-                             patch_short=int(cfg["paano_patch_short"]),
-                             patch_long=int(cfg["paano_patch_long"]))
     raise ValueError(f"Unknown detector: {detector_key}")
 
 

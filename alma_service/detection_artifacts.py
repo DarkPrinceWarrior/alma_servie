@@ -10,18 +10,12 @@ from alma_service.paths import DB_DIR, MODELS_DIR, REPORTS_DIR, RESULTS_DIR
 DETECTOR_KEYS = (
     "paano_feat",
     "pca_spe",
-    "lof",
-    "iforest",
-    "fused",
 )
 LOCAL_DETECTOR_KEYS = (
     "paano_feat",
     "pca_spe",
-    "lof",
-    "iforest",
-    "fused",
 )
-DEFAULT_DETECTOR = "pca_spe"
+DEFAULT_DETECTOR = "paano_feat"
 
 
 def normalize_detector_key(detector: str | None) -> str:

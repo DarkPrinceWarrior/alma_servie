@@ -14,11 +14,10 @@ try:
 except Exception:  # pragma: no cover - optional runtime tuning
     torch_inductor_config = None
 from sklearn.decomposition import PCA
-from sklearn.ensemble import IsolationForest
-from sklearn.neighbors import LocalOutlierFactor
+
 from torch import nn
 
-from alma_service.onset_detection import robust_scale_for_fusion_mask, robust_stats, robust_z
+from alma_service.onset_detection import robust_stats, robust_z
 from alma_service.paano_defaults import LONG_PATCH, SHORT_PATCH
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -40,12 +39,7 @@ PAANO_BATCH_SIZE = 256
 PAANO_LR = 1e-4
 PAANO_TOP_K = 3
 PAANO_MEMORY_BANK_RATIO = 0.1
-FUSED_WEIGHTS = {
-    "paano_feat": 0.50,
-    "pca_spe": 0.20,
-    "lof": 0.15,
-    "iforest": 0.15,
-}
+
 ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
 
 try:  # pragma: no branch - simple runtime guard
@@ -279,118 +273,4 @@ class PCASPEDetector(BaseDetector):
         )
 
 
-class LOFDetector(BaseDetector):
-    detector_key = "lof"
 
-    def __init__(self, n_neighbors: int = 35) -> None:
-        self.n_neighbors = int(n_neighbors)
-        self.model_: LocalOutlierFactor | None = None
-
-    def fit_reference(self, X_ref: np.ndarray, mask_ref: np.ndarray | None = None) -> "LOFDetector":
-        X = _safe_reference_subset(X_ref, min_rows=32)
-        n_neighbors = max(5, min(self.n_neighbors, len(X) - 1))
-        self.model_ = LocalOutlierFactor(n_neighbors=n_neighbors, novelty=True)
-        self.model_.fit(X)
-        self.n_neighbors = n_neighbors
-        return self
-
-    def score_stream(self, X_all: np.ndarray, mask_all: np.ndarray | None = None) -> DetectorScoreOutput:
-        if self.model_ is None:
-            raise RuntimeError("Detector is not fitted.")
-        X = _ensure_2d_float32(X_all)
-        raw = -self.model_.score_samples(X)
-        return DetectorScoreOutput(
-            primary=np.asarray(raw, dtype=np.float32),
-            components={"lof_raw": np.asarray(raw, dtype=np.float32)},
-            detail={"n_neighbors": self.n_neighbors},
-        )
-
-
-class IsolationForestDetector(BaseDetector):
-    detector_key = "iforest"
-
-    def __init__(self, n_estimators: int = 200, max_samples: str | int = "auto") -> None:
-        self.n_estimators = int(n_estimators)
-        self.max_samples = max_samples
-        self.model_: IsolationForest | None = None
-
-    def fit_reference(self, X_ref: np.ndarray, mask_ref: np.ndarray | None = None) -> "IsolationForestDetector":
-        X = _safe_reference_subset(X_ref, min_rows=32)
-        self.model_ = IsolationForest(
-            n_estimators=self.n_estimators,
-            max_samples=self.max_samples,
-            contamination="auto",
-            random_state=SEED,
-            n_jobs=-1,
-        )
-        self.model_.fit(X)
-        return self
-
-    def score_stream(self, X_all: np.ndarray, mask_all: np.ndarray | None = None) -> DetectorScoreOutput:
-        if self.model_ is None:
-            raise RuntimeError("Detector is not fitted.")
-        X = _ensure_2d_float32(X_all)
-        raw = -self.model_.score_samples(X)
-        return DetectorScoreOutput(
-            primary=np.asarray(raw, dtype=np.float32),
-            components={"iforest_raw": np.asarray(raw, dtype=np.float32)},
-            detail={"n_estimators": self.n_estimators},
-        )
-
-
-class FusedDetector(BaseDetector):
-    detector_key = "fused"
-
-    def __init__(
-        self,
-        device: torch.device,
-        verbose: bool = False,
-        weights: dict[str, float] | None = None,
-        patch_short: int = SHORT_PATCH,
-        patch_long: int = LONG_PATCH,
-    ) -> None:
-        self.device = device
-        self.verbose = verbose
-        self.weights = dict(FUSED_WEIGHTS if weights is None else weights)
-        self.reference_mask_: np.ndarray | None = None
-        self.detectors_: dict[str, BaseDetector] = {
-            "paano_feat": PaAnoFeatureDetector(
-                device=device,
-                patch_short=patch_short,
-                patch_long=patch_long,
-                verbose=verbose,
-            ),
-            "pca_spe": PCASPEDetector(),
-            "lof": LOFDetector(),
-            "iforest": IsolationForestDetector(),
-        }
-
-    def fit_reference(self, X_ref: np.ndarray, mask_ref: np.ndarray | None = None) -> "FusedDetector":
-        self.reference_mask_ = None if mask_ref is None else np.asarray(mask_ref, dtype=bool)
-        for detector in self.detectors_.values():
-            detector.fit_reference(X_ref, mask_ref=mask_ref)
-        return self
-
-    def score_stream(self, X_all: np.ndarray, mask_all: np.ndarray | None = None) -> DetectorScoreOutput:
-        reference_mask = self.reference_mask_
-        if reference_mask is None:
-            reference_mask = np.ones(len(X_all), dtype=bool)
-        component_outputs: dict[str, DetectorScoreOutput] = {}
-        for key, detector in self.detectors_.items():
-            component_outputs[key] = detector.score_stream(X_all, mask_all=mask_all)
-
-        fused = np.zeros(len(X_all), dtype=np.float32)
-        components: dict[str, np.ndarray] = {}
-        for key, output in component_outputs.items():
-            z = robust_scale_for_fusion_mask(output.primary, reference_mask)
-            fused += float(self.weights.get(key, 0.0)) * z
-            components[f"{key}_score"] = output.primary.astype(np.float32)
-            components[f"{key}_score_z"] = z.astype(np.float32)
-            for name, values in output.components.items():
-                components[name] = values.astype(np.float32)
-
-        return DetectorScoreOutput(
-            primary=fused.astype(np.float32),
-            components=components,
-            detail={"weights": self.weights},
-        )

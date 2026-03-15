@@ -41,11 +41,8 @@ from alma_service.detection_artifacts import (
 from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
 from alma_service.generic_detectors import (
     DetectorScoreOutput,
-    FusedDetector,
-    IsolationForestDetector,
-    LOFDetector,
-    PCASPEDetector,
     PaAnoFeatureDetector,
+    PCASPEDetector,
     set_seed,
 )
 from alma_service.onset_detection import (
@@ -123,11 +120,8 @@ ANOMALY_RUNTIME_CONFIG = {
     },
 }
 LOCAL_DEFAULT_PRIORITY = {
-    "fused": 5,
     "pca_spe": 4,
     "paano_feat": 3,
-    "lof": 2,
-    "iforest": 1,
 }
 
 
@@ -244,17 +238,6 @@ def _build_detector(anomaly_key: str, detector_key: str, device: torch.device, v
         )
     if detector_key == "pca_spe":
         return PCASPEDetector()
-    if detector_key == "lof":
-        return LOFDetector()
-    if detector_key == "iforest":
-        return IsolationForestDetector()
-    if detector_key == "fused":
-        return FusedDetector(
-            device=device,
-            verbose=verbose,
-            patch_short=int(runtime_cfg["paano_patch_short"]),
-            patch_long=int(runtime_cfg["paano_patch_long"]),
-        )
     raise ValueError(f"Unsupported local detector: {detector_key}")
 
 

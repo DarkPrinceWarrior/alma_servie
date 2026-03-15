@@ -39,9 +39,6 @@ SPLIT_SHORT_LABELS = {"train": "Обучение", "test": "Тест", "all": "�
 STATUS_LABELS = {"Detected": "Обнаружено", "Not found": "Не обнаружено"}
 DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
-    "fused": "Комбинированный детектор",
-    "lof": "LOF",
-    "iforest": "Isolation Forest",
     "paano_feat": "PaAno + признаки",
 }
 
@@ -525,7 +522,7 @@ def generate_report(
 
 def run_cli(default_anomaly: str) -> None:
     parser = argparse.ArgumentParser(description="Generate HTML report for anomaly detection results.")
-    parser.add_argument("--detector", default=None, help="Detector key, default is benchmark-selected or fused.")
+    parser.add_argument("--detector", default=None, help="Detector key, default is benchmark-selected or paano_feat.")
     parser.add_argument("--output", default=None, help="Output HTML path")
     parser.add_argument("--source", default=None, help="Override source dataset path")
     parser.add_argument("--results", default=None, help="Override results Parquet path")
