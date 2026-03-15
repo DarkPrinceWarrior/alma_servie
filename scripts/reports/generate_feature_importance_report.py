@@ -4,7 +4,7 @@ Generate feature importance report for any anomaly type and any detector.
 Usage:
     python scripts/reports/generate_feature_importance_report.py --anomaly salt
     python scripts/reports/generate_feature_importance_report.py --anomaly negermet --detector pca_spe
-    python scripts/reports/generate_feature_importance_report.py --anomaly pritok --detector fused --output /tmp/report.html
+    python scripts/reports/generate_feature_importance_report.py --anomaly pritok --detector pca_spe --output /tmp/report.html
 """
 from __future__ import annotations
 

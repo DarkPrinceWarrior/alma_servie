@@ -7,7 +7,7 @@
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
 - `scripts/datasets/` — сборка Parquet-датасетов и интервалов из исходных Excel-файлов.
-- `scripts/detection/` — новый unified detector stack (`paano_feat`, `pca_spe`, `lof`, `iforest`, `fused`) и legacy PaAno-обёртки.
+- `scripts/detection/` — unified detector stack (`paano_feat`, `pca_spe`) и legacy PaAno-обёртки.
 - `scripts/reports/` — HTML-отчёты по результатам blind-детекции и legacy feature-importance отчёты.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
@@ -70,9 +70,6 @@ python scripts/detection/detect_salt.py --detector pca_spe
 
 - `paano_feat` — engineered-features версия локального PaAno
 - `pca_spe` — PCA + Hotelling T²/SPE
-- `lof` — Local Outlier Factor
-- `iforest` — Isolation Forest
-- `fused` — weighted fusion локальных детекторов
 
 Legacy baseline сохранён отдельно:
 

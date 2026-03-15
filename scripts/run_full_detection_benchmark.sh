@@ -13,9 +13,9 @@ LOG_FILE="$LOG_DIR/full_detection_benchmark_${RUN_TS}.log"
 mkdir -p "$LOG_DIR"
 
 ANOMALIES=(negermet pritok salt)
-NEGERMET_DETECTORS=(${NEGERMET_DETECTORS:-pca_spe lof fused})
-PRITOK_DETECTORS=(${PRITOK_DETECTORS:-pca_spe fused})
-SALT_DETECTORS=(${SALT_DETECTORS:-pca_spe fused})
+NEGERMET_DETECTORS=(${NEGERMET_DETECTORS:-paano_feat pca_spe})
+PRITOK_DETECTORS=(${PRITOK_DETECTORS:-paano_feat pca_spe})
+SALT_DETECTORS=(${SALT_DETECTORS:-paano_feat pca_spe})
 
 run_cmd() {
   echo
@@ -27,13 +27,13 @@ selected_detector() {
   local anomaly="$1"
   local summary="artifacts/results/${anomaly}_benchmark_summary.json"
   if [[ ! -f "$summary" ]]; then
-    echo "pca_spe"
+    echo "paano_feat"
     return
   fi
   "$PYTHON_BIN" - <<'PY' "$summary"
 import json, sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
-print(payload.get("selected_default_detector", "pca_spe"))
+print(payload.get("selected_default_detector", "paano_feat"))
 PY
 }
 

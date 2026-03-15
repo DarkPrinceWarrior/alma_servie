@@ -24,7 +24,7 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
 
         self.assertGreater(
             _operational_score_key("pritok", "pca_spe", calmer),
-            _operational_score_key("pritok", "fused", spamy),
+            _operational_score_key("pritok", "pca_spe", spamy),
         )
 
     def test_operational_score_key_strongly_prefers_lower_start_count(self) -> None:
@@ -45,7 +45,7 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
 
         self.assertGreater(
             _operational_score_key("salt", "pca_spe", calmer),
-            _operational_score_key("salt", "fused", noisy),
+            _operational_score_key("salt", "pca_spe", noisy),
         )
 
     def test_operational_score_key_penalizes_extreme_delay_before_small_far_gain(self) -> None:
@@ -66,7 +66,7 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
 
         self.assertGreater(
             _operational_score_key("salt", "pca_spe", on_time),
-            _operational_score_key("salt", "fused", too_late),
+            _operational_score_key("salt", "pca_spe", too_late),
         )
 
 
