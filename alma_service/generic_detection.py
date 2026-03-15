@@ -260,6 +260,15 @@ def _prepare_all_wells(
     prepared_runs: dict[str, PreparedWellData] = {}
     for well_id in sorted(df["well_id"].unique()):
         well_df = df[df["well_id"] == well_id].copy()
+
+        # Truncate at end of first anomaly interval
+        well_intervals = intervals[intervals["well_id"] == well_id].sort_values("start_date")
+        if not well_intervals.empty:
+            first_end = pd.Timestamp(well_intervals.iloc[0]["end_date"])
+            if pd.notna(first_end):
+                well_df = well_df[well_df["timestamp"] <= first_end]
+                if verbose:
+                    print(f"  Truncated {well_id} at first anomaly end: {first_end}")
         prepared = prepare_engineered_well(
             anomaly_key=spec.anomaly_key,
             well_id=well_id,
@@ -812,6 +821,14 @@ def run_detection(
     intervals = load_intervals(spec, required=True)
     if df.empty or intervals.empty:
         raise RuntimeError("Empty data or intervals for detection.")
+
+    # Keep only first interval per well (data is truncated at first anomaly end)
+    intervals = (
+        intervals
+        .sort_values(["well_id", "start_date", "interval_idx"])
+        .groupby("well_id", as_index=False)
+        .first()
+    )
 
     prepared_runs = _prepare_all_wells(
         spec, df, intervals, verbose=verbose,

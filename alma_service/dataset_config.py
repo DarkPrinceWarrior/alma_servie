@@ -26,7 +26,6 @@ PRITOK_WELL_FILES = {
 }
 
 SALT_WELL_FILES = {
-    "3244г": SALT_RAW_DIR / "3244г_Кустовое_Соли.xlsx",
     "3245": SALT_RAW_DIR / "3245_Кустовое_Соли.xlsx",
     "149г": SALT_RAW_DIR / "149г_ВИК_Соли.xlsx",
     "3269": SALT_RAW_DIR / "3269_Кустовое_Соли.xlsx",
@@ -38,7 +37,7 @@ SALT_WELL_FILES = {
 
 TEST_WELLS = {
     "negermet": {"3509г"},
-    "pritok": {"902", "129л"},
+    "pritok": {"902"},
     "salt": {"2991г"},
 }
 
