@@ -9,6 +9,7 @@ import polars as pl
 from alma_service.onset_detection import choose_reference_end_index, infer_step_seconds
 from alma_service.well_features import get_well_feature_columns
 from alma_service.well_preprocess import forward_fill_causal
+from alma_service.zone_labels import label_zones, make_clean_normal_mask, make_onset_allowed_from_zones
 
 PRESSURE_COL = "Давление на приеме насоса кгс/см²"
 FREQ_COL = "Выходная частота"
@@ -327,6 +328,7 @@ def prepare_engineered_well(
     reference_min_days: float,
     min_reference_coverage: float,
     min_total_coverage: float,
+    anomaly_intervals: pd.DataFrame | None = None,
 ) -> PreparedWellData | None:
     patch_size = int(ANOMALY_PATCH_SIZE.get(anomaly_key, patch_size))
     wd = well_df.sort_values("timestamp").reset_index(drop=True)
@@ -459,6 +461,24 @@ def prepare_engineered_well(
     if int(reference_mask.sum()) < min_ref_points:
         return None
 
+    # --- 4-zone data curation ---
+    zone_labels_arr = None
+    if anomaly_intervals is not None and not anomaly_intervals.empty:
+        zone_labels_arr = label_zones(
+            timestamps=timestamps,
+            anomaly_intervals=anomaly_intervals,
+            patch_size=patch_size,
+            anomaly_key=anomaly_key,
+        )
+        clean_mask = make_clean_normal_mask(zone_labels_arr)
+        # Tighten reference_mask: only clean_normal within reference window
+        reference_mask = reference_mask & clean_mask
+        if int(reference_mask.sum()) < min_ref_points:
+            # Fallback: use original reference_mask without zone filtering
+            reference_mask = np.zeros(len(wd), dtype=bool)
+            reference_mask[:reference_end_idx] = True
+            reference_mask &= stability_mask if stability_mask is not None else True
+
     if chosen_masked_fraction > float(mask_target["hard_max_fraction"]):
         onset_allowed_mask = np.ones(len(wd), dtype=bool)
         onset_allowed_mask[:reference_end_idx] = False
@@ -481,6 +501,11 @@ def prepare_engineered_well(
         onset_allowed_mask[:reference_end_idx] = False
     else:
         onset_allowed_mask = stability_mask.copy()
+
+    # Refine onset_allowed_mask with zone-aware suppression
+    if zone_labels_arr is not None:
+        zone_onset = make_onset_allowed_from_zones(zone_labels_arr, reference_end_idx)
+        onset_allowed_mask = onset_allowed_mask & zone_onset
 
     feature_mode, feature_windows, slope_windows, include_stale = _feature_mode(
         reference_points=int(reference_mask.sum()),
@@ -537,6 +562,7 @@ def prepare_engineered_well(
         "mask_profile": chosen_profile_name,
         "feature_mode": feature_mode,
         "patch_size": patch_size,
+        "zone_aware": zone_labels_arr is not None,
     }
     return PreparedWellData(
         well_id=well_id,

@@ -40,6 +40,7 @@ STATUS_LABELS = {"Detected": "Обнаружено", "Not found": "Не обна
 DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
     "paano_feat": "PaAno + признаки",
+    "paano_shared": "PaAno Shared Encoder",
 }
 
 

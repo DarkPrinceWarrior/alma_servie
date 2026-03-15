@@ -43,6 +43,7 @@ from alma_service.generic_detectors import (
     DetectorScoreOutput,
     PaAnoFeatureDetector,
     PCASPEDetector,
+    SharedPaAnoDetector,
     set_seed,
 )
 from alma_service.onset_detection import (
@@ -122,6 +123,7 @@ ANOMALY_RUNTIME_CONFIG = {
 LOCAL_DEFAULT_PRIORITY = {
     "pca_spe": 4,
     "paano_feat": 3,
+    "paano_shared": 5,
 }
 
 
@@ -139,7 +141,7 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     cfg = BASE_ONSET_CONFIG.copy()
     profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
     cfg.update(profile.get("defaults", {}))
-    if detector_key == "paano_feat":
+    if detector_key in ("paano_feat", "paano_shared"):
         cfg["fusion_weight_short"] = 0.60
     return cfg
 
@@ -246,6 +248,7 @@ def _prepare_all_wells(
     df: pd.DataFrame,
     intervals: pd.DataFrame,
     verbose: bool,
+    zone_aware: bool = False,
 ) -> dict[str, PreparedWellData]:
     runtime_cfg = _runtime_config(spec.anomaly_key)
     split_map = (
@@ -268,6 +271,9 @@ def _prepare_all_wells(
             reference_min_days=REFERENCE_MIN_DAYS,
             min_reference_coverage=MIN_REFERENCE_COVERAGE,
             min_total_coverage=MIN_TOTAL_COVERAGE,
+            anomaly_intervals=(
+                intervals[intervals["well_id"] == well_id] if zone_aware else None
+            ),
         )
         if prepared is None:
             if verbose:
@@ -289,13 +295,31 @@ def _build_local_runs(
     prepared_runs: dict[str, PreparedWellData],
     device: torch.device,
     verbose: bool,
+    shared_state: Any = None,
 ) -> dict[str, PreparedDetectorRun]:
     out: dict[str, PreparedDetectorRun] = {}
     for well_id, prepared in prepared_runs.items():
-        detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
-        X_ref = prepared.feature_matrix[prepared.reference_mask]
-        detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
-        score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
+        if detector_key == "paano_shared" and shared_state is not None:
+            from alma_service.shared_encoder import select_shared_columns
+            # Project well features to shared channel set
+            X_proj = select_shared_columns(
+                prepared.feature_columns,
+                prepared.feature_matrix,
+                shared_state.shared_channels,
+            )
+            detector = SharedPaAnoDetector(
+                shared_state=shared_state,
+                device=device,
+                verbose=verbose,
+            )
+            X_ref_proj = X_proj[prepared.reference_mask]
+            detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
+            score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
+        else:
+            detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
+            X_ref = prepared.feature_matrix[prepared.reference_mask]
+            detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
+            score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
         out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
     return out
 
@@ -789,11 +813,41 @@ def run_detection(
     if df.empty or intervals.empty:
         raise RuntimeError("Empty data or intervals for detection.")
 
-    prepared_runs = _prepare_all_wells(spec, df, intervals, verbose=verbose)
+    prepared_runs = _prepare_all_wells(
+        spec, df, intervals, verbose=verbose,
+        zone_aware=(detector_key == "paano_shared"),
+    )
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
 
-    detector_runs = _build_local_runs(spec.anomaly_key, detector_key, prepared_runs, device=device, verbose=verbose)
+    # Train shared encoder for paano_shared detector
+    shared_state = None
+    if detector_key == "paano_shared":
+        from alma_service.shared_encoder import train_shared_encoder
+        runtime_cfg = _runtime_config(anomaly_key)
+        try:
+            shared_state = train_shared_encoder(
+                prepared_wells=prepared_runs,
+                patch_short=int(runtime_cfg.get("paano_patch_short", 48)),
+                patch_long=int(runtime_cfg.get("paano_patch_long", 96)),
+                anomaly_key=anomaly_key,
+                device=device,
+                verbose=verbose,
+            )
+            if verbose:
+                print(
+                    f"  Shared encoder trained: {shared_state.detail}"
+                )
+        except ValueError as exc:
+            print(f"  WARNING: Cannot train shared encoder: {exc}")
+            print(f"  Falling back to paano_feat detector")
+            detector_key = "paano_feat"
+
+    detector_runs = _build_local_runs(
+        spec.anomaly_key, detector_key, prepared_runs,
+        device=device, verbose=verbose,
+        shared_state=shared_state,
+    )
 
     train_runs = {well_id: run for well_id, run in detector_runs.items() if run.prepared.split == "train"}
     train_intervals = intervals[intervals["split"].astype(str).str.lower() == "train"].copy()
@@ -899,6 +953,9 @@ def run_single_well(
         return
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if detector_key == "paano_shared":
+        print("  Note: paano_shared requires all train wells; falling back to paano_feat for single-well mode.")
+        detector_key = "paano_feat"
     detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
     detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
     score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)

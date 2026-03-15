@@ -9,10 +9,12 @@ from alma_service.paths import DB_DIR, MODELS_DIR, REPORTS_DIR, RESULTS_DIR
 
 DETECTOR_KEYS = (
     "paano_feat",
+    "paano_shared",
     "pca_spe",
 )
 LOCAL_DETECTOR_KEYS = (
     "paano_feat",
+    "paano_shared",
     "pca_spe",
 )
 DEFAULT_DETECTOR = "paano_feat"
