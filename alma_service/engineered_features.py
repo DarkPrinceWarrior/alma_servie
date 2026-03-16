@@ -56,11 +56,8 @@ MASK_PROFILES = (
         "missing_run_length": 8,
     },
 )
-ANOMALY_PATCH_SIZE = {
-    "negermet": 64,
-    "pritok": 96,
-    "salt": 96,
-}
+from alma_service.paano_defaults import PATCH_SIZES
+ANOMALY_PATCH_SIZE = {key: sizes[1] for key, sizes in PATCH_SIZES.items()}
 MASK_TARGETS = {
     "negermet": {"target_masked_fraction": 0.65, "hard_max_fraction": 0.85},
     "pritok": {"target_masked_fraction": 0.75, "hard_max_fraction": 0.90},

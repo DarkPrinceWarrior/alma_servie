@@ -75,6 +75,7 @@ def collect_shared_train_pool(
     prepared_wells: dict[str, Any],
     *,
     only_split: str = "train",
+    enable_reduction: bool = True,
 ) -> tuple[np.ndarray, list[str], list[str]]:
     """Collect clean-normal feature matrices from train wells.
 
@@ -137,7 +138,77 @@ def collect_shared_train_pool(
 
     pool = np.concatenate(pool_parts, axis=0).astype(np.float32)
     train_well_ids = sorted(train_wells.keys())
+
+    # Feature reduction: remove low-variance and highly correlated features
+    if enable_reduction:
+        original_count = len(shared_channels)
+        pool, shared_channels = reduce_features(pool, shared_channels)
+        if len(shared_channels) < original_count:
+            print(
+                f"    Feature reduction: {original_count} → {len(shared_channels)} channels "
+                f"(removed {original_count - len(shared_channels)})"
+            )
+
     return pool, shared_channels, train_well_ids
+
+
+def reduce_features(
+    pool: np.ndarray,
+    channels: list[str],
+    min_variance_ratio: float = 0.001,
+    max_correlation: float = 0.95,
+) -> tuple[np.ndarray, list[str]]:
+    """Remove low-variance and highly correlated features from the pool.
+
+    Parameters
+    ----------
+    pool : np.ndarray
+        Training pool matrix (N, C).
+    channels : list[str]
+        Feature channel names corresponding to columns.
+    min_variance_ratio : float
+        Drop features whose variance is below this fraction of the max variance.
+    max_correlation : float
+        When two features have |correlation| above this, drop the later one.
+
+    Returns
+    -------
+    pool : np.ndarray
+        Filtered pool with fewer columns.
+    channels : list[str]
+        Surviving channel names.
+    """
+    if pool.shape[1] <= 1:
+        return pool, channels
+
+    # 1. Remove near-zero variance features
+    variances = np.var(pool, axis=0)
+    max_var = np.max(variances) if np.max(variances) > 0 else 1.0
+    keep_mask = variances >= min_variance_ratio * max_var
+
+    pool = pool[:, keep_mask]
+    channels = [ch for ch, k in zip(channels, keep_mask) if k]
+
+    if pool.shape[1] <= 1:
+        return pool, channels
+
+    # 2. Remove highly correlated features (keep first of each pair)
+    corr = np.corrcoef(pool.T)
+    corr = np.nan_to_num(corr, nan=0.0)
+    drop: set[int] = set()
+    for i in range(len(corr)):
+        if i in drop:
+            continue
+        for j in range(i + 1, len(corr)):
+            if j not in drop and abs(corr[i, j]) > max_correlation:
+                drop.add(j)
+
+    if drop:
+        keep = [i for i in range(len(channels)) if i not in drop]
+        pool = pool[:, keep]
+        channels = [channels[i] for i in keep]
+
+    return pool, channels
 
 
 def _train_encoder_single_scale(
@@ -206,7 +277,10 @@ def train_shared_encoder(
     """
     _set_seed()
 
-    pool, shared_channels, train_well_ids = collect_shared_train_pool(prepared_wells)
+    pool, shared_channels, train_well_ids = collect_shared_train_pool(
+        prepared_wells,
+        enable_reduction=anomaly_key != "negermet",
+    )
 
     if verbose:
         print(

@@ -52,6 +52,7 @@ from alma_service.onset_detection import (
 )
 from alma_service.paano_defaults import (
     LONG_PATCH,
+    PATCH_SIZES,
     SHORT_PATCH,
     MIN_REFERENCE_COVERAGE,
     MIN_TOTAL_COVERAGE,
@@ -97,25 +98,25 @@ ANOMALY_ONSET_PROFILES = {
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
 ANOMALY_RUNTIME_CONFIG = {
     "negermet": {
-        "prepare_patch_size": LONG_PATCH,
-        "paano_patch_short": SHORT_PATCH,
-        "paano_patch_long": LONG_PATCH,
+        "prepare_patch_size": PATCH_SIZES["negermet"][1],
+        "paano_patch_short": PATCH_SIZES["negermet"][0],
+        "paano_patch_long": PATCH_SIZES["negermet"][1],
         "max_far_per_day": 0.25,
         "max_starts_per_interval": 2.0,
         "max_p90_delay_ratio": 0.25,
     },
     "pritok": {
-        "prepare_patch_size": LONG_PATCH,
-        "paano_patch_short": SHORT_PATCH,
-        "paano_patch_long": LONG_PATCH,
+        "prepare_patch_size": PATCH_SIZES["pritok"][1],
+        "paano_patch_short": PATCH_SIZES["pritok"][0],
+        "paano_patch_long": PATCH_SIZES["pritok"][1],
         "max_far_per_day": 0.25,
         "max_starts_per_interval": 6.0,
         "max_p90_delay_ratio": 0.40,
     },
     "salt": {
-        "prepare_patch_size": LONG_PATCH,
-        "paano_patch_short": SHORT_PATCH,
-        "paano_patch_long": LONG_PATCH,
+        "prepare_patch_size": PATCH_SIZES["salt"][1],
+        "paano_patch_short": PATCH_SIZES["salt"][0],
+        "paano_patch_long": PATCH_SIZES["salt"][1],
         "max_far_per_day": 0.40,
         "max_starts_per_interval": 10.0,
         "max_p90_delay_ratio": 0.20,

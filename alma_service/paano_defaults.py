@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+# Per-anomaly patch sizes: (short, long) adapted to anomaly speed and grid
+PATCH_SIZES = {
+    "negermet": (64, 128),   # fast anomaly (hours), 2min grid
+    "pritok":   (96, 192),   # slow anomaly (weeks), 10min grid
+    "salt":     (64, 128),   # slow anomaly (weeks), 15min grid
+}
+# Fallback defaults
 SHORT_PATCH = 64
 LONG_PATCH = 128
 
