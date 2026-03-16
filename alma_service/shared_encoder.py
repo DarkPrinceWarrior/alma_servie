@@ -157,8 +157,14 @@ def reduce_features(
     channels: list[str],
     min_variance_ratio: float = 0.001,
     max_correlation: float = 0.95,
+    max_channels: int | None = 80,
+    stability_window: int = 32,
 ) -> tuple[np.ndarray, list[str]]:
-    """Remove low-variance and highly correlated features from the pool.
+    """Two-stage feature reduction for the shared encoder pool.
+
+    Stage 1: Remove low-variance and highly correlated features.
+    Stage 2: Score remaining features by reference stability and keep
+             the top ``max_channels`` most stable ones.
 
     Parameters
     ----------
@@ -170,6 +176,11 @@ def reduce_features(
         Drop features whose variance is below this fraction of the max variance.
     max_correlation : float
         When two features have |correlation| above this, drop the later one.
+    max_channels : int or None
+        Maximum number of channels to keep after stability scoring.
+        ``None`` disables the stability cap.
+    stability_window : int
+        Rolling window size for computing residual smoothness.
 
     Returns
     -------
@@ -181,7 +192,8 @@ def reduce_features(
     if pool.shape[1] <= 1:
         return pool, channels
 
-    # 1. Remove near-zero variance features
+    # --- Stage 1: variance + correlation filter ---
+    # 1a. Remove near-zero variance features
     variances = np.var(pool, axis=0)
     max_var = np.max(variances) if np.max(variances) > 0 else 1.0
     keep_mask = variances >= min_variance_ratio * max_var
@@ -192,7 +204,7 @@ def reduce_features(
     if pool.shape[1] <= 1:
         return pool, channels
 
-    # 2. Remove highly correlated features (keep first of each pair)
+    # 1b. Remove highly correlated features (keep first of each pair)
     corr = np.corrcoef(pool.T)
     corr = np.nan_to_num(corr, nan=0.0)
     drop: set[int] = set()
@@ -208,7 +220,42 @@ def reduce_features(
         pool = pool[:, keep]
         channels = [channels[i] for i in keep]
 
+    # --- Stage 2: reference stability scoring ---
+    if max_channels is not None and pool.shape[1] > max_channels:
+        scores = _score_channel_stability(pool, window=stability_window)
+        # Lower score = more stable = better for PaAno
+        top_indices = np.argsort(scores)[:max_channels]
+        top_indices = np.sort(top_indices)  # preserve original order
+        pool = pool[:, top_indices]
+        channels = [channels[i] for i in top_indices]
+
     return pool, channels
+
+
+def _score_channel_stability(pool: np.ndarray, window: int = 32) -> np.ndarray:
+    """Score each channel by how noisy it is relative to its trend.
+
+    Lower score = smoother/more predictable on reference data = more useful
+    for PaAno encoder training.
+
+    The metric is ``residual_std / global_std`` — the fraction of total
+    variance that is *not* captured by a simple moving average.
+    """
+    n_channels = pool.shape[1]
+    scores = np.full(n_channels, np.inf, dtype=np.float64)
+    kernel = np.ones(window, dtype=np.float64) / window
+
+    for i in range(n_channels):
+        col = pool[:, i].astype(np.float64)
+        global_std = np.std(col)
+        if global_std < 1e-8:
+            continue  # constant channel → inf score → will be trimmed
+        smoothed = np.convolve(col, kernel, mode="valid")
+        residual = col[window - 1 :] - smoothed
+        residual_std = np.std(residual)
+        scores[i] = residual_std / (global_std + 1e-12)
+
+    return scores
 
 
 def _train_encoder_single_scale(
