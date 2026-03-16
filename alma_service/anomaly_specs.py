@@ -58,9 +58,10 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         display_name="Изменение притока",
         well_files=PRITOK_WELL_FILES,
         output_prefix="pritok",
-        default_freq="2min",
+        default_freq="10min",
         summary_match="приток",
         source_candidates=(
+            "pritok_anomaly_database_10min.parquet",
             "pritok_anomaly_database_2min.parquet",
             "pritok_anomaly_database_15s.parquet",
         ),
@@ -70,9 +71,10 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         display_name="Солеотложение",
         well_files=SALT_WELL_FILES,
         output_prefix="salt",
-        default_freq="2min",
+        default_freq="15min",
         summary_match="соли",
         source_candidates=(
+            "salt_anomaly_database_15min.parquet",
             "salt_anomaly_database_2min.parquet",
             "salt_anomaly_database_15s.parquet",
         ),
