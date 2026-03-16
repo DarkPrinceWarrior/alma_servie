@@ -20,6 +20,16 @@ LOCAL_DETECTOR_KEYS = (
     "ensemble",
 )
 DEFAULT_DETECTOR = "paano_feat"
+ANOMALY_DEFAULT_DETECTOR = {
+    "negermet": "paano_shared",
+    "pritok": "paano_shared",
+    "salt": "ensemble",
+}
+
+
+def default_detector_for(anomaly_key: str) -> str:
+    """Return the best detector for a given anomaly type."""
+    return ANOMALY_DEFAULT_DETECTOR.get(anomaly_key, DEFAULT_DETECTOR)
 
 
 def normalize_detector_key(detector: str | None) -> str:
@@ -58,7 +68,9 @@ def summary_path(spec: DetectionSpec, detector: str) -> Path:
 
 
 def report_path(spec: DetectionSpec, detector: str) -> Path:
-    return REPORTS_DIR / f"{detector_stem(spec, detector)}_report.html"
+    subdir = REPORTS_DIR / spec.anomaly_key
+    subdir.mkdir(parents=True, exist_ok=True)
+    return subdir / f"{detector_stem(spec, detector)}_report.html"
 
 
 def model_path(spec: DetectionSpec, detector: str) -> Path:

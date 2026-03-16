@@ -1,15 +1,20 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 from html import escape
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
-import plotly.io as pio
-from plotly.subplots import make_subplots
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
 
 from alma_service.anomaly_specs import get_detection_spec
 from alma_service.benchmark_metrics import evaluate_predictions
@@ -41,6 +46,7 @@ DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
     "paano_feat": "PaAno + признаки",
     "paano_shared": "PaAno Shared Encoder",
+    "ensemble": "Ensemble (PaAno + PCA)",
 }
 
 
@@ -155,143 +161,173 @@ def _status_label(status: Any) -> str:
     return STATUS_LABELS.get(str(status), str(status))
 
 
-def _pick_plot_columns(well_df: pd.DataFrame) -> list[str]:
-    preferred = [col for col in [PRESSURE_COL, FREQ_COL] if col in well_df.columns]
-    if len(preferred) >= 2:
-        return preferred[:2]
+def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
 
-    numeric_cols = []
+
+def _pick_top_channel(
+    well_id: str,
+    well_df: pd.DataFrame,
+    fi_data: dict[str, dict[str, float]],
+) -> str | None:
+    """Pick the most important channel for a well, skipping pressure if it's #1."""
+    well_fi = fi_data.get(well_id)
+    if well_fi:
+        sorted_channels = sorted(well_fi.items(), key=lambda x: x[1], reverse=True)
+        for ch_name, _pct in sorted_channels:
+            if ch_name != PRESSURE_COL and ch_name in well_df.columns:
+                return ch_name
+
+    # Fallback: pick the column with highest variance (excluding pressure, freq, meta)
+    skip = {"well_id", "timestamp", PRESSURE_COL, FREQ_COL}
+    best_col, best_var = None, -1.0
     for col in well_df.columns:
-        if col in {"well_id", "timestamp"} or col in preferred:
+        if col in skip:
             continue
         series = pd.to_numeric(well_df[col], errors="coerce")
-        if series.notna().any():
-            numeric_cols.append(col)
-    return (preferred + numeric_cols)[:2]
+        if series.notna().sum() < 10:
+            continue
+        v = float(series.var())
+        if v > best_var:
+            best_var = v
+            best_col = col
+    return best_col
+
+
+def _load_feature_importance_data(spec, detector_key: str) -> dict[str, dict[str, float]]:
+    """Load feature importance from summary JSON saved by feature_importance.py.
+
+    Returns dict[well_id -> dict[channel_name -> pct_drop]].
+    """
+    import json
+    fi_summary_path = DB_DIR / f"{spec.dataset.output_prefix}_{detector_key}_fi_summary.json"
+    if fi_summary_path.exists():
+        data = json.loads(fi_summary_path.read_text(encoding="utf-8"))
+        print(f"  Feature importance загружен из {fi_summary_path.name}")
+        return data
+    return {}
 
 
 def _create_plot_html(
     well_df: pd.DataFrame,
     result_row: pd.Series,
     scores_df: pd.DataFrame | None,
-    *,
-    include_plotlyjs: bool,
+    accent: str,
+    fi_data: dict[str, dict[str, float]],
 ) -> str | None:
-    plot_cols = _pick_plot_columns(well_df)
+    well_id = str(result_row["well_id"])
     score_col = _score_column(scores_df)
     has_scores = score_col is not None
-    if not plot_cols and not has_scores:
-        return None
 
     x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
     x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
     if pd.notna(x_min) and pd.notna(x_max):
-        well_df = well_df[(well_df["timestamp"] >= x_min) & (well_df["timestamp"] <= x_max)]
+        well_df = well_df[(well_df["timestamp"] >= x_min) & (well_df["timestamp"] <= x_max)].copy()
     if well_df.empty:
         return None
 
-    subplot_titles = list(plot_cols)
+    top_channel = _pick_top_channel(well_id, well_df, fi_data)
+
+    # Panels: 1) Score, 2) Pressure, 3) Top channel
+    panels: list[tuple[str, str | None]] = []
     if has_scores:
-        subplot_titles.append(str(score_col))
-    fig = make_subplots(
-        rows=max(len(subplot_titles), 1),
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.05,
-        subplot_titles=subplot_titles or ["Signals"],
-    )
+        panels.append(("Отклонение от нормы (score)", None))
+    has_pressure = PRESSURE_COL in well_df.columns
+    if has_pressure:
+        panels.append((PRESSURE_COL, PRESSURE_COL))
+    if top_channel:
+        panels.append((top_channel, top_channel))
 
-    line_colors = ["#2563eb", "#ea580c", "#0f766e", "#7c3aed"]
-    current_row = 1
-    for idx, col in enumerate(plot_cols):
-        line_df = well_df[["timestamp", col]].copy()
-        line_df[col] = pd.to_numeric(line_df[col], errors="coerce")
-        line_df = line_df.dropna(subset=[col])
-        if not line_df.empty:
-            fig.add_trace(
-                go.Scattergl(
-                    x=line_df["timestamp"],
-                    y=line_df[col],
-                    mode="lines",
-                    name=col,
-                    line={"color": line_colors[idx % len(line_colors)], "width": 1.1},
-                    showlegend=False,
-                ),
-                row=current_row,
-                col=1,
+    if not panels:
+        return None
+
+    n_panels = len(panels)
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 2.8 * n_panels), sharex=True)
+    if n_panels == 1:
+        axes = [axes]
+    ts_pd = pd.to_datetime(well_df["timestamp"])
+
+    def _draw_zones(ax, show_labels: bool = False):
+        ymin, ymax = ax.get_ylim()
+        actual_start = pd.Timestamp(result_row["actual_start"])
+        actual_end = pd.Timestamp(result_row["actual_end"])
+        ax.axvspan(actual_start, actual_end, color="red", alpha=0.10, zorder=0)
+        ax.axvline(actual_start, color="#16a34a", linewidth=1.2, linestyle="-")
+        ax.axvline(actual_end, color="#dc2626", linewidth=1.2, linestyle="--")
+        if show_labels:
+            ax.annotate(
+                f"Факт начало\n{actual_start.strftime('%Y-%m-%d %H:%M')}",
+                xy=(actual_start, ymax), xytext=(5, -5),
+                textcoords="offset points", fontsize=6.5, color="#16a34a",
+                fontweight="bold", va="top", ha="left",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#16a34a", alpha=0.85),
             )
-        current_row += 1
-
-    if has_scores and scores_df is not None:
-        score_view = scores_df.copy()
-        if pd.notna(x_min) and pd.notna(x_max):
-            score_view = score_view[(score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)]
-        if not score_view.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=score_view["timestamp"],
-                    y=score_view[score_col],
-                    mode="lines",
-                    line={"color": "#7c3aed", "width": 1.2},
-                    fill="tozeroy",
-                    fillcolor="rgba(124,58,237,0.14)",
-                    name=str(score_col),
-                    showlegend=False,
-                ),
-                row=current_row,
-                col=1,
+            ax.annotate(
+                f"Факт конец\n{actual_end.strftime('%Y-%m-%d %H:%M')}",
+                xy=(actual_end, ymax), xytext=(-5, -5),
+                textcoords="offset points", fontsize=6.5, color="#dc2626",
+                fontweight="bold", va="top", ha="right",
+                bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#dc2626", alpha=0.85),
             )
-
-    for row_idx in range(1, max(len(subplot_titles), 1) + 1):
-        fig.add_vrect(
-            x0=result_row["actual_start"],
-            x1=result_row["actual_end"],
-            fillcolor="rgba(220,38,38,0.10)",
-            line_width=0,
-            row=row_idx,
-            col=1,
-        )
-        fig.add_vline(
-            x=result_row["actual_start"],
-            line_color="#16a34a",
-            line_width=1,
-            row=row_idx,
-            col=1,
-        )
         if pd.notna(result_row["detected_time"]):
-            fig.add_vline(
-                x=result_row["detected_time"],
-                line_color="#7c3aed",
-                line_width=1.25,
-                line_dash="dash",
-                row=row_idx,
-                col=1,
-            )
+            det_ts = pd.Timestamp(result_row["detected_time"])
+            ax.axvline(det_ts, color="#7c3aed", linewidth=1.5, linestyle="-.")
+            if show_labels:
+                ax.annotate(
+                    f"Обнаружено\n{det_ts.strftime('%Y-%m-%d %H:%M')}",
+                    xy=(det_ts, ymax), xytext=(5, -25),
+                    textcoords="offset points", fontsize=6.5, color="#7c3aed",
+                    fontweight="bold", va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#7c3aed", alpha=0.85),
+                )
 
-    fig.update_layout(
-        height=max(360 * max(len(subplot_titles), 1), 420),
-        margin={"l": 44, "r": 24, "t": 56, "b": 36},
-        paper_bgcolor="#ffffff",
-        plot_bgcolor="#ffffff",
-        title={
-            "text": (
-                f"Скважина {result_row['well_id']} | интервал {int(result_row['interval_idx'])}"
-            ),
-            "x": 0.01,
-        },
+    for panel_idx, (label, col_name) in enumerate(panels):
+        ax = axes[panel_idx]
+        is_score = col_name is None
+
+        if is_score and scores_df is not None and score_col is not None:
+            score_view = scores_df.copy()
+            if pd.notna(x_min) and pd.notna(x_max):
+                score_view = score_view[(score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)]
+            if not score_view.empty:
+                sts = pd.to_datetime(score_view["timestamp"])
+                vals = score_view[score_col].values
+                ax.fill_between(sts, 0, vals, color=accent, alpha=0.18)
+                ax.plot(sts, vals, color=accent, linewidth=0.7)
+        elif col_name is not None and col_name in well_df.columns:
+            vals = pd.to_numeric(well_df[col_name], errors="coerce")
+            ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
+
+        ax.set_ylabel(label, fontsize=8)
+        _draw_zones(ax, show_labels=(panel_idx == 0))
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_title(
+        f"Скважина {well_id} | интервал {int(result_row['interval_idx'])}",
+        fontsize=11, fontweight="bold",
     )
-    fig.update_xaxes(showgrid=True, gridcolor="rgba(148,163,184,0.15)")
-    fig.update_yaxes(showgrid=True, gridcolor="rgba(148,163,184,0.15)")
-    return pio.to_html(
-        fig,
-        full_html=False,
-        include_plotlyjs="cdn" if include_plotlyjs else False,
-        config={
-            "displaylogo": False,
-            "responsive": True,
-            "scrollZoom": True,
-        },
-    )
+
+    # Legend on top panel
+    zone_patch = mpatches.Patch(facecolor="red", alpha=0.10, edgecolor="none", label="Зона аномалии")
+    start_line = plt.Line2D([0], [0], color="#16a34a", linewidth=1.2, label="Начало (факт)")
+    end_line = plt.Line2D([0], [0], color="#dc2626", linewidth=1.2, linestyle="--", label="Конец (факт)")
+    detect_line = plt.Line2D([0], [0], color="#7c3aed", linewidth=1.5, linestyle="-.", label="Обнаружено")
+    legend_handles = [zone_patch, start_line, end_line]
+    if pd.notna(result_row["detected_time"]):
+        legend_handles.append(detect_line)
+    axes[0].legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.9)
+
+    axes[-1].set_xlabel("Время")
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    b64 = _fig_to_b64(fig, dpi=110)
+    return f'<img src="data:image/png;base64,{b64}" alt="График {well_id}">'
 
 
 def _resolve_detector(spec, detector: str | None) -> str:
@@ -330,6 +366,7 @@ def generate_report(
     intervals_df = _load_intervals(spec.dataset.intervals_path)
     results_df = _load_results(results_path_value)
     scores_by_well = _load_scores(scores_path_value)
+    fi_data = _load_feature_importance_data(spec, detector_key)
     summary_payload = load_json(summary_path(spec, detector_key))
     if not summary_payload:
         predictions_path = predicted_starts_path(spec, detector_key)
@@ -378,7 +415,8 @@ def generate_report(
             well_df=well_ts,
             result_row=result_row,
             scores_df=scores_by_well.get(well_id),
-            include_plotlyjs=(idx == 0),
+            accent=theme["accent"],
+            fi_data=fi_data,
         )
         status_text = _status_label(result_row["status"])
         split_text = SPLIT_SHORT_LABELS.get(str(result_row["split"]), str(result_row["split"]))
@@ -398,8 +436,8 @@ def generate_report(
                 <span><b>Время обнаружения:</b> {_format_dt(result_row['detected_time'])}</span>
                 <span><b>Задержка:</b> {_format_float(result_row.get('delay_hours'), 2, ' ч')}</span>
               </div>
-              <p class="note">Зелёная линия показывает начало интервала аномалии, красная зона показывает её длительность, фиолетовая пунктирная линия показывает момент обнаружения.</p>
-              <div class="plot-wrap">{plot_html}</div>
+              <p class="note">Зелёная линия — начало аномалии, красная зона — длительность, фиолетовая пунктирная — момент обнаружения.</p>
+              <div class="plot-wrap">{plot_html if plot_html else '<p>Нет данных для графика</p>'}</div>
             </article>
             """
         )
@@ -494,12 +532,6 @@ def generate_report(
             width: 100%;
             border-radius: 14px;
             border: 1px solid var(--border);
-          }}
-          .plot-wrap .plotly-graph-div {{
-            width: 100% !important;
-            border: 1px solid var(--border);
-            border-radius: 14px;
-            overflow: hidden;
           }}
         </style>
       </head>

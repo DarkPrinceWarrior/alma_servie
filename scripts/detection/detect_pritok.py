@@ -8,13 +8,13 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from alma_service.detection_artifacts import DEFAULT_DETECTOR, DETECTOR_KEYS
+from alma_service.detection_artifacts import DETECTOR_KEYS, default_detector_for
 from alma_service.generic_detection import run_detection, run_single_well
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Engineered-feature detection for pritok.")
-    parser.add_argument("--detector", choices=sorted(DETECTOR_KEYS), default=DEFAULT_DETECTOR)
+    parser.add_argument("--detector", choices=sorted(DETECTOR_KEYS), default=default_detector_for("pritok"))
     parser.add_argument("--output", type=str, default=None)
     parser.add_argument("--source", type=str, default=None)
     parser.add_argument("--well", type=str, default=None)

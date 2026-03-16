@@ -74,6 +74,7 @@ DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
     "paano_feat": "PaAno + признаки",
     "paano_shared": "PaAno Shared Encoder",
+    "ensemble": "Ensemble (PaAno + PCA)",
 }
 
 DISPLAY_NAMES = {
@@ -126,6 +127,11 @@ def _build_detector(
 ) -> BaseDetector:
     cfg = _runtime_config(anomaly_key)
     if detector_key == "paano_shared" and shared_state is not None:
+        return SharedPaAnoDetector(
+            shared_state=shared_state, device=device, verbose=verbose,
+        )
+    if detector_key == "ensemble" and shared_state is not None:
+        # For permutation importance, use paano_shared as primary
         return SharedPaAnoDetector(
             shared_state=shared_state, device=device, verbose=verbose,
         )
@@ -191,7 +197,7 @@ def compute_channel_importance(
     channel_map = _map_features_to_channels(feature_columns, raw_columns)
 
     # Baseline
-    if detector_key == "paano_shared" and shared_state is not None:
+    if detector_key in ("paano_shared", "ensemble") and shared_state is not None:
         from alma_service.shared_encoder import select_shared_columns
         X_proj = select_shared_columns(
             prepared.feature_columns, X, shared_state.shared_channels,
@@ -228,7 +234,7 @@ def compute_channel_importance(
         X_perturbed = X.copy()
         X_perturbed[:, indices] = 0.0
 
-        if detector_key == "paano_shared" and shared_state is not None:
+        if detector_key in ("paano_shared", "ensemble") and shared_state is not None:
             from alma_service.shared_encoder import select_shared_columns
             X_pert_proj = select_shared_columns(
                 prepared.feature_columns, X_perturbed, shared_state.shared_channels,
@@ -709,7 +715,7 @@ def generate_feature_importance_report(
 
     # Train shared encoder if needed
     shared_state = None
-    if detector_key == "paano_shared":
+    if detector_key in ("paano_shared", "ensemble"):
         from alma_service.shared_encoder import train_shared_encoder
         # Prepare all wells first to get PreparedWellData for shared training
         all_prepared: dict[str, PreparedWellData] = {}
@@ -745,7 +751,7 @@ def generate_feature_importance_report(
         print(f"\nСкважина {wid}:")
 
         set_seed()
-        if detector_key == "paano_shared" and wid in all_prepared:
+        if detector_key in ("paano_shared", "ensemble") and wid in all_prepared:
             prepared = all_prepared[wid]
         else:
             prepared = prepare_engineered_well(
@@ -805,9 +811,21 @@ def generate_feature_importance_report(
 
     html = _build_html(spec, detector_key, all_results, intervals, detections)
 
+    # Save importance summary as JSON for use by detection reports
+    import json
+    fi_summary: dict[str, dict[str, float]] = {}
+    for result in all_results:
+        wid = result["well_id"]
+        fi_summary[wid] = {ch: v["pct_drop"] for ch, v in result["importance"].items()}
+    fi_json_path = DB_DIR / f"{spec.dataset.output_prefix}_{detector_key}_fi_summary.json"
+    fi_json_path.write_text(json.dumps(fi_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"Feature importance summary saved: {fi_json_path}")
+
     if output_path is None:
+        subdir = REPORTS_DIR / spec.anomaly_key
+        subdir.mkdir(parents=True, exist_ok=True)
         output_path = str(
-            REPORTS_DIR / f"{spec.dataset.output_prefix}_{detector_key}_feature_importance.html"
+            subdir / f"{spec.dataset.output_prefix}_{detector_key}_feature_importance.html"
         )
     out = ensure_parent(Path(output_path))
     out.write_text(html, encoding="utf-8")
