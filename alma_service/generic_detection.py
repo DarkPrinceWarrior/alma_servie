@@ -126,6 +126,7 @@ LOCAL_DEFAULT_PRIORITY = {
     "pca_spe": 4,
     "paano_feat": 3,
     "paano_shared": 5,
+    "ensemble": 6,
 }
 
 
@@ -143,7 +144,7 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     cfg = BASE_ONSET_CONFIG.copy()
     profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
     cfg.update(profile.get("defaults", {}))
-    if detector_key in ("paano_feat", "paano_shared"):
+    if detector_key in ("paano_feat", "paano_shared", "ensemble"):
         cfg["fusion_weight_short"] = 0.60
     return cfg
 
@@ -310,7 +311,45 @@ def _build_local_runs(
 ) -> dict[str, PreparedDetectorRun]:
     out: dict[str, PreparedDetectorRun] = {}
     for well_id, prepared in prepared_runs.items():
-        if detector_key == "paano_shared" and shared_state is not None:
+        if detector_key == "ensemble" and shared_state is not None:
+            # --- Ensemble: PaAno Shared + PCA/SPE score fusion ---
+            from alma_service.shared_encoder import select_shared_columns
+
+            # 1. PaAno Shared score
+            X_proj = select_shared_columns(
+                prepared.feature_columns,
+                prepared.feature_matrix,
+                shared_state.shared_channels,
+            )
+            paano_det = SharedPaAnoDetector(
+                shared_state=shared_state, device=device, verbose=verbose,
+            )
+            paano_det.fit_reference(X_proj[prepared.reference_mask])
+            paano_out = paano_det.score_stream(X_proj)
+
+            # 2. PCA/SPE score
+            pca_det = PCASPEDetector()
+            X_ref = prepared.feature_matrix[prepared.reference_mask]
+            pca_det.fit_reference(X_ref)
+            pca_out = pca_det.score_stream(prepared.feature_matrix)
+
+            # 3. Fuse: normalize both to z-scores, weighted average
+            alpha = 0.6  # PaAno weight
+            paano_z = paano_out.primary
+            pca_z = pca_out.primary
+            fused = alpha * paano_z + (1.0 - alpha) * pca_z
+
+            score_output = DetectorScoreOutput(
+                primary=fused.astype(np.float32),
+                components={
+                    "paano_score": paano_out.primary.astype(np.float32),
+                    "pca_score": pca_out.primary.astype(np.float32),
+                },
+                detail={"ensemble_alpha": alpha},
+            )
+            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
+
+        elif detector_key == "paano_shared" and shared_state is not None:
             from alma_service.shared_encoder import select_shared_columns
             # Project well features to shared channel set
             X_proj = select_shared_columns(
@@ -326,12 +365,13 @@ def _build_local_runs(
             X_ref_proj = X_proj[prepared.reference_mask]
             detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
             score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
+            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
         else:
             detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
             X_ref = prepared.feature_matrix[prepared.reference_mask]
             detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
             score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
-        out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
+            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
     return out
 
 
@@ -834,14 +874,14 @@ def run_detection(
 
     prepared_runs = _prepare_all_wells(
         spec, df, intervals, verbose=verbose,
-        zone_aware=(detector_key == "paano_shared"),
+        zone_aware=(detector_key in ("paano_shared", "ensemble")),
     )
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
 
     # Train shared encoder for paano_shared detector
     shared_state = None
-    if detector_key == "paano_shared":
+    if detector_key in ("paano_shared", "ensemble"):
         from alma_service.shared_encoder import train_shared_encoder
         runtime_cfg = _runtime_config(anomaly_key)
         try:

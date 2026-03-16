@@ -11,11 +11,13 @@ DETECTOR_KEYS = (
     "paano_feat",
     "paano_shared",
     "pca_spe",
+    "ensemble",
 )
 LOCAL_DETECTOR_KEYS = (
     "paano_feat",
     "paano_shared",
     "pca_spe",
+    "ensemble",
 )
 DEFAULT_DETECTOR = "paano_feat"
 
