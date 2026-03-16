@@ -37,6 +37,7 @@ from alma_service.generic_detectors import (
     BaseDetector,
     PCASPEDetector,
     PaAnoFeatureDetector,
+    SharedPaAnoDetector,
     set_seed,
 )
 from alma_service.paano_defaults import (
@@ -72,6 +73,7 @@ ANOMALY_RUNTIME_CONFIG = {
 DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
     "paano_feat": "PaAno + признаки",
+    "paano_shared": "PaAno Shared Encoder",
 }
 
 DISPLAY_NAMES = {
@@ -115,8 +117,18 @@ def load_intervals(spec: DetectionSpec) -> pd.DataFrame:
     return load_intervals_df(src)
 
 
-def _build_detector(anomaly_key: str, detector_key: str, device, verbose: bool = False) -> BaseDetector:
+def _build_detector(
+    anomaly_key: str,
+    detector_key: str,
+    device,
+    verbose: bool = False,
+    shared_state=None,
+) -> BaseDetector:
     cfg = _runtime_config(anomaly_key)
+    if detector_key == "paano_shared" and shared_state is not None:
+        return SharedPaAnoDetector(
+            shared_state=shared_state, device=device, verbose=verbose,
+        )
     if detector_key == "paano_feat":
         return PaAnoFeatureDetector(device=device, patch_short=int(cfg["paano_patch_short"]),
                                     patch_long=int(cfg["paano_patch_long"]), verbose=verbose)
@@ -166,6 +178,7 @@ def compute_channel_importance(
     anomaly_mask: np.ndarray,
     device,
     verbose: bool = True,
+    shared_state=None,
 ) -> dict[str, Any] | None:
     set_seed()
     X = prepared.feature_matrix.copy()
@@ -178,10 +191,27 @@ def compute_channel_importance(
     channel_map = _map_features_to_channels(feature_columns, raw_columns)
 
     # Baseline
-    baseline_detector = _build_detector(anomaly_key, detector_key, device, verbose=False)
-    X_ref = X[prepared.reference_mask]
-    baseline_detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
-    baseline_scores = baseline_detector.score_stream(X, mask_all=prepared.stability_mask).primary.astype(np.float32)
+    if detector_key == "paano_shared" and shared_state is not None:
+        from alma_service.shared_encoder import select_shared_columns
+        X_proj = select_shared_columns(
+            prepared.feature_columns, X, shared_state.shared_channels,
+        )
+        baseline_detector = _build_detector(
+            anomaly_key, detector_key, device, verbose=False,
+            shared_state=shared_state,
+        )
+        X_ref_proj = X_proj[prepared.reference_mask]
+        baseline_detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
+        baseline_scores = baseline_detector.score_stream(
+            X_proj, mask_all=prepared.stability_mask,
+        ).primary.astype(np.float32)
+    else:
+        baseline_detector = _build_detector(anomaly_key, detector_key, device, verbose=False)
+        X_ref = X[prepared.reference_mask]
+        baseline_detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
+        baseline_scores = baseline_detector.score_stream(
+            X, mask_all=prepared.stability_mask,
+        ).primary.astype(np.float32)
     baseline_anom = float(np.mean(baseline_scores[anomaly_mask]))
 
     if verbose:
@@ -198,9 +228,25 @@ def compute_channel_importance(
         X_perturbed = X.copy()
         X_perturbed[:, indices] = 0.0
 
-        det = _build_detector(anomaly_key, detector_key, device, verbose=False)
-        det.fit_reference(X_perturbed[prepared.reference_mask], mask_ref=prepared.reference_mask)
-        perturbed_scores = det.score_stream(X_perturbed, mask_all=prepared.stability_mask).primary.astype(np.float32)
+        if detector_key == "paano_shared" and shared_state is not None:
+            from alma_service.shared_encoder import select_shared_columns
+            X_pert_proj = select_shared_columns(
+                prepared.feature_columns, X_perturbed, shared_state.shared_channels,
+            )
+            det = _build_detector(
+                anomaly_key, detector_key, device, verbose=False,
+                shared_state=shared_state,
+            )
+            det.fit_reference(X_pert_proj[prepared.reference_mask], mask_ref=prepared.reference_mask)
+            perturbed_scores = det.score_stream(
+                X_pert_proj, mask_all=prepared.stability_mask,
+            ).primary.astype(np.float32)
+        else:
+            det = _build_detector(anomaly_key, detector_key, device, verbose=False)
+            det.fit_reference(X_perturbed[prepared.reference_mask], mask_ref=prepared.reference_mask)
+            perturbed_scores = det.score_stream(
+                X_perturbed, mask_all=prepared.stability_mask,
+            ).primary.astype(np.float32)
         perturbed_anom = float(np.mean(perturbed_scores[anomaly_mask]))
 
         drop = baseline_anom - perturbed_anom
@@ -661,23 +707,59 @@ def generate_feature_importance_report(
     cfg = _runtime_config(anomaly_key)
     all_results: list[dict[str, Any]] = []
 
+    # Train shared encoder if needed
+    shared_state = None
+    if detector_key == "paano_shared":
+        from alma_service.shared_encoder import train_shared_encoder
+        # Prepare all wells first to get PreparedWellData for shared training
+        all_prepared: dict[str, PreparedWellData] = {}
+        for wid in sorted(df["well_id"].unique()):
+            well_df = df[df["well_id"] == wid].copy()
+            set_seed()
+            p = prepare_engineered_well(
+                anomaly_key=anomaly_key,
+                well_id=wid,
+                split=split_map.get(wid, "train"),
+                well_df=well_df,
+                patch_size=int(cfg["prepare_patch_size"]),
+                reference_min_ratio=REFERENCE_MIN_RATIO,
+                reference_max_ratio=REFERENCE_MAX_RATIO,
+                reference_min_days=REFERENCE_MIN_DAYS,
+                min_reference_coverage=MIN_REFERENCE_COVERAGE,
+                min_total_coverage=MIN_TOTAL_COVERAGE,
+            )
+            if p is not None:
+                all_prepared[wid] = p
+        shared_state = train_shared_encoder(
+            prepared_wells=all_prepared,
+            patch_short=int(cfg["paano_patch_short"]),
+            patch_long=int(cfg["paano_patch_long"]),
+            anomaly_key=anomaly_key,
+            device=device,
+            verbose=verbose,
+        )
+        print(f"  Shared encoder trained: {shared_state.detail}")
+
     for wid in sorted(df["well_id"].unique()):
         well_df = df[df["well_id"] == wid].copy()
         print(f"\nСкважина {wid}:")
 
         set_seed()
-        prepared = prepare_engineered_well(
-            anomaly_key=anomaly_key,
-            well_id=wid,
-            split=split_map.get(wid, "train"),
-            well_df=well_df,
-            patch_size=int(cfg["prepare_patch_size"]),
-            reference_min_ratio=REFERENCE_MIN_RATIO,
-            reference_max_ratio=REFERENCE_MAX_RATIO,
-            reference_min_days=REFERENCE_MIN_DAYS,
-            min_reference_coverage=MIN_REFERENCE_COVERAGE,
-            min_total_coverage=MIN_TOTAL_COVERAGE,
-        )
+        if detector_key == "paano_shared" and wid in all_prepared:
+            prepared = all_prepared[wid]
+        else:
+            prepared = prepare_engineered_well(
+                anomaly_key=anomaly_key,
+                well_id=wid,
+                split=split_map.get(wid, "train"),
+                well_df=well_df,
+                patch_size=int(cfg["prepare_patch_size"]),
+                reference_min_ratio=REFERENCE_MIN_RATIO,
+                reference_max_ratio=REFERENCE_MAX_RATIO,
+                reference_min_days=REFERENCE_MIN_DAYS,
+                min_reference_coverage=MIN_REFERENCE_COVERAGE,
+                min_total_coverage=MIN_TOTAL_COVERAGE,
+            )
         if prepared is None:
             print("  Пропуск: недостаточно данных после препроцессинга")
             continue
@@ -700,7 +782,8 @@ def generate_feature_importance_report(
               f"{int(anomaly_mask.sum())} аномальных точек")
 
         result = compute_channel_importance(
-            anomaly_key, detector_key, prepared, anomaly_mask, device, verbose=verbose
+            anomaly_key, detector_key, prepared, anomaly_mask, device,
+            verbose=verbose, shared_state=shared_state,
         )
         if result is not None:
             all_results.append(result)
