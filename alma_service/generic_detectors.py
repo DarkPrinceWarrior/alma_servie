@@ -35,7 +35,7 @@ from utils.utils import create_memory_bank
 
 SEED = 2027
 PAANO_NUM_ITERS = 200
-PAANO_BATCH_SIZE = 256
+PAANO_BATCH_SIZE = 512
 PAANO_LR = 1e-4
 PAANO_TOP_K = 3
 PAANO_MEMORY_BANK_RATIO = 0.1

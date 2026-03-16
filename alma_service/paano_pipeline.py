@@ -61,7 +61,7 @@ warnings.filterwarnings("ignore")
 
 SEED = 2027
 NUM_ITERS = 200
-BATCH_SIZE = 256
+BATCH_SIZE = 512
 LR = 1e-4
 TOP_K = 3
 MEMORY_BANK_RATIO = 0.1
