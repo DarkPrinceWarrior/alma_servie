@@ -8,7 +8,7 @@ import polars as pl
 
 from alma_service.onset_detection import choose_reference_end_index, infer_step_seconds
 from alma_service.well_features import get_well_feature_columns
-from alma_service.well_preprocess import forward_fill_causal
+from alma_service.well_preprocess import forward_fill_causal, interpolate_linear
 from alma_service.zone_labels import label_zones, make_clean_normal_mask, make_onset_allowed_from_zones
 
 PRESSURE_COL = "Давление на приеме насоса кгс/см²"
@@ -392,14 +392,14 @@ def prepare_engineered_well(
 
     raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
     raw_matrix = raw_df.to_numpy(dtype=np.float32)
-    raw_matrix = forward_fill_causal(raw_matrix)
+    raw_matrix = interpolate_linear(raw_matrix)
     if np.isnan(raw_matrix).any():
         keep_columns = [column for idx, column in enumerate(base_columns) if not np.isnan(raw_matrix[:, idx]).any()]
         if not keep_columns:
             return None
         base_columns = keep_columns
         raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
-        raw_matrix = forward_fill_causal(raw_df.to_numpy(dtype=np.float32))
+        raw_matrix = interpolate_linear(raw_df.to_numpy(dtype=np.float32))
 
     step_seconds = infer_step_seconds(timestamps)
     min_ref_points = max(patch_size * 2, 64)

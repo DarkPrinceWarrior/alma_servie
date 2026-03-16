@@ -35,6 +35,30 @@ def forward_fill_causal(data: np.ndarray) -> np.ndarray:
     return out
 
 
+def interpolate_linear(data: np.ndarray) -> np.ndarray:
+    """Fill NaN gaps with linear interpolation between known values.
+
+    Leading NaNs are forward-filled from the first known value (causal).
+    This removes artificial stair-steps created by ffill on slow channels.
+    """
+    out = np.asarray(data, dtype=np.float32).copy()
+    if out.size == 0:
+        return out
+
+    for col_idx in range(out.shape[1]):
+        col = out[:, col_idx]
+        mask = np.isnan(col)
+        if mask.all() or not mask.any():
+            continue
+        known = np.flatnonzero(~mask)
+        # Interpolate between known values
+        col[mask] = np.interp(
+            np.flatnonzero(mask), known, col[known]
+        )
+        out[:, col_idx] = col
+    return out
+
+
 def _select_feature_columns(
     wd: pd.DataFrame,
     reference_end_idx: int,
