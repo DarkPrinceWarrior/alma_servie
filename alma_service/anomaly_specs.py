@@ -46,11 +46,11 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         display_name="Негерметичность НКТ",
         well_files=NEGREMET_WELL_FILES,
         output_prefix="negermet",
-        default_freq="15s",
+        default_freq="2min",
         summary_match="негерметичность",
         source_candidates=(
-            "negermet_anomaly_database_15s.parquet",
             "negermet_anomaly_database_2min.parquet",
+            "negermet_anomaly_database_15s.parquet",
         ),
     ),
     "pritok": DatasetSpec(
