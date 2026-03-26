@@ -16,6 +16,7 @@ NEGREMET_WELL_FILES = {
     "3509г": NEGREMET_RAW_DIR / "3509г_Кустовое_ННКТ.xlsx",
     "1123л": NEGREMET_RAW_DIR / "1123л_Кустовое_ННКТ.xlsx",
     "172г": NEGREMET_RAW_DIR / "172г_Яркое_ННКТ.xlsx",
+    "ю-я 39-651": NEGREMET_RAW_DIR / "Ю-Я 39-651(ННКТ).xlsx",
 }
 
 PRITOK_WELL_FILES = {
@@ -36,7 +37,7 @@ SALT_WELL_FILES = {
 }
 
 TEST_WELLS = {
-    "negermet": {"3509г"},
+    "negermet": {"3509г", "ю-я 39-651"},
     "pritok": {"902"},
     "salt": {"2991г"},
 }

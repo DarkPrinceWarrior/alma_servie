@@ -330,6 +330,93 @@ def _create_plot_html(
     return f'<img src="data:image/png;base64,{b64}" alt="График {well_id}">'
 
 
+def _create_unlabeled_plot_html(
+    well_df: pd.DataFrame,
+    well_id: str,
+    scores_df: pd.DataFrame | None,
+    predicted_starts: list[pd.Timestamp],
+    accent: str,
+    fi_data: dict[str, dict[str, float]],
+) -> str | None:
+    """Create a plot for a well with no labeled anomaly interval."""
+    score_col = _score_column(scores_df)
+    has_scores = score_col is not None
+    if well_df.empty and not has_scores:
+        return None
+
+    top_channel = _pick_top_channel(well_id, well_df, fi_data)
+
+    panels: list[tuple[str, str | None]] = []
+    if has_scores:
+        panels.append(("\u041e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0435 \u043e\u0442 \u043d\u043e\u0440\u043c\u044b (score)", None))
+    if PRESSURE_COL in well_df.columns:
+        panels.append((PRESSURE_COL, PRESSURE_COL))
+    if top_channel:
+        panels.append((top_channel, top_channel))
+    if not panels:
+        return None
+
+    n_panels = len(panels)
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 2.8 * n_panels), sharex=True)
+    if n_panels == 1:
+        axes = [axes]
+    ts_pd = pd.to_datetime(well_df["timestamp"]) if not well_df.empty else pd.Series(dtype="datetime64[ns]")
+
+    x_min = well_df["timestamp"].min() if not well_df.empty else None
+    x_max = well_df["timestamp"].max() if not well_df.empty else None
+
+    for panel_idx, (label, col_name) in enumerate(panels):
+        ax = axes[panel_idx]
+        is_score = col_name is None
+
+        if is_score and scores_df is not None and score_col is not None:
+            score_view = scores_df.copy()
+            if x_min is not None and x_max is not None:
+                score_view = score_view[
+                    (score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)
+                ]
+            if not score_view.empty:
+                sts = pd.to_datetime(score_view["timestamp"])
+                vals = score_view[score_col].values
+                ax.fill_between(sts, 0, vals, color=accent, alpha=0.18)
+                ax.plot(sts, vals, color=accent, linewidth=0.7)
+        elif col_name is not None and col_name in well_df.columns:
+            vals = pd.to_numeric(well_df[col_name], errors="coerce")
+            ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
+
+        for det_ts in predicted_starts:
+            ax.axvline(det_ts, color="#7c3aed", linewidth=1.5, linestyle="-.")
+            if panel_idx == 0:
+                ymin, ymax = ax.get_ylim()
+                ax.annotate(
+                    f"\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043e\n{det_ts.strftime('%Y-%m-%d %H:%M')}",
+                    xy=(det_ts, ymax), xytext=(5, -5),
+                    textcoords="offset points", fontsize=6.5, color="#7c3aed",
+                    fontweight="bold", va="top", ha="left",
+                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#7c3aed", alpha=0.85),
+                )
+
+        ax.set_ylabel(label, fontsize=8)
+        ax.grid(True, alpha=0.3)
+
+    axes[0].set_title(
+        f"\u0421\u043a\u0432\u0430\u0436\u0438\u043d\u0430 {well_id} (\u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438)",
+        fontsize=11, fontweight="bold",
+    )
+    detect_line = plt.Line2D(
+        [0], [0], color="#7c3aed", linewidth=1.5, linestyle="-.",
+        label="\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043e",
+    )
+    axes[0].legend(handles=[detect_line], loc="upper right", fontsize=7, framealpha=0.9)
+    axes[-1].set_xlabel("\u0412\u0440\u0435\u043c\u044f")
+    axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    b64 = _fig_to_b64(fig, dpi=110)
+    return f'<img src="data:image/png;base64,{b64}" alt="\u0413\u0440\u0430\u0444\u0438\u043a {well_id}">'
+
+
 def _resolve_detector(spec, detector: str | None) -> str:
     if detector:
         return normalize_detector_key(detector)
@@ -441,6 +528,62 @@ def generate_report(
             </article>
             """
         )
+
+    # --- Unlabeled wells (no interval, but have scores/predicted_starts) ---
+    labeled_wells = set(results_df["well_id"].unique()) if not results_df.empty else set()
+    predictions_path_value = predicted_starts_path(spec, detector_key)
+    pred_df = pd.DataFrame()
+    if predictions_path_value.exists():
+        pred_df = read_table(predictions_path_value, dtypes={"well_id": str}, parse_dates=["detected_time"])
+        if not pred_df.empty:
+            pred_df["well_id"] = pred_df["well_id"].astype(str).str.strip().str.lower()
+
+    scored_wells = set(scores_by_well.keys())
+    unlabeled_wells = sorted(
+        (scored_wells | set(pred_df["well_id"].unique() if not pred_df.empty else [])) - labeled_wells
+    )
+
+    if unlabeled_wells:
+        sections.append('<h2 style="margin-top:32px;">\u0421\u043a\u0432\u0430\u0436\u0438\u043d\u044b \u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438 (\u0441\u043b\u0435\u043f\u043e\u0439 \u0442\u0435\u0441\u0442)</h2>')
+        for well_id in unlabeled_wells:
+            well_preds = []
+            if not pred_df.empty:
+                wp = pred_df[pred_df["well_id"] == well_id]
+                well_preds = [pd.Timestamp(t) for t in wp["detected_time"].dropna()]
+
+            well_ts = data_df[data_df["well_id"] == well_id].copy()
+            print(f"  \u0413\u0440\u0430\u0444\u0438\u043a (\u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438): \u0441\u043a\u0432. {well_id}, \u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0439: {len(well_preds)}")
+
+            plot_html = _create_unlabeled_plot_html(
+                well_df=well_ts,
+                well_id=well_id,
+                scores_df=scores_by_well.get(well_id),
+                predicted_starts=well_preds,
+                accent=theme["accent"],
+                fi_data=fi_data,
+            )
+
+            starts_text = ", ".join(_format_dt(t) for t in well_preds) if well_preds else "\u041d\u0435 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043e"
+            n_det = len(well_preds)
+            pill_label = f"{n_det} {'\u0434\u0435\u0442\u0435\u043a\u0446\u0438\u044f' if n_det == 1 else '\u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0439'}"
+            sections.append(
+                f"""
+                <article class="interval-card">
+                  <header>
+                    <div>
+                      <h3>\u0421\u043a\u0432\u0430\u0436\u0438\u043d\u0430 {escape(well_id)}</h3>
+                      <p class="meta">\u0422\u0435\u0441\u0442 (\u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438)</p>
+                    </div>
+                    <div class="pill {'ok' if well_preds else 'miss'}">{escape(pill_label)}</div>
+                  </header>
+                  <div class="interval-meta">
+                    <span><b>\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043d\u044b\u0435 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438:</b> {escape(starts_text)}</span>
+                  </div>
+                  <p class="note">\u0424\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440\u043d\u0430\u044f \u043b\u0438\u043d\u0438\u044f \u2014 \u043c\u043e\u043c\u0435\u043d\u0442 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u044f \u0430\u043b\u0433\u043e\u0440\u0438\u0442\u043c\u043e\u043c. \u0420\u0430\u0437\u043c\u0435\u0442\u043a\u0430 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442.</p>
+                  <div class="plot-wrap">{plot_html if plot_html else '<p>\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0434\u043b\u044f \u0433\u0440\u0430\u0444\u0438\u043a\u0430</p>'}</div>
+                </article>
+                """
+            )
 
     html = f"""
     <!doctype html>

@@ -253,6 +253,8 @@ def _prepare_all_wells(
     verbose: bool,
     zone_aware: bool = False,
 ) -> dict[str, PreparedWellData]:
+    from alma_service.dataset_config import split_for_well
+
     runtime_cfg = _runtime_config(spec.anomaly_key)
     split_map = (
         intervals[["well_id", "split"]]
@@ -275,7 +277,7 @@ def _prepare_all_wells(
         prepared = prepare_engineered_well(
             anomaly_key=spec.anomaly_key,
             well_id=well_id,
-            split=split_map.get(well_id, "train"),
+            split=split_map.get(well_id, split_for_well(spec.anomaly_key, well_id)),
             well_df=well_df,
             patch_size=int(runtime_cfg["prepare_patch_size"]),
             reference_min_ratio=REFERENCE_MIN_RATIO,
@@ -989,7 +991,9 @@ def run_single_well(
     well_df = df[df["well_id"] == well_id]
     if well_df.empty:
         raise ValueError(f"No data for well {well_id}")
-    split = "train"
+    from alma_service.dataset_config import split_for_well
+
+    split = split_for_well(anomaly_key, well_id)
     if not intervals.empty:
         well_intervals = intervals[intervals["well_id"] == well_id]
         if not well_intervals.empty and "split" in well_intervals.columns:
