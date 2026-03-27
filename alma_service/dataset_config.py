@@ -34,12 +34,13 @@ SALT_WELL_FILES = {
     "408": SALT_RAW_DIR / "408_Дружное_Соли.xlsx",
     "3245(2)": SALT_RAW_DIR / "3245(2)_Кустовое_Соли.xlsx",
     "2991г": SALT_RAW_DIR / "2991г_Соли.xlsx",
+    "1740": SALT_RAW_DIR / "1740_Соли.xlsx",
 }
 
 TEST_WELLS = {
     "negermet": {"3509г", "ю-я 39-651"},
     "pritok": {"902"},
-    "salt": {"2991г"},
+    "salt": {"2991г", "1740"},
 }
 
 
