@@ -8,6 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 RAW_DATA_DIR = DATA_DIR / "raw"
 REFERENCE_DATA_DIR = DATA_DIR / "reference"
+SALYM_SOURCE_DIR = PROJECT_ROOT / "salym"
+SALYM_PREPARED_DIR = PROJECT_ROOT / "salym_prepared"
 
 NEGREMET_RAW_DIR = RAW_DATA_DIR / "negermet"
 PRITOK_RAW_DIR = RAW_DATA_DIR / "pritok"

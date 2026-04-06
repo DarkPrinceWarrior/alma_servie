@@ -32,3 +32,4 @@ db/*_paano_predicted_starts.csv
 
 # OS
 .DS_Store 
+.worktrees/
