@@ -11,6 +11,14 @@
 - Do not edit secrets, credentials, or deployment configs unless explicitly asked.
 - Do not install new dependencies unless explicitly asked.
 
+## Tooling Workflow
+- Use fff first for broad repo discovery: file search, pattern search, entry-point discovery, and narrowing the search area.
+- Use Serena after that for symbol-level navigation, code understanding, and precise edits.
+- Prefer Serena tools for symbol-aware changes and code structure exploration.
+- Prefer fff for fast file/pattern discovery across the repository.
+- Avoid reading whole source files unless it is clearly necessary.
+- When working in Hermes worktree mode, activate Serena for the current worktree before symbolic navigation or edits.
+
 ## Git and Safety
 - Assume the user may have local work in progress outside the active worktree.
 - Prefer working in Hermes worktree mode.
