@@ -19,17 +19,19 @@ pip-delete-this-directory.txt
 plan.md
 report.md
 artifacts/
+db/
+models/
+
+# Raw / prepared data (reproducible, huge)
+salym/
+salym_prepared/
+
+# Tool working dirs
+.serena/
 
 # Legacy generated files
-db/salt_anomaly_database.csv
-db/salt_anomaly_database_interpolated.csv
 salt_anomaly_report_original.html
 
-# Generated large CSV files (reproducible via scripts)
-db/*_anomaly_database_*.csv
-db/*_paano_scores.csv
-db/*_paano_predicted_starts.csv
-
 # OS
-.DS_Store 
+.DS_Store
 .worktrees/
