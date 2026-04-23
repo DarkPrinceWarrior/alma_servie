@@ -22,6 +22,12 @@ artifacts/
 db/
 models/
 
+# Не игнорировать одноимённые директории внутри app/back (src layout)
+!app/back/src/back/db/
+!app/back/src/back/db/**
+!app/back/src/back/models/
+!app/back/src/back/models/**
+
 # Raw / prepared data (reproducible, huge)
 salym/
 salym_prepared/

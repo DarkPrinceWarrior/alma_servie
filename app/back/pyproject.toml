@@ -1,0 +1,55 @@
+[project]
+name = "back"
+version = "0.1.0"
+description = "FastAPI backend for alma_servie anomaly detection (async SQLAlchemy + JWT auth, feature-first layout)"
+readme = "README.md"
+authors = [
+    { name = "ruslan_safaev", email = "ds.mind.lab@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.18.4",
+    "asyncpg>=0.30.0",
+    "email-validator>=2.2.0",
+    "fastapi[standard-no-fastapi-cloud-cli]>=0.135.3",
+    "greenlet>=3.0.0",
+    "loguru>=0.7.2",
+    "passlib[bcrypt]>=1.7.4",
+    "pydantic-settings>=2.13.1",
+    "python-jose[cryptography]>=3.3.0",
+    "python-multipart>=0.0.9",
+    "sqlalchemy[asyncio]>=2.0.36",
+]
+
+[project.scripts]
+back = "back.main:main"
+
+[build-system]
+requires = ["uv_build>=0.11.1,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.15.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"

@@ -1,0 +1,15 @@
+.git
+.gitignore
+.venv
+.pytest_cache
+.ruff_cache
+.serena
+.codex
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+dist
+build
+wheels
