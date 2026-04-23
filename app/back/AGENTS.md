@@ -24,15 +24,28 @@ ORM-модели храним отдельно от API-схем.
 
 ## Integration with research code
 
-Основная часть проекта `alma_servie` (в корне репо, вне `app/back/`)
-остаётся исследовательским кодом: `scripts/`, `alma_service/`, `paano/`,
-`db/`, `artifacts/`. Из бэка её **не импортируем напрямую** в ручки —
-обёртываем в сервисы/задачи (`src/back/api/<entity>/service.py`),
-которые вызывают нужные скрипты как подпроцесс или переиспользуют
-функции по чётко очерченному API.
+Корневой `alma_service/` подключён к бэку как **editable local package**
+(`alma-service` в `[tool.uv.sources]`). Research-зависимости (torch,
+numba, optuna и т.п.) в бэк **не тащим** — `pyproject.toml` корня
+объявляет пустой `dependencies = []`, все тяжёлые пакеты по-прежнему
+ставятся research-венвом из корневого `requirements.txt`.
 
-Пока что `app/back/` живёт своим pyproject/venv — не смешиваем с
-исследовательским `requirements.txt` в корне.
+Правила импорта:
+
+- **Лёгкие модули** (`alma_service.paths`, `alma_service.dataset_config`)
+  импортируем напрямую в бэке через `from alma_service.paths import PROJECT_ROOT`.
+- **Тяжёлые модули** (`alma_service.generic_detection`,
+  `alma_service.paano_pipeline`, `alma_service.onset_detection` и
+  вызывающие их `scripts/detection/*.py`, `scripts/datasets/*.py`,
+  `scripts/reports/*.py`) — **не импортируем** в api-контейнер.
+  Они запускаются через `asyncio.create_subprocess_exec` в отдельном
+  worker-контейнере, который видит `alma_servie/venv/` с полным
+  research-стеком.
+- `paano/` — submodule, не часть пакета `alma_service`. Доступна только
+  воркеру, никогда — api.
+
+Коммуникация api ↔ worker — через таблицу `detection_runs` в Postgres
+(статус задач) и общий filesystem volume с `db/`, `artifacts/`, `models/`.
 
 ## Tools
 
