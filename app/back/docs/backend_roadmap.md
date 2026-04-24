@@ -397,9 +397,10 @@ api читает, worker пишет. Если worker падает в серед�
 | 2026-04-24 | **C. reports** | `024f4d4` | api/reports (html/scores/starts), GET /api/detections/{id}/report shortcut (307), path-резолвер, downsample stride, CSP frame-ancestors; +8 тестов; docker smoke: 9.8 МБ HTML, 1365→N scores, 18 предсказанных стартов |
 | 2026-04-24 | **D. worker** | `196dfca` | src/back/worker/loop.py (claim FOR UPDATE SKIP LOCKED + execute + finalize + graceful shutdown), app/back/worker/Dockerfile (python:3.12 + torch-cpu + research reqs), compose profile heavy; api при DETECTION_MOCK=false больше не запускает subprocess — только вставляет pending; +3 unit-теста |
 | 2026-04-24 | **E. auth** | `a2c13d5` | модели User/Role/UserRole/RefreshToken/TokenBlacklist + миграция 0002, core/security (JWT access+refresh, pbkdf2), api/auth (login/refresh/logout с RT rotation и reuse-detection), api/users (me + admin CRUD), rbac/guards.py с require_permission, lifespan seeds BASE_ROLES + admin + cleanup_expired_tokens loop (24h); защищён POST /api/detections через require_permission("detection:run"); +7 тестов; docker smoke: login → /users/me → POST /detections с ролью admin ок, без токена — 401/403 |
-| | B. detections | | |
-| | C. reports | | |
-| | D. worker | | |
-| | E. auth | | |
-| | F. frontend | | |
+| 2026-04-24 | **F.1 front scaffold** | `037baca` | Next.js 16 + React 19 + TS + Tailwind 4 + shadcn + lucide + Plotly (plotly.js-dist-min + react-plotly.js); API-client с refresh rotation, типы под все ручки бэка; Dockerfile standalone + сервис alma_servie_front в compose; next.config.ts rewrites /api/* → backend |
+| 2026-04-24 | branch consolidation | `d1d669b` | единая продуктовая ветка `app/webapp` = бэк + фронт (по исходному договору); `app/backend`/`app/frontend` удалены на origin |
+| | F.2 auth UI | | |
+| | F.3 wells list (Figma 92:888) | | |
+| | F.4 well detail (Figma 92:1747) | | |
+| | F.5 detections UI | | |
 | | G. deploy | | |
