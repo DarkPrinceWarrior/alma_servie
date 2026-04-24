@@ -15,6 +15,7 @@ services:
       DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/alma_servie
       DATA_ROOT: /data
       RESEARCH_ROOT: /workspace
+      DETECTION_MOCK: "true"
     volumes:
       - ../..:/data:ro
       - ../..:/workspace:ro

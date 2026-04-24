@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     data_root: Path = Path("/data")
     research_root: Path = Path("/workspace")
 
+    detection_mock: bool = True
+    detection_mock_duration_seconds: float = 2.0
+
     postgres_user: str = "app"
     postgres_password: str = "app"
     postgres_db: str = "alma_servie"

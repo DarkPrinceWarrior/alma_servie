@@ -95,8 +95,32 @@ truth), без импорта research-конфигов.
 `@lru_cache` — любое перезаписывание файла worker'ом автоматически
 инвалидирует кэш.
 
-Остальные ручки (detections, reports, auth, users) добавляются
-отдельными фичами — см. `docs/backend_roadmap.md`.
+### Detections
+
+Асинхронный запуск прогонов детекции с трекингом статуса через таблицу
+`detection_runs` в Postgres.
+
+- `POST /api/detections` `{anomaly, detector}` → 201 с `DetectionRunRead`.
+  `anomaly ∈ {negermet, pritok, salt}`, `detector ∈ {pca_spe, paano_feat,
+  paano_shared, ensemble}`. Single-flight: если уже есть активный
+  прогон `(anomaly, detector)` в статусе `pending|running` — 409 с `run_id`.
+- `GET /api/detections?anomaly=&detector=&status=&limit=&offset=` — листинг.
+- `GET /api/detections/{run_id}` — карточка прогона со `stdout_tail`,
+  `summary_json`, `exit_code`.
+
+Статусы: `pending → running → (succeeded | failed | cancelled)`.
+
+Режим выполнения задаётся через `DETECTION_MOCK`:
+
+- `true` (дефолт для api-контейнера) — фоновая `asyncio.sleep` +
+  синтетический `summary_json`. Реальный subprocess не стартует —
+  api-образу это и не нужно, у него нет research-стека.
+- `false` — запускается `asyncio.create_subprocess_exec` в `RESEARCH_ROOT`.
+  Это валидный режим для worker-контейнера (этап D roadmap) или для
+  локального `uv run uvicorn`, если в корневом `venv/` есть все deps.
+
+Остальные ручки (reports, auth, users) добавляются отдельными фичами —
+см. `docs/backend_roadmap.md`.
 
 ## Checks
 
