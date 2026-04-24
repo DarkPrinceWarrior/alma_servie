@@ -393,6 +393,7 @@ api читает, worker пишет. Если worker падает в серед�
 | 2026-04-24 | **B. detections** | `122c7d3` | таблица detection_runs + миграция 0001, api/detections (POST/GET list/GET by id) + single-flight 409, fake executor (DETECTION_MOCK), +3 теста; docker smoke ok (pending→running→succeeded за 2 сек) |
 | 2026-04-24 | **C. reports** | `024f4d4` | api/reports (html/scores/starts), GET /api/detections/{id}/report shortcut (307), path-резолвер, downsample stride, CSP frame-ancestors; +8 тестов; docker smoke: 9.8 МБ HTML, 1365→N scores, 18 предсказанных стартов |
 | 2026-04-24 | **D. worker** | `196dfca` | src/back/worker/loop.py (claim FOR UPDATE SKIP LOCKED + execute + finalize + graceful shutdown), app/back/worker/Dockerfile (python:3.12 + torch-cpu + research reqs), compose profile heavy; api при DETECTION_MOCK=false больше не запускает subprocess — только вставляет pending; +3 unit-теста |
+| 2026-04-24 | **E. auth** | `<pending>` | модели User/Role/UserRole/RefreshToken/TokenBlacklist + миграция 0002, core/security (JWT access+refresh, pbkdf2), api/auth (login/refresh/logout с RT rotation и reuse-detection), api/users (me + admin CRUD), rbac/guards.py с require_permission, lifespan seeds BASE_ROLES + admin + cleanup_expired_tokens loop (24h); защищён POST /api/detections через require_permission("detection:run"); +7 тестов; docker smoke: login → /users/me → POST /detections с ролью admin ок, без токена — 401/403 |
 | | B. detections | | |
 | | C. reports | | |
 | | D. worker | | |

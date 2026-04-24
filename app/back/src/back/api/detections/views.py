@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 
 from back.api.deps import DbDep
@@ -12,6 +12,7 @@ from back.api.detections.schemas import (
     DetectionRunRead,
 )
 from back.core.config import settings
+from back.rbac.guards import require_permission
 
 router = APIRouter(tags=["Detections"])
 
@@ -20,6 +21,7 @@ router = APIRouter(tags=["Detections"])
     "/detections",
     response_model=DetectionRunRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_permission("detection:run"))],
 )
 async def launch_detection(payload: DetectionRunCreate, db: DbDep) -> DetectionRunRead:
     active = await crud.find_active(db, payload.anomaly, payload.detector)

@@ -15,15 +15,30 @@ def test_command_for_format() -> None:
     )
 
 
-async def test_post_validates_anomaly() -> None:
+async def test_post_requires_auth() -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        r = await c.post("/api/detections", json={"anomaly": "bogus", "detector": "pca_spe"})
+        r = await c.post(
+            "/api/detections",
+            json={"anomaly": "negermet", "detector": "pca_spe"},
+        )
+    assert r.status_code in (401, 403)
+
+
+async def test_post_validates_anomaly(auth_user) -> None:
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as c:
+        r = await c.post(
+            "/api/detections", json={"anomaly": "bogus", "detector": "pca_spe"}
+        )
     assert r.status_code == 422
 
 
-async def test_post_validates_detector() -> None:
+async def test_post_validates_detector(auth_user) -> None:
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
-        r = await c.post("/api/detections", json={"anomaly": "negermet", "detector": "bogus_det"})
+        r = await c.post(
+            "/api/detections",
+            json={"anomaly": "negermet", "detector": "bogus_det"},
+        )
     assert r.status_code == 422

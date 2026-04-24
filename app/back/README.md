@@ -90,6 +90,24 @@ docker compose down -v        # + удалить том Postgres
 
 Все ручки под префиксом `/api`. OpenAPI: `GET /openapi.json`, Swagger `/docs`.
 
+### Auth (JWT)
+
+- `POST /api/auth/login` — форма `username`/`password` (OAuth2). Возвращает
+  `access_token` + выставляет `refresh_token` в httpOnly cookie на
+  `/api/auth/refresh`.
+- `POST /api/auth/refresh` — ротация refresh-токена с reuse-detection:
+  если переданный RT уже отозван, отзываются **все** сессии пользователя.
+- `POST /api/auth/logout` — blacklist access JWT по `jti`, отзыв RT.
+
+### Users & Roles
+
+- `GET /api/users/me` — текущий пользователь (роль `USER` или выше).
+- `GET /api/users` — admin-only, `?role=&search=&limit=&offset=`.
+- `POST /api/users` — admin-only создание.
+- `GET /api/users/{uuid}` — admin-only.
+- `PATCH /api/users/{uuid}/password` — admin-only смена пароля
+  (отзывает все refresh-токены пользователя).
+
 ### Health
 
 - `GET /api/health` — общий статус.
