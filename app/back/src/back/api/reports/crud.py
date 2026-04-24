@@ -35,6 +35,25 @@ from back.services.paths import (
 
 META_COLS = {"timestamp", "well_id"}
 
+# Приоритет freq для чтения телеметрии в well-series. Берём первый файл, где есть
+# нужная скважина. Для pritok корпус 18 скважин живёт в 10min (в 2min только 4);
+# для negermet/salt 2min тоже покрывает всё, но 10min/5min приоритетнее, если
+# когда-то появятся.
+TELEMETRY_FREQ_PRIORITY: tuple[str, ...] = ("10min", "5min", "15min", "2min", "15s")
+
+
+def _resolve_telemetry_path(data_root: Path, anomaly: str, well_id: str) -> Path | None:
+    for freq in TELEMETRY_FREQ_PRIORITY:
+        p = anomaly_database_parquet_path(data_root, anomaly, freq)
+        if not p.exists():
+            continue
+        df = read_parquet_cached(p)
+        if "well_id" not in df.columns:
+            continue
+        if not df.filter(pl.col("well_id") == well_id).is_empty():
+            return p
+    return None
+
 
 def _downsample_stride(n: int, limit: int) -> int:
     if limit <= 0 or n <= limit:
@@ -175,8 +194,8 @@ def load_well_series(
     paano_long = _points(scores_ds, "timestamp", "paano_long")
 
     telemetry: list[TelemetryChannel] = []
-    tel_path = anomaly_database_parquet_path(data_root, anomaly)
-    if tel_path.exists():
+    tel_path = _resolve_telemetry_path(data_root, anomaly, well_id)
+    if tel_path is not None:
         tel = read_parquet_cached(tel_path).filter(pl.col("well_id") == well_id).sort("timestamp")
         if not tel.is_empty():
             tel = tel.filter(
