@@ -1,6 +1,9 @@
-# alma_servie backend — roadmap
+# alma_servie — roadmap
 
-> Продуктовый трек `app/backend` ветки. Research (`ai_paano_detection`) живёт своей жизнью.
+> Продуктовый трек `app/webapp` ветки (единая, содержит и бэк, и фронт).
+> Research (`ai_paano_detection`) живёт своей жизнью — код `alma_service/`,
+> `scripts/`, `paano/`, `venv/`, `requirements.txt` там остаются как есть;
+> продуктовая ветка тянет корневой пакет `alma_service` как editable dep.
 > Документ — единственный источник правды о последовательности работ до MVP.
 > Обновляется после каждого merged-этапа: отмечаем DoD, фиксируем hash коммита.
 

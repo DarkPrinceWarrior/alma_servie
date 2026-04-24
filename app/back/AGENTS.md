@@ -2,7 +2,10 @@
 
 ## Project
 
-FastAPI backend for the alma_servie anomaly detection system.
+FastAPI backend for the alma_servie anomaly detection system. Живёт в
+единой продуктовой ветке `app/webapp` рядом с Next.js фронтом
+(`app/front/`). Research-код остаётся в корне репо и ветках research.
+
 Архитектура **feature-first** (МТО-стиль): каждая доменная сущность —
 отдельная папка в `src/back/api/<entity>/` с `views.py`, `crud.py`,
 `schemas.py`.
