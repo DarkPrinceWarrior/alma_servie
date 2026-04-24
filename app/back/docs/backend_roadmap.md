@@ -390,7 +390,7 @@ api читает, worker пишет. Если worker падает в серед�
 | 2026-04-23 | pkg wiring | `3067174` | корневой pyproject + alma-service editable |
 | 2026-04-23 | push | — | ветка `app/backend` на origin |
 | 2026-04-24 | **A. wells** | `9b35428` | ручки list/get/intervals над parquet, polars, Dockerfile build context=../.., volume ../..:/data:ro; 5/7 тестов |
-| 2026-04-24 | **B. detections** | `<pending>` | таблица detection_runs + миграция 0001, api/detections (POST/GET list/GET by id) + single-flight 409, fake executor (DETECTION_MOCK), +3 теста; docker smoke ok (pending→running→succeeded за 2 сек) |
+| 2026-04-24 | **B. detections** | `122c7d3` | таблица detection_runs + миграция 0001, api/detections (POST/GET list/GET by id) + single-flight 409, fake executor (DETECTION_MOCK), +3 теста; docker smoke ok (pending→running→succeeded за 2 сек) |
 | | B. detections | | |
 | | C. reports | | |
 | | D. worker | | |
