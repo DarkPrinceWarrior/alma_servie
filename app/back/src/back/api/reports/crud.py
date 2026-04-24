@@ -35,24 +35,28 @@ from back.services.paths import (
 
 META_COLS = {"timestamp", "well_id"}
 
-# Приоритет freq для чтения телеметрии в well-series. Берём первый файл, где есть
-# нужная скважина. Для pritok корпус 18 скважин живёт в 10min (в 2min только 4);
-# для negermet/salt 2min тоже покрывает всё, но 10min/5min приоритетнее, если
-# когда-то появятся.
-TELEMETRY_FREQ_PRIORITY: tuple[str, ...] = ("10min", "5min", "15min", "2min", "15s")
+# Canonical frequency of the anomaly_database parquet used by the latest
+# research runs. Keep in sync with scripts/reports/generate_*_report.py --source.
+CANONICAL_TELEMETRY_FREQ: dict[str, str] = {
+    "negermet": "2min",
+    "pritok": "10min",
+    "salt": "15min",
+}
 
 
 def _resolve_telemetry_path(data_root: Path, anomaly: str, well_id: str) -> Path | None:
-    for freq in TELEMETRY_FREQ_PRIORITY:
-        p = anomaly_database_parquet_path(data_root, anomaly, freq)
-        if not p.exists():
-            continue
-        df = read_parquet_cached(p)
-        if "well_id" not in df.columns:
-            continue
-        if not df.filter(pl.col("well_id") == well_id).is_empty():
-            return p
-    return None
+    freq = CANONICAL_TELEMETRY_FREQ.get(anomaly)
+    if freq is None:
+        return None
+    p = anomaly_database_parquet_path(data_root, anomaly, freq)
+    if not p.exists():
+        return None
+    df = read_parquet_cached(p)
+    if "well_id" not in df.columns:
+        return None
+    if df.filter(pl.col("well_id") == well_id).is_empty():
+        return None
+    return p
 
 
 def _downsample_stride(n: int, limit: int) -> int:
