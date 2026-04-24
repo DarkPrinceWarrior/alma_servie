@@ -66,6 +66,8 @@ services:
     build:
       context: ../..
       dockerfile: app/front/Dockerfile
+      args:
+        API_BASE_URL: http://backend:8000
     container_name: alma_servie_front
     environment:
       NODE_ENV: production
