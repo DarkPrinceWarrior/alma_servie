@@ -119,8 +119,27 @@ truth), без импорта research-конфигов.
   Это валидный режим для worker-контейнера (этап D roadmap) или для
   локального `uv run uvicorn`, если в корневом `venv/` есть все deps.
 
-Остальные ручки (reports, auth, users) добавляются отдельными фичами —
-см. `docs/backend_roadmap.md`.
+Shortcut: `GET /api/detections/{run_id}/report` → 307 redirect на
+`/api/reports/{anomaly}/{detector}/html`.
+
+### Reports
+
+Отчёты и точечные scores прогона детектора.
+
+- `GET /api/reports/{anomaly}/{detector}/html` →
+  `artifacts/reports/{anomaly}/{anomaly}_{detector}_report.html` как
+  `FileResponse` с `Content-Security-Policy: frame-ancestors *` для
+  встраивания в `<iframe>` фронта.
+- `GET /api/reports/{anomaly}/{detector}/scores?well_id=&from=&to=&limit=2000`
+  → `ScoreSeries{well_id, anomaly, detector, n_points, n_downsampled,
+  points: [{t, score, split}]}`. Downsampling — равномерная decimation
+  по stride, `limit` ограничен 20000.
+- `GET /api/reports/{anomaly}/{detector}/starts?well_id=&split=` →
+  список `PredictedStart{well_id, detected_time, split}`, отсортированных
+  по `detected_time`.
+
+Остальные ручки (auth, users) добавляются отдельными фичами — см.
+`docs/backend_roadmap.md`.
 
 ## Checks
 

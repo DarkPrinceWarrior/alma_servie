@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Query, status
+from fastapi.responses import RedirectResponse
 
 from back.api.deps import DbDep
 from back.api.detections import crud, service
@@ -64,3 +65,14 @@ async def get_detection(run_id: UUID, db: DbDep) -> DetectionRunRead:
     if run is None:
         raise HTTPException(status_code=404, detail=f"Detection run '{run_id}' not found")
     return DetectionRunRead.model_validate(run)
+
+
+@router.get("/detections/{run_id}/report", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+async def get_detection_report(run_id: UUID, db: DbDep) -> RedirectResponse:
+    run = await crud.get_run(db, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Detection run '{run_id}' not found")
+    return RedirectResponse(
+        url=f"/api/reports/{run.anomaly}/{run.detector}/html",
+        status_code=status.HTTP_307_TEMPORARY_REDIRECT,
+    )
