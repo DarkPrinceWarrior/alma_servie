@@ -38,6 +38,30 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  worker:
+    build:
+      context: ../..
+      dockerfile: app/back/worker/Dockerfile
+    container_name: alma_servie_worker
+    profiles: ["heavy"]
+    env_file:
+      - .env
+    environment:
+      ENVIRONMENT: docker
+      DEBUG: "false"
+      POSTGRES_HOST: postgres
+      DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/alma_servie
+      DATA_ROOT: /data
+      RESEARCH_ROOT: /workspace
+      DETECTION_MOCK: "false"
+    volumes:
+      - ../..:/data
+      - ../..:/workspace:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16
     container_name: alma_servie_postgres

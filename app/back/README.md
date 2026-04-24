@@ -53,15 +53,31 @@ API доступен на `http://localhost:8000`, Swagger — `http://localhost
 
 ## Docker Compose
 
-Полный стек:
+Лёгкий стек (api + postgres, по дефолту):
 
 ```bash
-docker compose up --build
+docker compose up --build -d
 ```
 
 Старт включает `alma_servie_postgres` (`localhost:5432`) и
-`alma_servie_backend` (`localhost:8000`). Контейнер backend дожидается
+`alma_servie_api` (`localhost:8000`). Контейнер api дожидается
 healthcheck Postgres, применяет `alembic upgrade head` и запускает uvicorn.
+Детекция в этом режиме работает в mock-режиме (`DETECTION_MOCK=true`).
+
+Полный стек с worker-контейнером (тяжёлый, ~3 ГБ образ с torch/numba):
+
+```bash
+# 1) в .env переключить api на реального worker'a
+echo "DETECTION_MOCK=false" >> .env
+
+# 2) поднять с профилем heavy
+docker compose --profile heavy up --build -d
+```
+
+worker (`alma_servie_worker`) крутит polling-loop по таблице
+`detection_runs` (`SELECT ... FOR UPDATE SKIP LOCKED`), забирает
+`pending` задачи и запускает реальные `scripts/detection/detect_*.py`
+через subprocess в `/workspace`.
 
 Остановить:
 
@@ -112,12 +128,16 @@ truth), без импорта research-конфигов.
 
 Режим выполнения задаётся через `DETECTION_MOCK`:
 
-- `true` (дефолт для api-контейнера) — фоновая `asyncio.sleep` +
-  синтетический `summary_json`. Реальный subprocess не стартует —
-  api-образу это и не нужно, у него нет research-стека.
-- `false` — запускается `asyncio.create_subprocess_exec` в `RESEARCH_ROOT`.
-  Это валидный режим для worker-контейнера (этап D roadmap) или для
-  локального `uv run uvicorn`, если в корневом `venv/` есть все deps.
+- `true` (дефолт api-контейнера в легковесном стеке) — при POST api
+  сам запускает `asyncio.sleep` + синтетический `summary_json`.
+  Реальный subprocess не стартует — api-образу это и не нужно, у
+  него нет research-стека.
+- `false` — api **только вставляет** `pending` в `detection_runs` и
+  оставляет выполнение worker-контейнеру (`alma_servie_worker`),
+  который крутит polling-loop со `SELECT ... FOR UPDATE SKIP LOCKED`.
+  При запуске `docker compose --profile heavy up` — переключай api
+  в этот режим (иначе и api, и worker будут пытаться обработать
+  одну задачу).
 
 Shortcut: `GET /api/detections/{run_id}/report` → 307 redirect на
 `/api/reports/{anomaly}/{detector}/html`.

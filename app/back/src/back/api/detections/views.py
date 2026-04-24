@@ -11,6 +11,7 @@ from back.api.detections.schemas import (
     DetectionRunList,
     DetectionRunRead,
 )
+from back.core.config import settings
 
 router = APIRouter(tags=["Detections"])
 
@@ -32,7 +33,8 @@ async def launch_detection(payload: DetectionRunCreate, db: DbDep) -> DetectionR
             },
         )
     run = await crud.create_run(db, payload.anomaly, payload.detector)
-    service.schedule(run.id, payload.anomaly, payload.detector, run.command)
+    if settings.detection_mock:
+        service.schedule(run.id, payload.anomaly, payload.detector, run.command)
     return DetectionRunRead.model_validate(run)
 
 
