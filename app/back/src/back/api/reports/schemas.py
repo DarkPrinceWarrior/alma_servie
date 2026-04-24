@@ -59,6 +59,18 @@ class PredictedOnset(BaseModel):
     split: str
 
 
+class IntervalResult(BaseModel):
+    interval_idx: int
+    actual_start: datetime
+    actual_end: datetime
+    detected_time: datetime | None
+    delay_hours: float | None
+    status: str
+    split: str
+    data_start: datetime | None
+    data_end: datetime | None
+
+
 class WellSeriesResponse(BaseModel):
     well_id: str
     anomaly: str
@@ -73,6 +85,7 @@ class WellSeriesResponse(BaseModel):
     telemetry: list[TelemetryChannel]
     intervals: list[AnomalyInterval]
     predicted_starts: list[PredictedOnset]
+    results: list[IntervalResult]
 
 
 class FeatureImportanceItem(BaseModel):

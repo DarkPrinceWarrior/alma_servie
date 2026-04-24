@@ -3,55 +3,61 @@
 import dynamic from "next/dynamic";
 import type { Data, Layout, Shape } from "plotly.js";
 import { useMemo } from "react";
-import type { WellSeriesResponse } from "@/lib/api/types";
+import type {
+  FeatureImportanceResponse,
+  WellSeriesResponse,
+} from "@/lib/api/types";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
 interface Props {
   series: WellSeriesResponse;
+  fi?: FeatureImportanceResponse | null;
 }
 
-const ANOMALY_HIGHLIGHT = "rgba(220, 38, 38, 0.12)";
+const ANOMALY_FILL = "rgba(220, 38, 38, 0.12)";
 const ANOMALY_BORDER = "rgba(220, 38, 38, 0.8)";
-const PRED_ONSET = "rgba(239, 68, 68, 0.9)";
+const ONSET_COLOR = "#a855f7";
+const START_COLOR = "#16a34a";
+const END_COLOR = "#dc2626";
 
-export function WellReportChart({ series }: Props) {
+const PRESSURE_CHANNEL = "Давление на приеме насоса кгс/см²";
+
+function pickDefaultChannels(
+  telemetryNames: string[],
+  fi: FeatureImportanceResponse | null | undefined,
+): Set<string> {
+  const defaults = new Set<string>();
+  if (telemetryNames.includes(PRESSURE_CHANNEL)) defaults.add(PRESSURE_CHANNEL);
+
+  if (fi?.items && fi.items.length > 0) {
+    const top = fi.items
+      .filter((it) => it.feature !== PRESSURE_CHANNEL && it.importance > 0)
+      .sort((a, b) => b.importance - a.importance);
+    if (top[0] && telemetryNames.includes(top[0].feature)) {
+      defaults.add(top[0].feature);
+    }
+  }
+  return defaults;
+}
+
+export function WellReportChart({ series, fi }: Props) {
   const { scoreTraces, telemetryTraces, shapes } = useMemo(() => {
     const tr: Data[] = [];
-
     if (series.score.length > 0) {
       tr.push({
         type: "scattergl",
         mode: "lines",
-        name: "score",
+        name: "Отклонение от нормы",
         x: series.score.map((p) => p.t),
         y: series.score.map((p) => p.v),
         line: { color: "#111827", width: 1.6 },
         yaxis: "y",
       });
     }
-    if (series.paano_short.length > 0) {
-      tr.push({
-        type: "scattergl",
-        mode: "lines",
-        name: "paano_short",
-        x: series.paano_short.map((p) => p.t),
-        y: series.paano_short.map((p) => p.v),
-        line: { color: "#0891b2", width: 1 },
-        yaxis: "y",
-      });
-    }
-    if (series.paano_long.length > 0) {
-      tr.push({
-        type: "scattergl",
-        mode: "lines",
-        name: "paano_long",
-        x: series.paano_long.map((p) => p.t),
-        y: series.paano_long.map((p) => p.v),
-        line: { color: "#a855f7", width: 1 },
-        yaxis: "y",
-      });
-    }
+
+    const telemetryNames = series.telemetry.map((t) => t.name);
+    const defaults = pickDefaultChannels(telemetryNames, fi);
 
     const tel: Data[] = series.telemetry.map((ch) => ({
       type: "scattergl",
@@ -61,56 +67,92 @@ export function WellReportChart({ series }: Props) {
       y: ch.points.map((p) => p.v),
       line: { width: 1 },
       yaxis: "y2",
-      visible: "legendonly",
+      visible: defaults.has(ch.name) ? true : "legendonly",
     }));
 
-    const anomalyShapes: Partial<Shape>[] = series.intervals.map((iv) => ({
-      type: "rect",
-      xref: "x",
-      yref: "paper",
-      x0: iv.start,
-      x1: iv.end,
-      y0: 0,
-      y1: 1,
-      fillcolor: ANOMALY_HIGHLIGHT,
-      line: { color: ANOMALY_BORDER, width: 2 },
-      layer: "below",
-    }));
+    const firstResult = series.results[0];
+    const fallbackInterval = series.intervals[0];
+    const actualStart =
+      firstResult?.actual_start ?? fallbackInterval?.start ?? null;
+    const actualEnd = firstResult?.actual_end ?? fallbackInterval?.end ?? null;
+    const detected = firstResult?.detected_time ?? null;
 
-    const onsetShapes: Partial<Shape>[] = series.predicted_starts.map((ps) => ({
-      type: "line",
-      xref: "x",
-      yref: "paper",
-      x0: ps.t,
-      x1: ps.t,
-      y0: 0,
-      y1: 1,
-      line: { color: PRED_ONSET, width: 1.5, dash: "dot" },
-    }));
+    const s: Partial<Shape>[] = [];
 
-    return {
-      scoreTraces: tr,
-      telemetryTraces: tel,
-      shapes: [...anomalyShapes, ...onsetShapes],
-    };
-  }, [series]);
+    // Красная зона фактической аномалии (actual_start → actual_end)
+    if (actualStart && actualEnd) {
+      s.push({
+        type: "rect",
+        xref: "x",
+        yref: "paper",
+        x0: actualStart,
+        x1: actualEnd,
+        y0: 0,
+        y1: 1,
+        fillcolor: ANOMALY_FILL,
+        line: { color: ANOMALY_BORDER, width: 1.5 },
+        layer: "below",
+      });
+    }
+    // Зелёная вертикальная линия — фактическое начало
+    if (actualStart) {
+      s.push({
+        type: "line",
+        xref: "x",
+        yref: "paper",
+        x0: actualStart,
+        x1: actualStart,
+        y0: 0,
+        y1: 1,
+        line: { color: START_COLOR, width: 1.5 },
+      });
+    }
+    // Красная пунктирная — фактическое окончание
+    if (actualEnd) {
+      s.push({
+        type: "line",
+        xref: "x",
+        yref: "paper",
+        x0: actualEnd,
+        x1: actualEnd,
+        y0: 0,
+        y1: 1,
+        line: { color: END_COLOR, width: 1.5, dash: "dot" },
+      });
+    }
+    // Фиолетовая штрихпунктирная — время обнаружения
+    if (detected) {
+      s.push({
+        type: "line",
+        xref: "x",
+        yref: "paper",
+        x0: detected,
+        x1: detected,
+        y0: 0,
+        y1: 1,
+        line: { color: ONSET_COLOR, width: 2, dash: "dashdot" },
+      });
+    }
+
+    return { scoreTraces: tr, telemetryTraces: tel, shapes: s };
+  }, [series, fi]);
 
   const data = [...scoreTraces, ...telemetryTraces];
 
   const layout: Partial<Layout> = {
     autosize: true,
     height: 560,
-    margin: { l: 60, r: 60, t: 30, b: 50 },
+    margin: { l: 60, r: 60, t: 30, b: 70 },
     showlegend: true,
-    legend: { orientation: "h", y: -0.15 },
+    legend: { orientation: "h", y: -0.18 },
     xaxis: { title: { text: "Время" } },
     yaxis: {
-      title: { text: "score / paano" },
+      title: { text: "Отклонение от нормы" },
       side: "left",
       zeroline: true,
     },
     yaxis2: {
-      title: { text: "телеметрия" },
+      title: { text: "Каналы телеметрии" },
       overlaying: "y",
       side: "right",
       showgrid: false,
@@ -119,8 +161,17 @@ export function WellReportChart({ series }: Props) {
     hovermode: "x unified",
   };
 
+  const firstResult = series.results[0];
+
   return (
-    <div className="w-full rounded-md border bg-card p-2">
+    <div className="w-full space-y-2 rounded-md border bg-card p-2">
+      <div className="flex flex-wrap items-center gap-4 px-2 text-xs text-muted-foreground">
+        <LegendDot color="#111827" label="Отклонение от нормы (score)" />
+        <LegendDot color={ANOMALY_BORDER} label="Зона аномалии" filled />
+        <LegendDot color={START_COLOR} label="Фактическое начало" />
+        <LegendDot color={END_COLOR} label="Фактическое окончание" dashed />
+        <LegendDot color={ONSET_COLOR} label="Время обнаружения" dashed />
+      </div>
       <Plot
         data={data}
         layout={layout}
@@ -128,11 +179,53 @@ export function WellReportChart({ series }: Props) {
         useResizeHandler
         style={{ width: "100%", height: "560px" }}
       />
-      <div className="px-2 py-1 text-xs text-muted-foreground">
-        {series.n_points_downsampled} / {series.n_points_raw} точек ·{" "}
-        {series.telemetry.length} каналов · {series.intervals.length} интервалов
-        · {series.predicted_starts.length} предсказанных onset'ов
+      <div className="flex flex-wrap gap-4 px-2 py-1 text-xs text-muted-foreground">
+        <span>
+          {series.n_points_downsampled} / {series.n_points_raw} точек
+        </span>
+        <span>{series.telemetry.length} каналов</span>
+        <span>{series.intervals.length} размеченных интервалов</span>
+        {firstResult?.status && (
+          <span className="font-medium text-foreground">
+            Статус: {firstResult.status}
+          </span>
+        )}
       </div>
     </div>
+  );
+}
+
+function LegendDot({
+  color,
+  label,
+  dashed,
+  filled,
+}: {
+  color: string;
+  label: string;
+  dashed?: boolean;
+  filled?: boolean;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5">
+      <span
+        className="inline-block h-2 w-4"
+        style={{
+          background: filled ? `${color}22` : "transparent",
+          borderTop: dashed
+            ? `2px dashed ${color}`
+            : filled
+              ? `1px solid ${color}`
+              : `2px solid ${color}`,
+          ...(filled
+            ? {
+                borderLeft: `1px solid ${color}`,
+                borderRight: `1px solid ${color}`,
+              }
+            : {}),
+        }}
+      />
+      {label}
+    </span>
   );
 }

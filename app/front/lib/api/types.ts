@@ -95,6 +95,18 @@ export interface PredictedOnset {
   split: string;
 }
 
+export interface IntervalResult {
+  interval_idx: number;
+  actual_start: string;
+  actual_end: string;
+  detected_time: string | null;
+  delay_hours: number | null;
+  status: string;
+  split: string;
+  data_start: string | null;
+  data_end: string | null;
+}
+
 export interface WellSeriesResponse {
   well_id: string;
   anomaly: string;
@@ -109,6 +121,7 @@ export interface WellSeriesResponse {
   telemetry: TelemetryChannel[];
   intervals: AnomalyInterval[];
   predicted_starts: PredictedOnset[];
+  results: IntervalResult[];
 }
 
 export interface FeatureImportanceItem {

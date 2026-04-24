@@ -11,6 +11,7 @@ from back.api.reports.schemas import (
     DetectorAvailability,
     FeatureImportanceItem,
     FeatureImportanceResponse,
+    IntervalResult,
     PredictedOnset,
     PredictedStart,
     ScorePoint,
@@ -28,6 +29,7 @@ from back.services.paths import (
     html_report_path,
     intervals_parquet_path,
     predicted_starts_parquet_path,
+    results_parquet_path,
     scores_parquet_path,
 )
 
@@ -212,6 +214,28 @@ def load_well_series(
         for row in ps.iter_rows(named=True):
             predicted_starts.append(PredictedOnset(t=row["detected_time"], split=row["split"]))
 
+    results: list[IntervalResult] = []
+    res_path = results_parquet_path(data_root, anomaly, detector)
+    if res_path.exists():
+        res = (
+            read_parquet_cached(res_path).filter(pl.col("well_id") == well_id).sort("interval_idx")
+        )
+        for row in res.iter_rows(named=True):
+            dh = row.get("delay_hours")
+            results.append(
+                IntervalResult(
+                    interval_idx=row["interval_idx"],
+                    actual_start=row["actual_start"],
+                    actual_end=row["actual_end"],
+                    detected_time=row.get("detected_time"),
+                    delay_hours=float(dh) if dh is not None else None,
+                    status=str(row.get("status") or ""),
+                    split=str(row.get("split") or ""),
+                    data_start=row.get("data_start"),
+                    data_end=row.get("data_end"),
+                )
+            )
+
     return WellSeriesResponse(
         well_id=well_id,
         anomaly=anomaly,
@@ -226,6 +250,7 @@ def load_well_series(
         telemetry=telemetry,
         intervals=intervals,
         predicted_starts=predicted_starts,
+        results=results,
     )
 
 

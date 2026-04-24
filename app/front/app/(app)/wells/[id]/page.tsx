@@ -117,7 +117,7 @@ export default function WellPage() {
   }, [anomaly, detector, wellId, hasReport]);
 
   useEffect(() => {
-    if (!detector || !hasFI || tab !== "feature_importance") return;
+    if (!detector || !hasFI) return;
     if (fi?.well_id === wellId && fi.detector === detector) return;
     let active = true;
     setFiLoading(true);
@@ -135,17 +135,23 @@ export default function WellPage() {
     return () => {
       active = false;
     };
-  }, [anomaly, detector, wellId, hasFI, tab, fi]);
+  }, [anomaly, detector, wellId, hasFI, fi]);
 
   const activeTab: Tab =
     tab === "feature_importance" && hasFI ? "feature_importance" : "report";
 
+  const firstResult = series?.results[0] ?? null;
   const firstInterval = well?.intervals[0];
-  const actualStart = firstInterval?.start_date ?? null;
-  const actualEnd = firstInterval?.end_date ?? null;
-  const detectedAt = series?.predicted_starts[0]?.t ?? actualStart;
+  const actualStart =
+    firstResult?.actual_start ?? firstInterval?.start_date ?? null;
+  const actualEnd = firstResult?.actual_end ?? firstInterval?.end_date ?? null;
+  const detectedAt = firstResult?.detected_time ?? null;
   const delay =
-    actualStart && detectedAt ? hoursBetween(actualStart, detectedAt) : "—";
+    firstResult?.delay_hours !== null && firstResult?.delay_hours !== undefined
+      ? `${firstResult.delay_hours.toFixed(2)}ч`
+      : actualStart && detectedAt
+        ? hoursBetween(actualStart, detectedAt)
+        : "—";
 
   return (
     <div className="mx-auto max-w-[1440px] px-10 py-6 space-y-5">
@@ -206,7 +212,7 @@ export default function WellPage() {
           {seriesLoading && !series && (
             <LoadingCard text="Загружаем временные ряды…" />
           )}
-          {series && <WellReportChart series={series} />}
+          {series && <WellReportChart series={series} fi={fi} />}
           {!seriesLoading && !series && !hasReport && (
             <NoReportCard anomaly={anomaly} />
           )}
@@ -216,7 +222,7 @@ export default function WellPage() {
           {fiLoading && !fi && (
             <LoadingCard text="Загружаем feature importance…" />
           )}
-          {fi && <FeatureImportanceChart fi={fi} />}
+          {fi && <FeatureImportanceChart fi={fi} series={series} />}
         </>
       )}
     </div>

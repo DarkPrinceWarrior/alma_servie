@@ -33,3 +33,7 @@ def fi_summary_json_path(data_root: Path, anomaly: str, detector: str) -> Path:
 
 def intervals_parquet_path(data_root: Path, anomaly: str) -> Path:
     return data_root / "db" / f"{anomaly}_intervals.parquet"
+
+
+def results_parquet_path(data_root: Path, anomaly: str, detector: str) -> Path:
+    return data_root / "artifacts" / "results" / f"{anomaly}_{detector}_results.parquet"
