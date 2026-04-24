@@ -7,11 +7,22 @@ from fastapi.responses import FileResponse
 from back.api.deps import DataRootDep
 from back.api.detections.schemas import DetectorType
 from back.api.reports import crud
-from back.api.reports.schemas import PredictedStart, ScoreSeries
+from back.api.reports.schemas import (
+    AnomalyReportAvailability,
+    PredictedStart,
+    ScoreSeries,
+)
 from back.api.wells.schemas import AnomalyType
-from back.services.paths import html_report_path
+from back.services.paths import feature_importance_html_path, html_report_path
 
 router = APIRouter(tags=["Reports"])
+
+
+@router.get("/reports/{anomaly}/availability", response_model=AnomalyReportAvailability)
+async def get_availability(
+    anomaly: AnomalyType, data_root: DataRootDep
+) -> AnomalyReportAvailability:
+    return crud.check_availability(data_root, anomaly)
 
 
 @router.get("/reports/{anomaly}/{detector}/html")
@@ -21,6 +32,24 @@ async def get_report_html(
     path = html_report_path(data_root, anomaly, detector)
     if not path.exists():
         raise HTTPException(status_code=404, detail=f"Report for '{anomaly}/{detector}' not found")
+    return FileResponse(
+        path=path,
+        media_type="text/html; charset=utf-8",
+        filename=path.name,
+        headers={"Content-Security-Policy": "frame-ancestors *"},
+    )
+
+
+@router.get("/reports/{anomaly}/{detector}/feature-importance")
+async def get_feature_importance_html(
+    anomaly: AnomalyType, detector: DetectorType, data_root: DataRootDep
+) -> FileResponse:
+    path = feature_importance_html_path(data_root, anomaly, detector)
+    if not path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Feature importance for '{anomaly}/{detector}' not found",
+        )
     return FileResponse(
         path=path,
         media_type="text/html; charset=utf-8",

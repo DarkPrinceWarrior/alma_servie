@@ -3,9 +3,22 @@ from pathlib import Path
 
 import polars as pl
 
-from back.api.reports.schemas import PredictedStart, ScorePoint, ScoreSeries
+from back.api.reports.constants import ALL_DETECTORS, BEST_DETECTOR_BY_ANOMALY
+from back.api.reports.schemas import (
+    AnomalyReportAvailability,
+    DetectorAvailability,
+    PredictedStart,
+    ScorePoint,
+    ScoreSeries,
+)
+from back.api.wells.schemas import AnomalyType
 from back.services.parquet import read_parquet_cached
-from back.services.paths import predicted_starts_parquet_path, scores_parquet_path
+from back.services.paths import (
+    feature_importance_html_path,
+    html_report_path,
+    predicted_starts_parquet_path,
+    scores_parquet_path,
+)
 
 
 def _downsample_stride(n: int, limit: int) -> int:
@@ -64,6 +77,37 @@ def load_scores(
         n_points=n_points,
         n_downsampled=n_downsampled,
         points=points,
+    )
+
+
+def check_availability(data_root: Path, anomaly: AnomalyType) -> AnomalyReportAvailability:
+    detectors: list[DetectorAvailability] = []
+    for det in ALL_DETECTORS:
+        detectors.append(
+            DetectorAvailability(
+                detector=det,
+                has_report=html_report_path(data_root, anomaly, det).exists(),
+                has_feature_importance=feature_importance_html_path(
+                    data_root, anomaly, det
+                ).exists(),
+            )
+        )
+
+    preferred = BEST_DETECTOR_BY_ANOMALY.get(anomaly)
+    best: str | None = None
+    if preferred is not None and any(d.detector == preferred and d.has_report for d in detectors):
+        best = preferred
+    else:
+        for d in detectors:
+            if d.has_report:
+                best = d.detector
+                break
+
+    return AnomalyReportAvailability(
+        anomaly=anomaly,
+        detectors=detectors,
+        best_detector=best,
+        has_any_report=best is not None,
     )
 
 
