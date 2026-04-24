@@ -391,7 +391,7 @@ api читает, worker пишет. Если worker падает в серед�
 | 2026-04-23 | push | — | ветка `app/backend` на origin |
 | 2026-04-24 | **A. wells** | `9b35428` | ручки list/get/intervals над parquet, polars, Dockerfile build context=../.., volume ../..:/data:ro; 5/7 тестов |
 | 2026-04-24 | **B. detections** | `122c7d3` | таблица detection_runs + миграция 0001, api/detections (POST/GET list/GET by id) + single-flight 409, fake executor (DETECTION_MOCK), +3 теста; docker smoke ok (pending→running→succeeded за 2 сек) |
-| 2026-04-24 | **C. reports** | `<pending>` | api/reports (html/scores/starts), GET /api/detections/{id}/report shortcut (307), path-резолвер, downsample stride, CSP frame-ancestors; +8 тестов; docker smoke: 9.8 МБ HTML, 1365→N scores, 18 предсказанных стартов |
+| 2026-04-24 | **C. reports** | `024f4d4` | api/reports (html/scores/starts), GET /api/detections/{id}/report shortcut (307), path-резолвер, downsample stride, CSP frame-ancestors; +8 тестов; docker smoke: 9.8 МБ HTML, 1365→N scores, 18 предсказанных стартов |
 | | B. detections | | |
 | | C. reports | | |
 | | D. worker | | |
