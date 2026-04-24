@@ -389,7 +389,7 @@ api читает, worker пишет. Если worker падает в серед�
 | 2026-04-23 | compose fix | `3eba2e2` | переименование контейнера + project name |
 | 2026-04-23 | pkg wiring | `3067174` | корневой pyproject + alma-service editable |
 | 2026-04-23 | push | — | ветка `app/backend` на origin |
-| 2026-04-24 | **A. wells** | `<pending>` | ручки list/get/intervals над parquet, polars, Dockerfile build context=../.., volume ../..:/data:ro; 5/7 тестов |
+| 2026-04-24 | **A. wells** | `9b35428` | ручки list/get/intervals над parquet, polars, Dockerfile build context=../.., volume ../..:/data:ro; 5/7 тестов |
 | | B. detections | | |
 | | C. reports | | |
 | | D. worker | | |
