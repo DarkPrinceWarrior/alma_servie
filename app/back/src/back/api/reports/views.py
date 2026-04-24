@@ -9,8 +9,10 @@ from back.api.detections.schemas import DetectorType
 from back.api.reports import crud
 from back.api.reports.schemas import (
     AnomalyReportAvailability,
+    FeatureImportanceResponse,
     PredictedStart,
     ScoreSeries,
+    WellSeriesResponse,
 )
 from back.api.wells.schemas import AnomalyType
 from back.services.paths import feature_importance_html_path, html_report_path
@@ -79,6 +81,42 @@ async def get_scores(
             detail=f"Scores parquet for '{anomaly}/{detector}' not found",
         )
     return series
+
+
+@router.get("/reports/{anomaly}/{detector}/well-series", response_model=WellSeriesResponse)
+async def get_well_series(
+    anomaly: AnomalyType,
+    detector: DetectorType,
+    data_root: DataRootDep,
+    well_id: Annotated[str, Query(description="Well ID")],
+    limit: Annotated[int, Query(ge=1, le=20000)] = 2000,
+) -> WellSeriesResponse:
+    series = crud.load_well_series(data_root, anomaly, detector, well_id=well_id, limit=limit)
+    if series is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Scores parquet for '{anomaly}/{detector}' not found",
+        )
+    return series
+
+
+@router.get(
+    "/reports/{anomaly}/{detector}/feature-importance-data",
+    response_model=FeatureImportanceResponse,
+)
+async def get_feature_importance_data(
+    anomaly: AnomalyType,
+    detector: DetectorType,
+    data_root: DataRootDep,
+    well_id: Annotated[str, Query(description="Well ID")],
+) -> FeatureImportanceResponse:
+    fi = crud.load_feature_importance(data_root, anomaly, detector, well_id=well_id)
+    if fi is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Feature importance data for '{anomaly}/{detector}' not found",
+        )
+    return fi
 
 
 @router.get("/reports/{anomaly}/{detector}/starts", response_model=list[PredictedStart])
