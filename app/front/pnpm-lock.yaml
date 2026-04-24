@@ -60,6 +60,9 @@ importers:
       '@types/node':
         specifier: ^20
         version: 20.19.39
+      '@types/plotly.js':
+        specifier: ^3.0.10
+        version: 3.0.10
       '@types/plotly.js-dist-min':
         specifier: ^2.3.4
         version: 2.3.4

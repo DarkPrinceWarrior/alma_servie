@@ -4,11 +4,17 @@ import { ArrowLeft, HelpCircle } from "lucide-react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
+import { FeatureImportanceChart } from "@/components/reports/FeatureImportanceChart";
+import { WellReportChart } from "@/components/reports/WellReportChart";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { type AnomalyType, reports, wells } from "@/lib/api";
-import { featureImportanceHtmlUrl, reportHtmlUrl } from "@/lib/api/reports";
-import type { AnomalyReportAvailability, WellDetail } from "@/lib/api/types";
+import type {
+  AnomalyReportAvailability,
+  FeatureImportanceResponse,
+  WellDetail,
+  WellSeriesResponse,
+} from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 
 const ANOMALY_LABEL: Record<AnomalyType, string> = {
@@ -49,6 +55,10 @@ export default function WellPage() {
     useState<AnomalyReportAvailability | null>(null);
   const [tab, setTab] = useState<Tab>("report");
   const [error, setError] = useState<string | null>(null);
+  const [series, setSeries] = useState<WellSeriesResponse | null>(null);
+  const [fi, setFi] = useState<FeatureImportanceResponse | null>(null);
+  const [seriesLoading, setSeriesLoading] = useState(false);
+  const [fiLoading, setFiLoading] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -80,19 +90,60 @@ export default function WellPage() {
   const hasReport = !!detectorRow?.has_report;
   const hasFI = !!detectorRow?.has_feature_importance;
 
+  useEffect(() => {
+    if (!detector || !hasReport) {
+      setSeries(null);
+      return;
+    }
+    let active = true;
+    setSeriesLoading(true);
+    reports
+      .getWellSeries(anomaly, detector, wellId, 2000)
+      .then((s) => {
+        if (active) setSeries(s);
+      })
+      .catch((err) => {
+        if (active)
+          setError(
+            err instanceof Error ? err.message : "Ошибка загрузки графика",
+          );
+      })
+      .finally(() => {
+        if (active) setSeriesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [anomaly, detector, wellId, hasReport]);
+
+  useEffect(() => {
+    if (!detector || !hasFI || tab !== "feature_importance") return;
+    if (fi?.well_id === wellId && fi.detector === detector) return;
+    let active = true;
+    setFiLoading(true);
+    reports
+      .getFeatureImportance(anomaly, detector, wellId)
+      .then((r) => {
+        if (active) setFi(r);
+      })
+      .catch((err) => {
+        if (active) setError(err instanceof Error ? err.message : "Ошибка FI");
+      })
+      .finally(() => {
+        if (active) setFiLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [anomaly, detector, wellId, hasFI, tab, fi]);
+
   const activeTab: Tab =
     tab === "feature_importance" && hasFI ? "feature_importance" : "report";
-  const iframeSrc =
-    detector && hasReport
-      ? activeTab === "feature_importance"
-        ? featureImportanceHtmlUrl(anomaly, detector)
-        : reportHtmlUrl(anomaly, detector)
-      : null;
 
   const firstInterval = well?.intervals[0];
   const actualStart = firstInterval?.start_date ?? null;
   const actualEnd = firstInterval?.end_date ?? null;
-  const detectedAt = actualStart;
+  const detectedAt = series?.predicted_starts[0]?.t ?? actualStart;
   const delay =
     actualStart && detectedAt ? hoursBetween(actualStart, detectedAt) : "—";
 
@@ -150,24 +201,23 @@ export default function WellPage() {
 
       {error && <p className="text-sm text-destructive">Ошибка: {error}</p>}
 
-      {iframeSrc ? (
-        <iframe
-          key={iframeSrc}
-          src={iframeSrc}
-          title={`${anomaly} report`}
-          className="h-[80vh] w-full rounded-md border bg-white"
-        />
+      {activeTab === "report" ? (
+        <>
+          {seriesLoading && !series && (
+            <LoadingCard text="Загружаем временные ряды…" />
+          )}
+          {series && <WellReportChart series={series} />}
+          {!seriesLoading && !series && !hasReport && (
+            <NoReportCard anomaly={anomaly} />
+          )}
+        </>
       ) : (
-        <Card>
-          <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
-            <p className="text-muted-foreground">
-              Отчёт для аномалии «{ANOMALY_LABEL[anomaly]}» ещё не сгенерирован.
-            </p>
-            <Link href="/">
-              <Button variant="outline">Вернуться на главную</Button>
-            </Link>
-          </CardContent>
-        </Card>
+        <>
+          {fiLoading && !fi && (
+            <LoadingCard text="Загружаем feature importance…" />
+          )}
+          {fi && <FeatureImportanceChart fi={fi} />}
+        </>
       )}
     </div>
   );
@@ -219,5 +269,30 @@ function TabButton({
     >
       {children}
     </button>
+  );
+}
+
+function LoadingCard({ text }: { text: string }) {
+  return (
+    <Card>
+      <CardContent className="py-10 text-center text-sm text-muted-foreground">
+        {text}
+      </CardContent>
+    </Card>
+  );
+}
+
+function NoReportCard({ anomaly }: { anomaly: AnomalyType }) {
+  return (
+    <Card>
+      <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
+        <p className="text-muted-foreground">
+          Отчёт для аномалии «{ANOMALY_LABEL[anomaly]}» ещё не сгенерирован.
+        </p>
+        <Link href="/">
+          <Button variant="outline">Вернуться на главную</Button>
+        </Link>
+      </CardContent>
+    </Card>
   );
 }

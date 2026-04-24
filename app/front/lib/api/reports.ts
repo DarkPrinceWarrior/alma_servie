@@ -3,8 +3,10 @@ import type {
   AnomalyReportAvailability,
   AnomalyType,
   DetectorType,
+  FeatureImportanceResponse,
   PredictedStart,
   ScoreSeries,
+  WellSeriesResponse,
 } from "./types";
 
 export function reportHtmlUrl(
@@ -26,6 +28,32 @@ export async function getAvailability(
 ): Promise<AnomalyReportAvailability> {
   return apiGet<AnomalyReportAvailability>(
     `/api/reports/${anomaly}/availability`,
+  );
+}
+
+export async function getWellSeries(
+  anomaly: AnomalyType,
+  detector: DetectorType | string,
+  wellId: string,
+  limit = 2000,
+): Promise<WellSeriesResponse> {
+  const params = new URLSearchParams({
+    well_id: wellId,
+    limit: String(limit),
+  });
+  return apiGet<WellSeriesResponse>(
+    `/api/reports/${anomaly}/${detector}/well-series?${params}`,
+  );
+}
+
+export async function getFeatureImportance(
+  anomaly: AnomalyType,
+  detector: DetectorType | string,
+  wellId: string,
+): Promise<FeatureImportanceResponse> {
+  const params = new URLSearchParams({ well_id: wellId });
+  return apiGet<FeatureImportanceResponse>(
+    `/api/reports/${anomaly}/${detector}/feature-importance-data?${params}`,
   );
 }
 

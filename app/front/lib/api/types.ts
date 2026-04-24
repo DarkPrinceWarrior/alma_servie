@@ -73,6 +73,56 @@ export interface PredictedStart {
   split: string;
 }
 
+export interface TimePoint {
+  t: string;
+  v: number;
+}
+
+export interface TelemetryChannel {
+  name: string;
+  points: TimePoint[];
+}
+
+export interface AnomalyInterval {
+  start: string;
+  end: string;
+  interval_idx: number;
+  split: string;
+}
+
+export interface PredictedOnset {
+  t: string;
+  split: string;
+}
+
+export interface WellSeriesResponse {
+  well_id: string;
+  anomaly: string;
+  detector: string;
+  n_points_raw: number;
+  n_points_downsampled: number;
+  time_start: string | null;
+  time_end: string | null;
+  score: TimePoint[];
+  paano_short: TimePoint[];
+  paano_long: TimePoint[];
+  telemetry: TelemetryChannel[];
+  intervals: AnomalyInterval[];
+  predicted_starts: PredictedOnset[];
+}
+
+export interface FeatureImportanceItem {
+  feature: string;
+  importance: number;
+}
+
+export interface FeatureImportanceResponse {
+  well_id: string;
+  anomaly: string;
+  detector: string;
+  items: FeatureImportanceItem[];
+}
+
 // detections
 export interface DetectionRunRead {
   id: string;
