@@ -62,6 +62,21 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  frontend:
+    build:
+      context: ../..
+      dockerfile: app/front/Dockerfile
+    container_name: alma_servie_front
+    environment:
+      NODE_ENV: production
+      API_BASE_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: postgres:16
     container_name: alma_servie_postgres
