@@ -21,27 +21,20 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="flex min-h-screen flex-col">
-      <header className="border-b bg-background">
-        <div className="mx-auto flex w-full max-w-[1440px] items-center justify-between px-10 py-3">
-          <div className="flex items-center gap-6">
-            <span className="text-base font-semibold">Alma</span>
-            <nav className="flex items-center gap-4 text-sm text-muted-foreground">
-              <a href="/" className="hover:text-foreground">
-                Главная
-              </a>
-            </nav>
-          </div>
-          <div className="flex items-center gap-3 text-sm">
-            <span className="text-muted-foreground">{user.email}</span>
-            <button
-              type="button"
-              onClick={() => logout()}
-              className="rounded-md border px-3 py-1 text-muted-foreground hover:bg-accent hover:text-foreground"
-            >
-              Выйти
-            </button>
-          </div>
+    <div className="flex min-h-screen flex-col bg-[#f9f9f9]">
+      <header className="flex items-center justify-between border-b border-[#e5e5e5] bg-[#f9f9f9] pl-4">
+        <div className="flex items-center gap-2 pr-4 text-sm text-[#424247]">
+          <span className="font-medium">Alma · Аномалии</span>
+        </div>
+        <div className="flex items-center gap-3 pr-4 text-sm">
+          <span className="text-[#797979]">{user.email}</span>
+          <button
+            type="button"
+            onClick={() => logout()}
+            className="rounded-[8px] border border-[#e5e5e5] bg-white px-3 py-1 text-[#424247] hover:bg-[#f3f3f3]"
+          >
+            Выйти
+          </button>
         </div>
       </header>
       <main className="flex-1">{children}</main>
