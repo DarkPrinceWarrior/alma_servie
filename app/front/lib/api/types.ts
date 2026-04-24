@@ -39,6 +39,19 @@ export interface WellDetail extends WellSummary {
 }
 
 // reports
+export interface DetectorAvailability {
+  detector: string;
+  has_report: boolean;
+  has_feature_importance: boolean;
+}
+
+export interface AnomalyReportAvailability {
+  anomaly: string;
+  detectors: DetectorAvailability[];
+  best_detector: string | null;
+  has_any_report: boolean;
+}
+
 export interface ScorePoint {
   t: string;
   score: number;

@@ -1,5 +1,6 @@
 import { apiGet } from "./client";
 import type {
+  AnomalyReportAvailability,
   AnomalyType,
   DetectorType,
   PredictedStart,
@@ -8,9 +9,24 @@ import type {
 
 export function reportHtmlUrl(
   anomaly: AnomalyType,
-  detector: DetectorType,
+  detector: DetectorType | string,
 ): string {
   return `/api/reports/${anomaly}/${detector}/html`;
+}
+
+export function featureImportanceHtmlUrl(
+  anomaly: AnomalyType,
+  detector: DetectorType | string,
+): string {
+  return `/api/reports/${anomaly}/${detector}/feature-importance`;
+}
+
+export async function getAvailability(
+  anomaly: AnomalyType,
+): Promise<AnomalyReportAvailability> {
+  return apiGet<AnomalyReportAvailability>(
+    `/api/reports/${anomaly}/availability`,
+  );
 }
 
 export interface ScoresQuery {
