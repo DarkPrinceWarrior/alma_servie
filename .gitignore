@@ -41,3 +41,7 @@ salt_anomaly_report_original.html
 # OS
 .DS_Store
 .worktrees/
+
+# Repomix output
+repomix-*.xml
+repomix-output.xml

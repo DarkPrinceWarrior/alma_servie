@@ -79,8 +79,24 @@ docker compose down -v        # + удалить том Postgres
 - `GET /api/health` — общий статус.
 - `GET /api/health/db` — проверка соединения с Postgres.
 
-Остальные ручки (auth, users, wells, detection, reports) добавляются
-отдельными фичами.
+### Wells
+
+Read-only API поверх `{DATA_ROOT}/db/{anomaly}_intervals.parquet`.
+Каталог скважин и split'ов берётся из самих parquet (single source of
+truth), без импорта research-конфигов.
+
+- `GET /api/wells?anomaly=negermet|pritok|salt` — список скважин с
+  сводкой (split, n_intervals, data_start, data_end).
+- `GET /api/wells/{well_id}?anomaly=...` — карточка скважины + её
+  интервалы.
+- `GET /api/wells/{well_id}/intervals?anomaly=...` — только интервалы.
+
+Ответы кэшируются по `(path, mtime_ns)` parquet-файла через
+`@lru_cache` — любое перезаписывание файла worker'ом автоматически
+инвалидирует кэш.
+
+Остальные ручки (detections, reports, auth, users) добавляются
+отдельными фичами — см. `docs/backend_roadmap.md`.
 
 ## Checks
 

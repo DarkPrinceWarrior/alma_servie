@@ -4,6 +4,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from back.api.health.views import router as health_router
+from back.api.wells.views import router as wells_router
 from back.core.config import settings
 
 
@@ -20,6 +21,7 @@ app = FastAPI(
 )
 
 app.include_router(health_router, prefix="/api")
+app.include_router(wells_router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)

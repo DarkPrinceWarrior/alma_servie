@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -9,6 +10,9 @@ class Settings(BaseSettings):
     environment: str = "local"
     debug: bool = True
     api_v1_prefix: str = "/api"
+
+    data_root: Path = Path("/data")
+    research_root: Path = Path("/workspace")
 
     postgres_user: str = "app"
     postgres_password: str = "app"
