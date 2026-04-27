@@ -174,41 +174,45 @@ def _pick_top_channel(
     well_df: pd.DataFrame,
     fi_data: dict[str, dict[str, float]],
 ) -> str | None:
-    """Pick the most important channel for a well, skipping pressure if it's #1."""
+    """Pick the most important FI v2 channel for a well, skipping pressure if it's #1."""
     well_fi = fi_data.get(well_id)
-    if well_fi:
-        sorted_channels = sorted(well_fi.items(), key=lambda x: x[1], reverse=True)
-        for ch_name, _pct in sorted_channels:
-            if ch_name != PRESSURE_COL and ch_name in well_df.columns:
-                return ch_name
+    if not well_fi:
+        return None
 
-    # Fallback: pick the column with highest variance (excluding pressure, freq, meta)
-    skip = {"well_id", "timestamp", PRESSURE_COL, FREQ_COL}
-    best_col, best_var = None, -1.0
-    for col in well_df.columns:
-        if col in skip:
-            continue
-        series = pd.to_numeric(well_df[col], errors="coerce")
-        if series.notna().sum() < 10:
-            continue
-        v = float(series.var())
-        if v > best_var:
-            best_var = v
-            best_col = col
-    return best_col
+    sorted_channels = sorted(well_fi.items(), key=lambda x: x[1], reverse=True)
+    for ch_name, _score in sorted_channels:
+        if ch_name != PRESSURE_COL and ch_name in well_df.columns:
+            return ch_name
+    return None
 
 
 def _load_feature_importance_data(spec, detector_key: str) -> dict[str, dict[str, float]]:
-    """Load feature importance from summary JSON saved by feature_importance.py.
-
-    Returns dict[well_id -> dict[channel_name -> pct_drop]].
-    """
+    """Load FI v2 summary and return dict[well_id -> dict[channel -> final_score]]."""
     import json
     fi_summary_path = DB_DIR / f"{spec.dataset.output_prefix}_{detector_key}_fi_summary.json"
     if fi_summary_path.exists():
         data = json.loads(fi_summary_path.read_text(encoding="utf-8"))
+        if data.get("version") != 2:
+            raise RuntimeError(
+                f"Legacy feature importance format in {fi_summary_path}. "
+                "Regenerate feature importance report to create version=2 summary."
+            )
+        wells = data.get("wells")
+        if not isinstance(wells, dict):
+            raise RuntimeError(f"Invalid feature importance v2 summary: {fi_summary_path}")
+        parsed: dict[str, dict[str, float]] = {}
+        for well_id, well_payload in wells.items():
+            channels = well_payload.get("channels") if isinstance(well_payload, dict) else None
+            if not isinstance(channels, dict):
+                continue
+            parsed[str(well_id)] = {
+                str(ch_name): float(ch_payload["final_score"])
+                for ch_name, ch_payload in channels.items()
+                if isinstance(ch_payload, dict)
+                and isinstance(ch_payload.get("final_score"), (int, float))
+            }
         print(f"  Feature importance загружен из {fi_summary_path.name}")
-        return data
+        return parsed
     return {}
 
 

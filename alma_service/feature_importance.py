@@ -1,27 +1,36 @@
 """
-Universal channel importance analysis for any detector in the generic pipeline.
+Interval-based feature importance for anomaly reports.
 
-For each raw channel, measures how much the detector score drops in the
-anomaly zone when that channel is disabled.  Generates a self-contained
-HTML report designed for customers & field engineers — plain Russian,
-no jargon.
+The report combines three signals:
+- physical evidence: how strongly a raw channel changes around a labelled
+  anomaly interval relative to a local pre-anomaly baseline;
+- model alignment: how well channel deviations align with the detector score
+  and the detected onset;
+- stability: how consistently the evidence appears across intervals.
+
+This replaces the old channel-ablation report. It does not retrain detectors
+and does not use legacy pct_drop summaries.
 """
 from __future__ import annotations
 
-import io
 import base64
-import warnings
+import io
+import json
+import math
+from dataclasses import dataclass
+from datetime import datetime
+from html import escape
 from pathlib import Path
 from typing import Any
 
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.dates as mdates
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import matplotlib.dates as mdates
 
 from alma_service.anomaly_specs import DetectionSpec, get_detection_spec
 from alma_service.benchmark_metrics import load_intervals as load_intervals_df
@@ -30,45 +39,17 @@ from alma_service.detection_artifacts import (
     benchmark_summary_path,
     load_json,
     normalize_detector_key,
+    predicted_starts_path,
     results_path,
-)
-from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
-from alma_service.generic_detectors import (
-    BaseDetector,
-    PCASPEDetector,
-    PaAnoFeatureDetector,
-    SharedPaAnoDetector,
-    set_seed,
-)
-from alma_service.paano_defaults import (
-    MIN_REFERENCE_COVERAGE,
-    MIN_TOTAL_COVERAGE,
-    REFERENCE_MAX_RATIO,
-    REFERENCE_MIN_DAYS,
-    REFERENCE_MIN_RATIO,
+    scores_path,
 )
 from alma_service.paths import DB_DIR, REPORTS_DIR, ensure_parent
 from alma_service.tabular_io import read_table
 
-warnings.filterwarnings("ignore")
-
-ANOMALY_RUNTIME_CONFIG = {
-    "negermet": {
-        "prepare_patch_size": 64,
-        "paano_patch_short": 32,
-        "paano_patch_long": 64,
-    },
-    "pritok": {
-        "prepare_patch_size": 96,
-        "paano_patch_short": 48,
-        "paano_patch_long": 96,
-    },
-    "salt": {
-        "prepare_patch_size": 96,
-        "paano_patch_short": 48,
-        "paano_patch_long": 96,
-    },
-}
+FI_SUMMARY_VERSION = 2
+PRESSURE_COL = "Давление на приеме насоса кгс/см²"
+FREQ_COL = "Выходная частота"
+META_COLUMNS = {"well_id", "timestamp", "split", "interval_idx", "anomaly_type"}
 
 DETECTOR_LABELS = {
     "pca_spe": "PCA/SPE",
@@ -89,58 +70,49 @@ COLOR_THEMES = {
     "salt": {"accent": "#0f766e", "soft_bg": "#f0fdfa"},
 }
 
-
-# ---------------------------------------------------------------------------
-# Data loading
-# ---------------------------------------------------------------------------
-
-def _runtime_config(anomaly_key: str) -> dict[str, Any]:
-    return ANOMALY_RUNTIME_CONFIG.get(anomaly_key, ANOMALY_RUNTIME_CONFIG["salt"])
-
-
-def load_anomaly_data(spec: DetectionSpec, source_path: str | None = None) -> pd.DataFrame:
-    if source_path is not None:
-        src = Path(source_path)
-    else:
-        candidates = [DB_DIR / name for name in spec.dataset.source_candidates]
-        src = next((p for p in candidates if p.exists()), None)
-        if src is None:
-            raise FileNotFoundError(f"No source dataset found for {spec.anomaly_key}")
-    df = read_table(src, dtypes={"well_id": str}, parse_dates=["timestamp"], low_memory=False)
-    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
-    return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
-
-
-def load_intervals(spec: DetectionSpec) -> pd.DataFrame:
-    src = spec.dataset.intervals_path
-    if not src.exists():
-        return pd.DataFrame(columns=["well_id", "start_date", "end_date", "split", "interval_idx"])
-    return load_intervals_df(src)
+ANOMALY_WINDOWS = {
+    "negermet": {
+        "baseline_max_hours": 72.0,
+        "baseline_min_points": 24,
+        "onset_min_hours": 1.0,
+        "onset_max_hours": 12.0,
+    },
+    "pritok": {
+        "baseline_max_hours": 24.0 * 30.0,
+        "baseline_min_points": 72,
+        "onset_min_hours": 12.0,
+        "onset_max_hours": 24.0 * 3.0,
+    },
+    "salt": {
+        "baseline_max_hours": 24.0 * 30.0,
+        "baseline_min_points": 72,
+        "onset_min_hours": 12.0,
+        "onset_max_hours": 24.0 * 5.0,
+    },
+}
 
 
-def _build_detector(
-    anomaly_key: str,
-    detector_key: str,
-    device,
-    verbose: bool = False,
-    shared_state=None,
-) -> BaseDetector:
-    cfg = _runtime_config(anomaly_key)
-    if detector_key == "paano_shared" and shared_state is not None:
-        return SharedPaAnoDetector(
-            shared_state=shared_state, device=device, verbose=verbose,
-        )
-    if detector_key == "ensemble" and shared_state is not None:
-        # For permutation importance, use paano_shared as primary
-        return SharedPaAnoDetector(
-            shared_state=shared_state, device=device, verbose=verbose,
-        )
-    if detector_key == "paano_feat":
-        return PaAnoFeatureDetector(device=device, patch_short=int(cfg["paano_patch_short"]),
-                                    patch_long=int(cfg["paano_patch_long"]), verbose=verbose)
-    if detector_key == "pca_spe":
-        return PCASPEDetector()
-    raise ValueError(f"Unknown detector: {detector_key}")
+@dataclass(frozen=True)
+class IntervalChannelEvidence:
+    interval_idx: int
+    start: pd.Timestamp
+    end: pd.Timestamp
+    baseline_points: int
+    anomaly_points: int
+    baseline_median: float
+    anomaly_median: float
+    onset_median: float
+    baseline_mad: float
+    level_delta: float
+    level_delta_pct: float | None
+    robust_shift: float
+    onset_robust_shift: float
+    slope_robust_shift: float
+    physical_score: float
+    model_score: float
+    detection_score: float
+    final_score: float
+    direction: str
 
 
 def _resolve_detector(spec: DetectionSpec, detector: str | None) -> str:
@@ -156,131 +128,520 @@ def _resolve_detector(spec: DetectionSpec, detector: str | None) -> str:
     return DEFAULT_DETECTOR
 
 
-# ---------------------------------------------------------------------------
-# Channel-level importance
-# ---------------------------------------------------------------------------
-
-def _map_features_to_channels(
-    feature_columns: list[str],
-    raw_columns: list[str],
-) -> dict[str, list[int]]:
-    channel_to_indices: dict[str, list[int]] = {col: [] for col in raw_columns}
-    other_indices: list[int] = []
-    for idx, feat in enumerate(feature_columns):
-        base = feat.split("::")[0] if "::" in feat else feat
-        if base in channel_to_indices:
-            channel_to_indices[base].append(idx)
-        else:
-            other_indices.append(idx)
-    if other_indices:
-        channel_to_indices["_other"] = other_indices
-    return channel_to_indices
+def _load_source(spec: DetectionSpec, source_path: str | None) -> Path:
+    if source_path is not None:
+        src = Path(source_path)
+        if not src.exists():
+            raise FileNotFoundError(f"Source file not found: {src}")
+        return src
+    for name in spec.dataset.source_candidates:
+        src = DB_DIR / name
+        if src.exists():
+            return src
+    raise FileNotFoundError(f"No source dataset found for {spec.anomaly_key}")
 
 
-def compute_channel_importance(
+def _load_timeseries(spec: DetectionSpec, source_path: str | None) -> pd.DataFrame:
+    df = read_table(
+        _load_source(spec, source_path),
+        dtypes={"well_id": str},
+        parse_dates=["timestamp"],
+        low_memory=False,
+    )
+    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
+    return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
+
+
+def _load_intervals(spec: DetectionSpec) -> pd.DataFrame:
+    if not spec.dataset.intervals_path.exists():
+        raise RuntimeError(f"Intervals file not found: {spec.dataset.intervals_path}")
+    intervals = load_intervals_df(spec.dataset.intervals_path)
+    intervals["well_id"] = intervals["well_id"].astype(str).str.strip().str.lower()
+    return intervals.sort_values(["well_id", "start_date", "interval_idx"]).reset_index(drop=True)
+
+
+def _load_scores(spec: DetectionSpec, detector_key: str) -> pd.DataFrame:
+    path = scores_path(spec, detector_key)
+    if not path.exists():
+        raise RuntimeError(f"Scores file not found: {path}. Run detection first.")
+    df = read_table(path, dtypes={"well_id": str}, parse_dates=["timestamp"])
+    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
+    return df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
+
+
+def _load_detection_results(spec: DetectionSpec, detector_key: str) -> pd.DataFrame:
+    path = results_path(spec, detector_key)
+    if not path.exists():
+        return pd.DataFrame()
+    df = read_table(
+        path,
+        dtypes={"well_id": str},
+        parse_dates=["actual_start", "actual_end", "detected_time", "data_start", "data_end"],
+    )
+    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
+    if "interval_idx" not in df.columns:
+        df["interval_idx"] = df.groupby("well_id").cumcount() + 1
+    return df.sort_values(["well_id", "interval_idx"]).reset_index(drop=True)
+
+
+def _load_predictions(spec: DetectionSpec, detector_key: str) -> pd.DataFrame:
+    path = predicted_starts_path(spec, detector_key)
+    if not path.exists():
+        return pd.DataFrame(columns=["well_id", "detected_time", "split"])
+    df = read_table(path, dtypes={"well_id": str}, parse_dates=["detected_time"])
+    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
+    return df.dropna(subset=["detected_time"]).sort_values(["well_id", "detected_time"]).reset_index(drop=True)
+
+
+def _score_column(scores_df: pd.DataFrame) -> str:
+    if "score" in scores_df.columns:
+        return "score"
+    if "paano_score" in scores_df.columns:
+        return "paano_score"
+    for column in scores_df.columns:
+        if column.endswith("_score"):
+            return column
+    raise RuntimeError("No score column found in scores parquet.")
+
+
+def _numeric_channels(df: pd.DataFrame) -> list[str]:
+    channels: list[str] = []
+    for column in df.columns:
+        if column in META_COLUMNS:
+            continue
+        series = pd.to_numeric(df[column], errors="coerce")
+        if series.notna().sum() >= 10:
+            channels.append(column)
+    return channels
+
+
+def _window_config(anomaly_key: str) -> dict[str, float]:
+    return ANOMALY_WINDOWS.get(anomaly_key, ANOMALY_WINDOWS["salt"])
+
+
+def _infer_step_hours(timestamps: pd.Series) -> float:
+    ts = pd.to_datetime(timestamps).sort_values()
+    diffs = ts.diff().dropna().dt.total_seconds()
+    diffs = diffs[diffs > 0]
+    if diffs.empty:
+        return 1.0
+    return max(float(diffs.median()) / 3600.0, 1.0 / 3600.0)
+
+
+def _robust_mad(values: pd.Series) -> float:
+    arr = pd.to_numeric(values, errors="coerce").dropna().to_numpy(dtype=float)
+    if len(arr) == 0:
+        return float("nan")
+    med = float(np.median(arr))
+    mad = float(np.median(np.abs(arr - med)))
+    if mad <= 1e-12:
+        std = float(np.std(arr))
+        return std if std > 1e-12 else 1.0
+    return mad
+
+
+def _safe_pct(delta: float, baseline: float) -> float | None:
+    if not np.isfinite(delta) or not np.isfinite(baseline) or abs(baseline) < 1e-9:
+        return None
+    return 100.0 * delta / abs(baseline)
+
+
+def _clip_score(value: float, scale: float) -> float:
+    if not np.isfinite(value):
+        return 0.0
+    return float(np.clip(abs(value) * scale, 0.0, 100.0))
+
+
+def _channel_group(channel: str) -> str:
+    lower = channel.lower()
+    if "давление" in lower:
+        return "pressure"
+    if "температур" in lower:
+        return "temperature"
+    if "вибрац" in lower:
+        return "vibration"
+    if "напряж" in lower or "ua" in lower or "ub" in lower or "uc" in lower:
+        return "voltage"
+    if "ток" in lower:
+        return "current"
+    if "мощность" in lower or "cos" in lower or "загруз" in lower:
+        return "power_load"
+    if "частот" in lower:
+        return "frequency"
+    if "дисбаланс" in lower:
+        return "imbalance"
+    return "other"
+
+
+def _direction(delta: float) -> str:
+    if not np.isfinite(delta) or abs(delta) < 1e-9:
+        return "flat"
+    return "up" if delta > 0 else "down"
+
+
+def _adaptive_baseline(
+    well_df: pd.DataFrame,
+    start: pd.Timestamp,
+    cfg: dict[str, float],
+    step_hours: float,
+) -> pd.DataFrame:
+    max_hours = float(cfg["baseline_max_hours"])
+    min_points = int(cfg["baseline_min_points"])
+    before = well_df[well_df["timestamp"] < start].copy()
+    if before.empty:
+        return before
+    candidate = before[before["timestamp"] >= start - pd.Timedelta(hours=max_hours)].copy()
+    if len(candidate) >= min_points:
+        return candidate
+    needed_hours = max(max_hours, min_points * step_hours)
+    return before[before["timestamp"] >= start - pd.Timedelta(hours=needed_hours)].copy()
+
+
+def _onset_window(
+    well_df: pd.DataFrame,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    cfg: dict[str, float],
+) -> pd.DataFrame:
+    interval_hours = max((end - start).total_seconds() / 3600.0, 0.0)
+    onset_hours = max(float(cfg["onset_min_hours"]), min(float(cfg["onset_max_hours"]), interval_hours * 0.25))
+    onset_end = min(end, start + pd.Timedelta(hours=onset_hours))
+    return well_df[(well_df["timestamp"] >= start) & (well_df["timestamp"] <= onset_end)].copy()
+
+
+def _score_alignment(
+    channel_values: pd.Series,
+    score_values: pd.Series,
+    baseline_median: float,
+    baseline_mad: float,
+) -> float:
+    values = pd.to_numeric(channel_values, errors="coerce")
+    scores = pd.to_numeric(score_values, errors="coerce")
+    scale = 1.4826 * baseline_mad if np.isfinite(baseline_mad) and baseline_mad > 1e-12 else 1.0
+    deviation = ((values - baseline_median).abs() / scale).replace([np.inf, -np.inf], np.nan)
+    frame = pd.DataFrame({"dev": deviation, "score": scores}).dropna()
+    if len(frame) < 8 or frame["dev"].nunique() < 2 or frame["score"].nunique() < 2:
+        return 0.0
+    corr = frame["dev"].corr(frame["score"], method="spearman")
+    if not np.isfinite(corr):
+        return 0.0
+    return float(np.clip(abs(corr) * 100.0, 0.0, 100.0))
+
+
+def _detection_alignment(
+    well_df: pd.DataFrame,
+    channel: str,
+    detected_time: pd.Timestamp | None,
+    baseline_median: float,
+    baseline_mad: float,
+    step_hours: float,
+) -> float:
+    if detected_time is None or pd.isna(detected_time):
+        return 0.0
+    half_window_hours = max(step_hours * 12.0, 2.0)
+    view = well_df[
+        (well_df["timestamp"] >= detected_time - pd.Timedelta(hours=half_window_hours))
+        & (well_df["timestamp"] <= detected_time + pd.Timedelta(hours=half_window_hours))
+    ]
+    if view.empty:
+        return 0.0
+    values = pd.to_numeric(view[channel], errors="coerce").dropna()
+    if values.empty:
+        return 0.0
+    scale = 1.4826 * baseline_mad if np.isfinite(baseline_mad) and baseline_mad > 1e-12 else 1.0
+    robust_shift = abs(float(values.median()) - baseline_median) / scale
+    return _clip_score(robust_shift, 22.0)
+
+
+def _interval_evidence(
     anomaly_key: str,
-    detector_key: str,
-    prepared: PreparedWellData,
-    anomaly_mask: np.ndarray,
-    device,
-    verbose: bool = True,
-    shared_state=None,
-) -> dict[str, Any] | None:
-    set_seed()
-    X = prepared.feature_matrix.copy()
-    raw_columns = prepared.raw_columns
-    feature_columns = prepared.feature_columns
-
-    if not raw_columns or not anomaly_mask.any():
+    well_df: pd.DataFrame,
+    score_df: pd.DataFrame,
+    interval_row: pd.Series,
+    channel: str,
+    detected_time: pd.Timestamp | None,
+) -> IntervalChannelEvidence | None:
+    start = pd.Timestamp(interval_row["start_date"])
+    end = pd.Timestamp(interval_row["end_date"])
+    if pd.isna(start) or pd.isna(end) or end <= start:
         return None
 
-    channel_map = _map_features_to_channels(feature_columns, raw_columns)
+    cfg = _window_config(anomaly_key)
+    step_hours = _infer_step_hours(well_df["timestamp"])
+    baseline_df = _adaptive_baseline(well_df, start, cfg, step_hours)
+    anomaly_df = well_df[(well_df["timestamp"] >= start) & (well_df["timestamp"] <= end)].copy()
+    onset_df = _onset_window(well_df, start, end, cfg)
+    if baseline_df.empty or anomaly_df.empty:
+        return None
 
-    # Baseline
-    if detector_key in ("paano_shared", "ensemble") and shared_state is not None:
-        from alma_service.shared_encoder import select_shared_columns
-        X_proj = select_shared_columns(
-            prepared.feature_columns, X, shared_state.shared_channels,
+    baseline = pd.to_numeric(baseline_df[channel], errors="coerce").dropna()
+    anomaly = pd.to_numeric(anomaly_df[channel], errors="coerce").dropna()
+    onset = pd.to_numeric(onset_df[channel], errors="coerce").dropna()
+    if len(baseline) < 8 or len(anomaly) < 4:
+        return None
+
+    baseline_median = float(baseline.median())
+    anomaly_median = float(anomaly.median())
+    onset_median = float(onset.median()) if len(onset) else anomaly_median
+    baseline_mad = _robust_mad(baseline)
+    scale = 1.4826 * baseline_mad if np.isfinite(baseline_mad) and baseline_mad > 1e-12 else 1.0
+
+    level_delta = anomaly_median - baseline_median
+    onset_delta = onset_median - baseline_median
+    robust_shift = level_delta / scale
+    onset_robust_shift = onset_delta / scale
+
+    first_part = anomaly.iloc[: max(4, min(len(anomaly), len(anomaly) // 4))]
+    last_part = anomaly.iloc[-max(4, min(len(anomaly), len(anomaly) // 4)) :]
+    slope_delta = float(last_part.median()) - float(first_part.median())
+    slope_robust_shift = slope_delta / scale
+
+    score_view = score_df[(score_df["timestamp"] >= start) & (score_df["timestamp"] <= end)].copy()
+    merged = pd.merge_asof(
+        anomaly_df[["timestamp", channel]].sort_values("timestamp"),
+        score_view[["timestamp", "score"]].sort_values("timestamp"),
+        on="timestamp",
+        direction="nearest",
+        tolerance=pd.Timedelta(hours=max(step_hours * 1.5, 0.01)),
+    )
+
+    physical_score = float(
+        np.clip(
+            0.45 * _clip_score(robust_shift, 20.0)
+            + 0.40 * _clip_score(onset_robust_shift, 22.0)
+            + 0.15 * _clip_score(slope_robust_shift, 18.0),
+            0.0,
+            100.0,
         )
-        baseline_detector = _build_detector(
-            anomaly_key, detector_key, device, verbose=False,
-            shared_state=shared_state,
-        )
-        X_ref_proj = X_proj[prepared.reference_mask]
-        baseline_detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
-        baseline_scores = baseline_detector.score_stream(
-            X_proj, mask_all=prepared.stability_mask,
-        ).primary.astype(np.float32)
+    )
+    model_score = _score_alignment(
+        merged[channel],
+        merged["score"],
+        baseline_median=baseline_median,
+        baseline_mad=baseline_mad,
+    )
+    detection_score = _detection_alignment(
+        well_df=well_df,
+        channel=channel,
+        detected_time=detected_time,
+        baseline_median=baseline_median,
+        baseline_mad=baseline_mad,
+        step_hours=step_hours,
+    )
+    final_score = float(np.clip(0.55 * physical_score + 0.30 * model_score + 0.15 * detection_score, 0.0, 100.0))
+
+    return IntervalChannelEvidence(
+        interval_idx=int(interval_row.get("interval_idx", 1)),
+        start=start,
+        end=end,
+        baseline_points=int(len(baseline)),
+        anomaly_points=int(len(anomaly)),
+        baseline_median=baseline_median,
+        anomaly_median=anomaly_median,
+        onset_median=onset_median,
+        baseline_mad=float(baseline_mad),
+        level_delta=float(level_delta),
+        level_delta_pct=_safe_pct(float(level_delta), baseline_median),
+        robust_shift=float(robust_shift),
+        onset_robust_shift=float(onset_robust_shift),
+        slope_robust_shift=float(slope_robust_shift),
+        physical_score=physical_score,
+        model_score=model_score,
+        detection_score=detection_score,
+        final_score=final_score,
+        direction=_direction(level_delta),
+    )
+
+
+def _aggregate_channel(
+    channel: str,
+    evidences: list[IntervalChannelEvidence],
+    redundant_with: str | None,
+) -> dict[str, Any]:
+    if not evidences:
+        raise ValueError("Cannot aggregate empty evidence list.")
+    physical_scores = np.array([e.physical_score for e in evidences], dtype=float)
+    model_scores = np.array([e.model_score for e in evidences], dtype=float)
+    detection_scores = np.array([e.detection_score for e in evidences], dtype=float)
+    final_scores = np.array([e.final_score for e in evidences], dtype=float)
+    directions = [e.direction for e in evidences if e.direction != "flat"]
+    dominant_direction = max(set(directions), key=directions.count) if directions else "flat"
+    stable_fraction = float(np.mean(final_scores >= 20.0))
+    direction_fraction = float(directions.count(dominant_direction) / len(directions)) if directions else 0.0
+    stability_score = 100.0 * stable_fraction * (0.5 + 0.5 * direction_fraction)
+    physical_score = float(np.nanmean(physical_scores))
+    model_score = float(np.nanmean(model_scores))
+    detection_score = float(np.nanmean(detection_scores))
+    final_score = float(np.clip(0.50 * np.nanmean(final_scores) + 0.25 * stability_score + 0.25 * max(final_scores), 0.0, 100.0))
+
+    if physical_score >= 35.0 and model_score >= 25.0:
+        verdict = "core_signal"
+    elif physical_score >= 35.0 and model_score < 20.0:
+        verdict = "physical_missed_signal"
+    elif model_score >= 35.0 and physical_score < 20.0:
+        verdict = "model_surrogate"
+    elif final_score < 12.0:
+        verdict = "noise"
+    elif redundant_with:
+        verdict = "redundant"
     else:
-        baseline_detector = _build_detector(anomaly_key, detector_key, device, verbose=False)
-        X_ref = X[prepared.reference_mask]
-        baseline_detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
-        baseline_scores = baseline_detector.score_stream(
-            X, mask_all=prepared.stability_mask,
-        ).primary.astype(np.float32)
-    baseline_anom = float(np.mean(baseline_scores[anomaly_mask]))
-
-    if verbose:
-        print(f"    Baseline anomaly score: {baseline_anom:.6f}")
-
-    channels = [ch for ch in channel_map if ch != "_other" and channel_map[ch]]
-
-    if verbose:
-        print(f"    Вычисление важности {len(channels)} каналов...")
-
-    importance: dict[str, dict[str, float]] = {}
-    for rank, ch_name in enumerate(channels, 1):
-        indices = channel_map[ch_name]
-        X_perturbed = X.copy()
-        X_perturbed[:, indices] = 0.0
-
-        if detector_key in ("paano_shared", "ensemble") and shared_state is not None:
-            from alma_service.shared_encoder import select_shared_columns
-            X_pert_proj = select_shared_columns(
-                prepared.feature_columns, X_perturbed, shared_state.shared_channels,
-            )
-            det = _build_detector(
-                anomaly_key, detector_key, device, verbose=False,
-                shared_state=shared_state,
-            )
-            det.fit_reference(X_pert_proj[prepared.reference_mask], mask_ref=prepared.reference_mask)
-            perturbed_scores = det.score_stream(
-                X_pert_proj, mask_all=prepared.stability_mask,
-            ).primary.astype(np.float32)
-        else:
-            det = _build_detector(anomaly_key, detector_key, device, verbose=False)
-            det.fit_reference(X_perturbed[prepared.reference_mask], mask_ref=prepared.reference_mask)
-            perturbed_scores = det.score_stream(
-                X_perturbed, mask_all=prepared.stability_mask,
-            ).primary.astype(np.float32)
-        perturbed_anom = float(np.mean(perturbed_scores[anomaly_mask]))
-
-        drop = baseline_anom - perturbed_anom
-        pct_drop = (drop / baseline_anom * 100) if baseline_anom > 0 else 0.0
-        importance[ch_name] = {
-            "drop": drop,
-            "baseline": baseline_anom,
-            "perturbed": perturbed_anom,
-            "pct_drop": pct_drop,
-        }
-        if verbose:
-            print(f"      [{rank:2d}/{len(channels)}] {ch_name}: "
-                  f"drop={drop:+.6f} ({pct_drop:+.1f}%)")
+        verdict = "supporting_signal"
 
     return {
-        "well_id": prepared.well_id,
-        "importance": importance,
-        "baseline_scores": baseline_scores,
-        "timestamps": prepared.timestamps,
-        "anomaly_mask": anomaly_mask,
-        "raw_data": prepared.raw_matrix,
-        "raw_columns": raw_columns,
+        "channel": channel,
+        "group": _channel_group(channel),
+        "final_score": final_score,
+        "physical_score": physical_score,
+        "model_score": model_score,
+        "detection_score": detection_score,
+        "stability_score": float(np.clip(stability_score, 0.0, 100.0)),
+        "direction": dominant_direction,
+        "verdict": verdict,
+        "redundant_with": redundant_with,
+        "interval_count": len(evidences),
+        "level_delta_median": float(np.nanmedian([e.level_delta for e in evidences])),
+        "level_delta_pct_median": _nanmedian_optional([e.level_delta_pct for e in evidences]),
+        "robust_shift_median": float(np.nanmedian([e.robust_shift for e in evidences])),
+        "onset_robust_shift_median": float(np.nanmedian([e.onset_robust_shift for e in evidences])),
+        "intervals": [
+            {
+                "interval_idx": e.interval_idx,
+                "start": e.start.isoformat(),
+                "end": e.end.isoformat(),
+                "baseline_points": e.baseline_points,
+                "anomaly_points": e.anomaly_points,
+                "baseline_median": e.baseline_median,
+                "anomaly_median": e.anomaly_median,
+                "onset_median": e.onset_median,
+                "baseline_mad": e.baseline_mad,
+                "level_delta": e.level_delta,
+                "level_delta_pct": e.level_delta_pct,
+                "robust_shift": e.robust_shift,
+                "onset_robust_shift": e.onset_robust_shift,
+                "slope_robust_shift": e.slope_robust_shift,
+                "physical_score": e.physical_score,
+                "model_score": e.model_score,
+                "detection_score": e.detection_score,
+                "final_score": e.final_score,
+                "direction": e.direction,
+            }
+            for e in evidences
+        ],
     }
 
 
-# ---------------------------------------------------------------------------
-# Plotting
-# ---------------------------------------------------------------------------
+def _nanmedian_optional(values: list[float | None]) -> float | None:
+    finite = [float(v) for v in values if v is not None and np.isfinite(v)]
+    if not finite:
+        return None
+    return float(np.nanmedian(finite))
+
+
+def _redundancy_map(well_df: pd.DataFrame, channels: list[str], raw_scores: dict[str, float]) -> dict[str, str | None]:
+    ranked = sorted(channels, key=lambda ch: raw_scores.get(ch, 0.0), reverse=True)
+    redundant: dict[str, str | None] = {ch: None for ch in channels}
+    for i, channel in enumerate(ranked):
+        if raw_scores.get(channel, 0.0) < 12.0:
+            continue
+        values = pd.to_numeric(well_df[channel], errors="coerce")
+        for better in ranked[:i]:
+            if raw_scores.get(better, 0.0) < raw_scores.get(channel, 0.0):
+                other = pd.to_numeric(well_df[better], errors="coerce")
+                frame = pd.DataFrame({"a": values, "b": other}).dropna()
+                if len(frame) < 20 or frame["a"].nunique() < 2 or frame["b"].nunique() < 2:
+                    continue
+                corr = frame["a"].corr(frame["b"], method="spearman")
+                if np.isfinite(corr) and abs(float(corr)) >= 0.92:
+                    redundant[channel] = better
+                    break
+    return redundant
+
+
+def _detected_time_for_interval(
+    results_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    well_id: str,
+    interval_row: pd.Series,
+) -> pd.Timestamp | None:
+    interval_idx = int(interval_row.get("interval_idx", 1))
+    if not results_df.empty:
+        match = results_df[
+            (results_df["well_id"] == well_id)
+            & (pd.to_numeric(results_df["interval_idx"], errors="coerce").fillna(-1).astype(int) == interval_idx)
+        ]
+        if not match.empty and pd.notna(match.iloc[0].get("detected_time")):
+            return pd.Timestamp(match.iloc[0]["detected_time"])
+    if predictions_df.empty:
+        return None
+    start = pd.Timestamp(interval_row["start_date"])
+    end = pd.Timestamp(interval_row["end_date"])
+    well_preds = predictions_df[
+        (predictions_df["well_id"] == well_id)
+        & (predictions_df["detected_time"] >= start - pd.Timedelta(hours=2))
+        & (predictions_df["detected_time"] <= end)
+    ]
+    if well_preds.empty:
+        return None
+    return pd.Timestamp(well_preds.iloc[0]["detected_time"])
+
+
+def _analyze_well(
+    anomaly_key: str,
+    well_id: str,
+    well_df: pd.DataFrame,
+    well_scores: pd.DataFrame,
+    well_intervals: pd.DataFrame,
+    results_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    verbose: bool,
+) -> dict[str, Any] | None:
+    if well_df.empty or well_intervals.empty or well_scores.empty:
+        return None
+
+    channels = _numeric_channels(well_df)
+    if not channels:
+        return None
+
+    channel_evidence: dict[str, list[IntervalChannelEvidence]] = {ch: [] for ch in channels}
+    for _, interval_row in well_intervals.iterrows():
+        detected_time = _detected_time_for_interval(results_df, predictions_df, well_id, interval_row)
+        for channel in channels:
+            evidence = _interval_evidence(
+                anomaly_key=anomaly_key,
+                well_df=well_df,
+                score_df=well_scores,
+                interval_row=interval_row,
+                channel=channel,
+                detected_time=detected_time,
+            )
+            if evidence is not None:
+                channel_evidence[channel].append(evidence)
+
+    provisional_scores = {
+        channel: float(np.nanmean([e.final_score for e in evidences])) if evidences else 0.0
+        for channel, evidences in channel_evidence.items()
+    }
+    redundant = _redundancy_map(well_df, channels, provisional_scores)
+    channels_payload = {
+        channel: _aggregate_channel(channel, evidences, redundant.get(channel))
+        for channel, evidences in channel_evidence.items()
+        if evidences
+    }
+    if not channels_payload:
+        return None
+
+    sorted_channels = sorted(channels_payload.values(), key=lambda item: item["final_score"], reverse=True)
+    if verbose:
+        top = ", ".join(f"{item['channel']}={item['final_score']:.1f}" for item in sorted_channels[:3])
+        print(f"  {well_id}: {len(sorted_channels)} каналов, top: {top}")
+
+    return {
+        "well_id": well_id,
+        "interval_count": int(len(well_intervals)),
+        "channels": {item["channel"]: item for item in sorted_channels},
+        "top_channels": [item["channel"] for item in sorted_channels[:8]],
+    }
+
 
 def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
     buf = io.BytesIO()
@@ -290,163 +651,99 @@ def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
     return base64.b64encode(buf.read()).decode("utf-8")
 
 
-def _make_bar_b64(result: dict[str, Any], accent: str, display_name: str, top_n: int = 15) -> str:
-    imp = result["importance"]
-    df = pd.DataFrame([
-        {"channel": k, "drop_pct": v["pct_drop"]} for k, v in imp.items()
-    ]).sort_values("drop_pct", ascending=False).head(top_n)
+def _make_bar_b64(well_payload: dict[str, Any], accent: str, top_n: int = 18) -> str:
+    channels = list(well_payload["channels"].values())[:top_n]
+    labels = [item["channel"] for item in channels]
+    final_scores = [item["final_score"] for item in channels]
+    physical_scores = [item["physical_score"] for item in channels]
+    model_scores = [item["model_score"] for item in channels]
 
-    fig, ax = plt.subplots(figsize=(10, max(4, 0.45 * len(df))))
-    colors = [accent if v > 0 else "#bdc3c7" for v in df["drop_pct"]]
-    ax.barh(range(len(df)), df["drop_pct"].values, color=colors)
-    ax.set_yticks(range(len(df)))
-    ax.set_yticklabels(df["channel"].values, fontsize=9)
+    y = np.arange(len(labels))
+    fig, ax = plt.subplots(figsize=(12, max(4, 0.45 * len(labels))))
+    ax.barh(y - 0.22, final_scores, height=0.22, color=accent, label="Итог")
+    ax.barh(y, physical_scores, height=0.22, color="#2563eb", label="Физика")
+    ax.barh(y + 0.22, model_scores, height=0.22, color="#64748b", label="Связь со score")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=8)
     ax.invert_yaxis()
-    ax.set_xlabel("Изменение способности обнаружить аномалию при отключении канала, %")
-    ax.set_title(
-        f"Скважина {result['well_id']} — Влияние каналов на обнаружение {display_name.lower()}",
-        fontsize=11, fontweight="bold",
-    )
-    ax.axvline(0, color="black", linewidth=0.5)
-    ax.grid(True, axis="x", alpha=0.3)
-
-    # Legend for bar colors
-    legend_pos = mpatches.Patch(color=accent, label="Канал помогает обнаружить аномалию")
-    legend_neg = mpatches.Patch(color="#bdc3c7", label="Канал не помогает / мешает")
-    ax.legend(handles=[legend_pos, legend_neg], loc="lower right", fontsize=8)
-
+    ax.set_xlim(0, 100)
+    ax.set_xlabel("Важность, 0-100")
+    ax.set_title(f"Скважина {well_payload['well_id']} - важность каналов", fontsize=12, fontweight="bold")
+    ax.grid(True, axis="x", alpha=0.25)
+    ax.legend(loc="lower right", fontsize=8)
     fig.tight_layout()
     return _fig_to_b64(fig)
 
 
 def _make_timeseries_b64(
-    result: dict[str, Any],
+    well_payload: dict[str, Any],
+    well_df: pd.DataFrame,
+    scores_df: pd.DataFrame,
     intervals_df: pd.DataFrame,
-    detections_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
     accent: str,
-    display_name: str,
-    top_positive: int = 3,
-    top_negative: int = 4,
+    top_n: int = 5,
 ) -> str:
-    well_id = result["well_id"]
-    timestamps = result["timestamps"]
-    imp = result["importance"]
-    raw_columns = result["raw_columns"]
-    raw_data = result["raw_data"]
+    top_channels = [
+        ch for ch in well_payload["top_channels"]
+        if ch in well_df.columns
+    ][:top_n]
+    n_panels = 1 + len(top_channels)
+    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 2.7 * n_panels), sharex=True)
+    if n_panels == 1:
+        axes = [axes]
 
-    # Top positive channels (help detect anomaly) + top negative (add noise)
-    positive = sorted(
-        [k for k in imp if imp[k]["pct_drop"] > 0],
-        key=lambda k: imp[k]["pct_drop"], reverse=True,
-    )[:top_positive]
-    negative = sorted(
-        [k for k in imp if imp[k]["pct_drop"] <= 0],
-        key=lambda k: imp[k]["pct_drop"],
-    )[:top_negative]
-    top_channels = positive + negative
-    top_n = len(top_channels)
+    ts_score = pd.to_datetime(scores_df["timestamp"])
+    axes[0].fill_between(ts_score, 0, scores_df["score"].astype(float), color=accent, alpha=0.18)
+    axes[0].plot(ts_score, scores_df["score"].astype(float), color=accent, linewidth=0.7)
+    axes[0].set_ylabel("score", fontsize=8)
+    axes[0].set_title(f"Скважина {well_payload['well_id']} - score и ключевые каналы", fontsize=12, fontweight="bold")
 
-    wi = intervals_df[intervals_df["well_id"] == well_id].sort_values("start_date")
-    wd = detections_df[detections_df["well_id"] == well_id].sort_values("detected_time") if not detections_df.empty else pd.DataFrame()
-
-    n_panels = top_n + 1
-    fig, axes = plt.subplots(n_panels, 1, figsize=(14, 2.8 * n_panels), sharex=True)
-    ts_pd = pd.to_datetime(timestamps)
-
-    # --- Helper to draw anomaly zones + detection markers on an axis ---
-    def _draw_anomaly_zones(ax, show_labels: bool = False):
+    def draw_marks(ax, labels: bool = False) -> None:
         ymin, ymax = ax.get_ylim()
-        for zone_idx, (_, row) in enumerate(wi.iterrows()):
-            ax.axvspan(row["start_date"], row["end_date"], color="red", alpha=0.12, zorder=0)
-            ax.axvline(row["start_date"], color="#16a34a", linewidth=1.2, linestyle="-",
-                       label="Начало аномалии (факт)" if zone_idx == 0 else None)
-            ax.axvline(row["end_date"], color="#dc2626", linewidth=1.2, linestyle="--",
-                       label="Конец аномалии (факт)" if zone_idx == 0 else None)
-            if show_labels:
-                ts_start = pd.Timestamp(row["start_date"])
-                ts_end = pd.Timestamp(row["end_date"])
+        for idx, (_, row) in enumerate(intervals_df.iterrows()):
+            start = pd.Timestamp(row["start_date"])
+            end = pd.Timestamp(row["end_date"])
+            ax.axvspan(start, end, color="red", alpha=0.10, zorder=0)
+            ax.axvline(start, color="#16a34a", linewidth=1.1)
+            ax.axvline(end, color="#dc2626", linewidth=1.1, linestyle="--")
+            if labels and idx == 0:
                 ax.annotate(
-                    f"Факт начало\n{ts_start.strftime('%Y-%m-%d %H:%M')}",
-                    xy=(ts_start, ymax), xytext=(5, -5),
-                    textcoords="offset points", fontsize=6.5, color="#16a34a",
-                    fontweight="bold", va="top", ha="left",
+                    f"Факт начало\n{start.strftime('%Y-%m-%d %H:%M')}",
+                    xy=(start, ymax),
+                    xytext=(5, -5),
+                    textcoords="offset points",
+                    fontsize=6.5,
+                    color="#16a34a",
+                    va="top",
+                    ha="left",
                     bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#16a34a", alpha=0.85),
                 )
-                ax.annotate(
-                    f"Факт конец\n{ts_end.strftime('%Y-%m-%d %H:%M')}",
-                    xy=(ts_end, ymax), xytext=(-5, -5),
-                    textcoords="offset points", fontsize=6.5, color="#dc2626",
-                    fontweight="bold", va="top", ha="right",
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#dc2626", alpha=0.85),
-                )
-        # Detection markers
-        if not wd.empty:
-            for det_idx, (_, det_row) in enumerate(wd.iterrows()):
-                if pd.notna(det_row["detected_time"]):
-                    ax.axvline(det_row["detected_time"], color="#7c3aed", linewidth=1.5,
-                               linestyle="-.",
-                               label="Обнаружено алгоритмом" if det_idx == 0 else None)
-                    if show_labels:
-                        ts_det = pd.Timestamp(det_row["detected_time"])
-                        ax.annotate(
-                            f"Обнаружено\n{ts_det.strftime('%Y-%m-%d %H:%M')}",
-                            xy=(ts_det, ymax), xytext=(5, -25),
-                            textcoords="offset points", fontsize=6.5, color="#7c3aed",
-                            fontweight="bold", va="top", ha="left",
-                            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="#7c3aed", alpha=0.85),
-                        )
+        for _, pred in predictions_df.iterrows():
+            if pd.notna(pred.get("detected_time")):
+                ax.axvline(pd.Timestamp(pred["detected_time"]), color="#7c3aed", linewidth=1.2, linestyle="-.")
 
-    # --- Top panel: detector score ---
-    ax0 = axes[0]
-    ax0.fill_between(ts_pd, 0, result["baseline_scores"], color=accent, alpha=0.20)
-    ax0.plot(ts_pd, result["baseline_scores"], color=accent, linewidth=0.6)
-    _draw_anomaly_zones(ax0, show_labels=True)
-    ax0.set_ylabel("Отклонение от\nнормы (все каналы)", fontsize=8)
-    ax0.set_title(
-        f"Скважина {well_id} — Показания наиболее значимых каналов",
-        fontsize=11, fontweight="bold",
-    )
-    ax0.grid(True, alpha=0.3)
+    draw_marks(axes[0], labels=True)
+    axes[0].grid(True, alpha=0.25)
+    legend_handles = [
+        mpatches.Patch(facecolor="red", alpha=0.10, edgecolor="none", label="Зона аномалии"),
+        plt.Line2D([0], [0], color="#16a34a", linewidth=1.1, label="Начало"),
+        plt.Line2D([0], [0], color="#dc2626", linewidth=1.1, linestyle="--", label="Конец"),
+        plt.Line2D([0], [0], color="#7c3aed", linewidth=1.2, linestyle="-.", label="Детекция"),
+    ]
+    axes[0].legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.9)
 
-    # Legend on first axis
-    zone_patch = mpatches.Patch(facecolor="red", alpha=0.12, edgecolor="none",
-                                label="Зона фактической аномалии")
-    start_line = plt.Line2D([0], [0], color="#16a34a", linewidth=1.2, label="Начало аномалии (факт)")
-    end_line = plt.Line2D([0], [0], color="#dc2626", linewidth=1.2, linestyle="--",
-                          label="Конец аномалии (факт)")
-    detect_line = plt.Line2D([0], [0], color="#7c3aed", linewidth=1.5, linestyle="-.",
-                             label="Обнаружено алгоритмом")
-    score_line = plt.Line2D([0], [0], color=accent, linewidth=1, label="Степень отклонения от нормы")
-    legend_handles = [score_line, zone_patch, start_line, end_line]
-    if not wd.empty:
-        legend_handles.append(detect_line)
-    ax0.legend(handles=legend_handles,
-               loc="upper right", fontsize=7, framealpha=0.9)
-
-    # --- Channel panels ---
-    for idx, ch_name in enumerate(top_channels):
-        ax = axes[idx + 1]
-        pct = imp[ch_name]["pct_drop"]
-
-        if ch_name in raw_columns:
-            col_idx = raw_columns.index(ch_name)
-            values = raw_data[:, col_idx]
-        else:
-            values = np.zeros(len(timestamps))
-
-        ax.plot(ts_pd, values, color="tab:blue", linewidth=0.5, alpha=0.8)
-
-        # Y-label: channel name + its influence
-        if pct > 0.5:
-            influence_text = f"влияние: +{pct:.1f}%"
-        elif pct < -0.5:
-            influence_text = f"влияние: {pct:.1f}%"
-        else:
-            influence_text = "влияние: ~0%"
-        ax.set_ylabel(f"{ch_name}\n({influence_text})", fontsize=7)
-
-        _draw_anomaly_zones(ax)
-        ax.grid(True, alpha=0.3)
+    ts = pd.to_datetime(well_df["timestamp"])
+    for idx, channel in enumerate(top_channels, start=1):
+        ax = axes[idx]
+        ax.plot(ts, pd.to_numeric(well_df[channel], errors="coerce"), color="#2563eb", linewidth=0.6)
+        item = well_payload["channels"][channel]
+        ax.set_ylabel(
+            f"{channel}\nитог {item['final_score']:.0f}, физ {item['physical_score']:.0f}",
+            fontsize=7,
+        )
+        draw_marks(ax)
+        ax.grid(True, alpha=0.25)
 
     axes[-1].set_xlabel("Время")
     axes[-1].xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
@@ -455,229 +752,128 @@ def _make_timeseries_b64(
     return _fig_to_b64(fig, dpi=110)
 
 
-# ---------------------------------------------------------------------------
-# Per-well summary text
-# ---------------------------------------------------------------------------
-
-def _well_summary_html(result: dict[str, Any], accent: str) -> str:
-    """Generate a short human-readable summary for a well."""
-    imp = result["importance"]
-    sorted_items = sorted(imp.items(), key=lambda x: x[1]["pct_drop"], reverse=True)
-
-    positive = [(ch, v) for ch, v in sorted_items if v["pct_drop"] > 0.5]
-    negative = [(ch, v) for ch, v in sorted_items if v["pct_drop"] < -0.5]
-    neutral = [(ch, v) for ch, v in sorted_items if -0.5 <= v["pct_drop"] <= 0.5]
-
-    lines: list[str] = []
-
-    if positive:
-        top3 = ", ".join(f"<b>{ch}</b> ({v['pct_drop']:+.1f}%)" for ch, v in positive[:3])
-        lines.append(
-            f"<p>✅ <b>Ключевые каналы для обнаружения аномалии</b> (при их отключении "
-            f"модель хуже видит аномалию): {top3}"
-            + (f" и ещё {len(positive) - 3} канал(а/ов)" if len(positive) > 3 else "")
-            + ".</p>"
-        )
-    else:
-        lines.append(
-            "<p>ℹ️ У данной скважины <b>ни один канал по отдельности</b> не является "
-            "решающим для обнаружения аномалии. Модель использует <b>совокупность изменений "
-            "по всем каналам сразу</b> — аномалия проявляется в комбинации показателей, "
-            "а не в каком-то одном датчике.</p>"
-        )
-
-    if negative:
-        top_neg = ", ".join(f"<b>{ch}</b>" for ch, _ in negative[:3])
-        lines.append(
-            f"<p>⚠️ Каналы, которые <b>вносят шум</b> (при их отключении модель "
-            f"даже лучше видит аномалию): {top_neg}"
-            + (f" и ещё {len(negative) - 3}" if len(negative) > 3 else "")
-            + ".</p>"
-        )
-
-    if neutral and not positive:
-        lines.append(
-            "<p>Все каналы имеют примерно одинаковое влияние — модель опирается "
-            "на совместное поведение показателей.</p>"
-        )
-
-    return "\n".join(lines)
+def _verdict_ru(verdict: str) -> str:
+    return {
+        "core_signal": "ключевой сигнал",
+        "physical_missed_signal": "физический сигнал, модель недоиспользует",
+        "model_surrogate": "модельный суррогат",
+        "redundant": "дублируется коррелированным каналом",
+        "noise": "шум / слабый вклад",
+        "supporting_signal": "поддерживающий сигнал",
+    }.get(verdict, verdict)
 
 
-# ---------------------------------------------------------------------------
-# HTML report
-# ---------------------------------------------------------------------------
+def _format_pct(value: float | None) -> str:
+    if value is None or not np.isfinite(value):
+        return "-"
+    return f"{value:+.1f}%"
+
 
 def _build_html(
     spec: DetectionSpec,
     detector_key: str,
-    all_results: list[dict[str, Any]],
+    summary: dict[str, Any],
+    data_df: pd.DataFrame,
+    scores_df: pd.DataFrame,
     intervals_df: pd.DataFrame,
-    detections_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
 ) -> str:
     theme = COLOR_THEMES.get(spec.anomaly_key, COLOR_THEMES["salt"])
     accent = theme["accent"]
     soft_bg = theme["soft_bg"]
     display = DISPLAY_NAMES.get(spec.anomaly_key, spec.display_name)
-    title = f"Анализ влияния каналов на обнаружение: {display}"
+    title = f"Анализ важности признаков: {display}"
 
     html = f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
-    <meta charset="UTF-8">
-    <title>{title}</title>
-    <style>
-        body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 30px; color: #222; background: #fafafa; }}
-        h1 {{ color: #2c3e50; border-bottom: 2px solid {accent}; padding-bottom: 10px; }}
-        h2 {{ color: #2c3e50; margin-top: 35px; }}
-        table {{ border-collapse: collapse; width: 100%; margin-bottom: 20px; background: #fff; }}
-        th, td {{ border: 1px solid #ccc; padding: 8px 12px; text-align: left; font-size: 0.92em; }}
-        th {{ background-color: {accent}; color: #fff; }}
-        tr:nth-child(even) {{ background-color: {soft_bg}; }}
-        .positive {{ color: {accent}; font-weight: bold; }}
-        .negative {{ color: #95a5a6; }}
-        .plot-container {{ margin-bottom: 35px; background: #fff; border: 1px solid #ddd;
-                          border-radius: 6px; padding: 15px; }}
-        img {{ max-width: 100%; height: auto; }}
-        .method-box {{ background: {soft_bg}; border-left: 4px solid {accent}; padding: 15px 20px;
-                       margin: 20px 0; border-radius: 4px; line-height: 1.8; }}
-        .method-box b {{ color: {accent}; }}
-        .summary-box {{ background: #fff; border: 1px solid #ddd; border-radius: 6px;
-                        padding: 16px 20px; margin: 16px 0; line-height: 1.7; }}
-        .summary-box b {{ color: {accent}; }}
-    </style>
+  <meta charset="UTF-8">
+  <title>{escape(title)}</title>
+  <style>
+    body {{ font-family: 'Segoe UI', Arial, sans-serif; margin: 30px; color: #172033; background: #fafafa; }}
+    h1 {{ color: #172033; border-bottom: 3px solid {accent}; padding-bottom: 10px; }}
+    h2 {{ margin-top: 36px; color: #172033; }}
+    table {{ border-collapse: collapse; width: 100%; margin: 18px 0 28px; background: #fff; }}
+    th, td {{ border: 1px solid #d0d5dd; padding: 8px 10px; text-align: left; font-size: 0.9em; }}
+    th {{ background: {accent}; color: #fff; }}
+    tr:nth-child(even) {{ background: {soft_bg}; }}
+    .method-box, .summary-box, .plot-container {{ background: #fff; border: 1px solid #d0d5dd; border-radius: 8px; padding: 16px 20px; margin: 18px 0; }}
+    .method-box {{ background: {soft_bg}; border-left: 5px solid {accent}; line-height: 1.65; }}
+    .plot-container img {{ max-width: 100%; height: auto; }}
+    .score {{ font-weight: 700; color: {accent}; }}
+    .muted {{ color: #667085; }}
+  </style>
 </head>
 <body>
-    <h1>{title}</h1>
-
-    <div class="method-box">
-        <h3>Как читать этот отчёт</h3>
-        <p>Модель детекции анализирует показания нескольких каналов (датчиков) скважины
-        и на их основе определяет, есть ли аномалия. Этот отчёт показывает,
-        <b>какие каналы влияют на обнаружение больше всего</b>.</p>
-        <p><b>Методика:</b> мы поочерёдно «отключаем» каждый канал (подставляем вместо
-        его показаний среднее нормальное значение) и смотрим, как это повлияло
-        на способность модели обнаружить аномалию:</p>
-        <ul>
-            <li><b>Положительное значение (%)</b> — канал <b>помогает</b> обнаруживать аномалию.
-                Чем больше число, тем важнее канал. Без него модель хуже видит аномалию.</li>
-            <li><b>Около нуля</b> — канал <b>не влияет</b> на обнаружение в отдельности.</li>
-            <li><b>Отрицательное значение (%)</b> — канал <b>мешает</b>: без него модель
-                обнаруживает аномалию даже лучше (канал вносит помехи).</li>
-        </ul>
-        <p><b>На графиках:</b></p>
-        <ul>
-            <li>🟩 <b>Зелёная вертикальная линия</b> — фактическое начало аномалии</li>
-            <li>🟥 <b>Красная пунктирная линия</b> — фактическое окончание аномалии</li>
-            <li>🔴 <b>Красная полоса (фон)</b> — весь период аномалии</li>
-            <li>🟣 <b>Фиолетовая штрихпунктирная линия</b> — момент, когда алгоритм обнаружил аномалию</li>
-        </ul>
-    </div>
+  <h1>{escape(title)}</h1>
+  <p class="muted">Детектор: <b>{escape(DETECTOR_LABELS.get(detector_key, detector_key))}</b>. Метод: interval-based physical + model alignment importance, JSON v{FI_SUMMARY_VERSION}.</p>
+  <div class="method-box">
+    <h3>Как читать отчёт</h3>
+    <p><b>Физика</b> показывает, насколько канал реально изменился в размеченном интервале относительно локального baseline перед аномалией.</p>
+    <p><b>Связь со score</b> показывает, насколько отклонения канала совпадают с ростом detector score и моментом детекции.</p>
+    <p><b>Итог</b> объединяет физику, связь со score и стабильность по интервалам. Это не legacy ablation и не pct_drop.</p>
+    <p>Вердикт отделяет физически важные каналы от модельных суррогатов, шума и коррелированных дублей.</p>
+  </div>
 """
 
-    for result in all_results:
-        wid = result["well_id"]
-        imp = result["importance"]
-        html += f'<h2>Скважина {wid}</h2>\n'
+    wells = summary["wells"]
+    for well_id, well_payload in wells.items():
+        well_df = data_df[data_df["well_id"] == well_id].copy()
+        well_scores = scores_df[scores_df["well_id"] == well_id].copy()
+        well_intervals = intervals_df[intervals_df["well_id"] == well_id].copy()
+        well_predictions = predictions_df[predictions_df["well_id"] == well_id].copy()
 
-        # Summary
-        html += f'<div class="summary-box">\n{_well_summary_html(result, accent)}\n</div>\n'
+        html += f"<h2>Скважина {escape(well_id)}</h2>\n"
+        top_items = list(well_payload["channels"].values())[:3]
+        top_text = ", ".join(
+            f"<b>{escape(item['channel'])}</b> (<span class='score'>{item['final_score']:.0f}</span>, {_verdict_ru(item['verdict'])})"
+            for item in top_items
+        )
+        html += f"<div class='summary-box'>Ключевые каналы: {top_text}</div>\n"
 
-        # Bar chart
-        bar_b64 = _make_bar_b64(result, accent, display, top_n=15)
-        html += f"""
-    <div class="plot-container">
-        <img src="data:image/png;base64,{bar_b64}" alt="Влияние каналов {wid}">
-    </div>
-"""
+        html += f"<div class='plot-container'><img src='data:image/png;base64,{_make_bar_b64(well_payload, accent)}' alt='Важность {escape(well_id)}'></div>\n"
+        html += f"<div class='plot-container'><img src='data:image/png;base64,{_make_timeseries_b64(well_payload, well_df, well_scores, well_intervals, well_predictions, accent)}' alt='Каналы {escape(well_id)}'></div>\n"
 
-        # Timeseries
-        ts_b64 = _make_timeseries_b64(result, intervals_df, detections_df, accent, display, top_positive=3, top_negative=4)
-        html += f"""
-    <div class="plot-container">
-        <img src="data:image/png;base64,{ts_b64}" alt="Показания каналов {wid}">
-    </div>
-"""
-
-        # Compute delta (mean during anomaly vs mean before anomaly) per raw channel
-        channel_deltas: dict[str, str] = {}
-        raw_columns = result["raw_columns"]
-        raw_data = result["raw_data"]
-        timestamps = result["timestamps"]
-        anomaly_mask = result["anomaly_mask"]
-        # Pre-anomaly mask: everything before first anomaly start
-        well_ivls = intervals_df[intervals_df["well_id"] == wid].sort_values("start_date")
-        if not well_ivls.empty:
-            first_anomaly_start = pd.Timestamp(well_ivls.iloc[0]["start_date"])
-            pre_mask = pd.to_datetime(timestamps) < first_anomaly_start
-        else:
-            pre_mask = ~anomaly_mask
-
-        for ch_name in raw_columns:
-            col_idx = raw_columns.index(ch_name)
-            values = raw_data[:, col_idx]
-            pre_values = values[pre_mask]
-            anom_values = values[anomaly_mask]
-            pre_finite = pre_values[np.isfinite(pre_values)]
-            anom_finite = anom_values[np.isfinite(anom_values)]
-            if len(pre_finite) > 0 and len(anom_finite) > 0:
-                mean_pre = float(np.mean(pre_finite))
-                mean_anom = float(np.mean(anom_finite))
-                if abs(mean_pre) > 1e-6:
-                    delta_pct = ((mean_anom - mean_pre) / abs(mean_pre)) * 100.0
-                    channel_deltas[ch_name] = f"{delta_pct:+.1f}%"
-                else:
-                    channel_deltas[ch_name] = "—"
-            else:
-                channel_deltas[ch_name] = "—"
-
-        # Table
-        sorted_imp = sorted(imp.items(), key=lambda x: x[1]["pct_drop"], reverse=True)
         html += """
-    <table>
-        <tr>
-            <th>#</th>
-            <th>Канал (датчик)</th>
-            <th>Влияние на обнаружение, %</th>
-            <th>Роль</th>
-            <th>Дельта (изменение показаний в аномалии)</th>
-        </tr>
+  <table>
+    <tr>
+      <th>#</th>
+      <th>Канал</th>
+      <th>Группа</th>
+      <th>Итог</th>
+      <th>Физика</th>
+      <th>Связь со score</th>
+      <th>Стабильность</th>
+      <th>Направление</th>
+      <th>Медианная дельта</th>
+      <th>Вердикт</th>
+    </tr>
 """
-        for rank, (ch, v) in enumerate(sorted_imp, 1):
-            pct = v["pct_drop"]
-            if pct > 0.5:
-                cls = "positive"
-                role = "Помогает обнаружить"
-                delta_str = channel_deltas.get(ch, "—")
-            elif pct < -0.5:
-                cls = "negative"
-                role = "Вносит помехи"
-                delta_str = "—"
-            else:
-                cls = "negative"
-                role = "Не влияет"
-                delta_str = "—"
+        for rank, item in enumerate(well_payload["channels"].values(), start=1):
+            redundant = f" ({escape(item['redundant_with'])})" if item.get("redundant_with") else ""
             html += f"""
-        <tr>
-            <td>{rank}</td>
-            <td>{ch}</td>
-            <td class="{cls}">{pct:+.1f}%</td>
-            <td>{role}</td>
-            <td>{delta_str}</td>
-        </tr>
+    <tr>
+      <td>{rank}</td>
+      <td>{escape(item['channel'])}</td>
+      <td>{escape(item['group'])}</td>
+      <td class="score">{item['final_score']:.1f}</td>
+      <td>{item['physical_score']:.1f}</td>
+      <td>{item['model_score']:.1f}</td>
+      <td>{item['stability_score']:.1f}</td>
+      <td>{escape(item['direction'])}</td>
+      <td>{_format_pct(item.get('level_delta_pct_median'))}</td>
+      <td>{escape(_verdict_ru(item['verdict']) + redundant)}</td>
+    </tr>
 """
-        html += "    </table>\n"
+        html += "  </table>\n"
 
-    html += """
-</body>
-</html>
-"""
+    html += "</body>\n</html>\n"
     return html
 
 
-# ---------------------------------------------------------------------------
-# Main entry point
-# ---------------------------------------------------------------------------
+def _summary_for_backend(summary: dict[str, Any]) -> dict[str, Any]:
+    return summary
+
 
 def generate_feature_importance_report(
     anomaly_key: str,
@@ -686,148 +882,71 @@ def generate_feature_importance_report(
     source_path: str | None = None,
     verbose: bool = True,
 ) -> Path:
-    import torch
-
     spec = get_detection_spec(anomaly_key)
     detector_key = _resolve_detector(spec, detector)
-    det_label = DETECTOR_LABELS.get(detector_key, detector_key)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Устройство: {device}")
     print(f"Аномалия: {spec.display_name}")
-    print(f"Детектор: {det_label} ({detector_key})")
+    print(f"Детектор: {DETECTOR_LABELS.get(detector_key, detector_key)} ({detector_key})")
 
-    df = load_anomaly_data(spec, source_path=source_path)
-    intervals = load_intervals(spec)
+    data_df = _load_timeseries(spec, source_path)
+    intervals_df = _load_intervals(spec)
+    scores_df = _load_scores(spec, detector_key)
+    score_col = _score_column(scores_df)
+    if score_col != "score":
+        scores_df = scores_df.rename(columns={score_col: "score"})
+    results_df = _load_detection_results(spec, detector_key)
+    predictions_df = _load_predictions(spec, detector_key)
 
-    if intervals.empty:
-        raise RuntimeError("Нет данных об интервалах аномалий")
-
-    split_map = (
-        intervals[["well_id", "split"]]
-        .drop_duplicates("well_id")
-        .set_index("well_id")["split"]
-        .to_dict()
-    )
-
-    cfg = _runtime_config(anomaly_key)
-    all_results: list[dict[str, Any]] = []
-
-    # Train shared encoder if needed
-    shared_state = None
-    if detector_key in ("paano_shared", "ensemble"):
-        from alma_service.shared_encoder import train_shared_encoder
-        # Prepare all wells first to get PreparedWellData for shared training
-        all_prepared: dict[str, PreparedWellData] = {}
-        for wid in sorted(df["well_id"].unique()):
-            well_df = df[df["well_id"] == wid].copy()
-            set_seed()
-            p = prepare_engineered_well(
-                anomaly_key=anomaly_key,
-                well_id=wid,
-                split=split_map.get(wid, "train"),
-                well_df=well_df,
-                patch_size=int(cfg["prepare_patch_size"]),
-                reference_min_ratio=REFERENCE_MIN_RATIO,
-                reference_max_ratio=REFERENCE_MAX_RATIO,
-                reference_min_days=REFERENCE_MIN_DAYS,
-                min_reference_coverage=MIN_REFERENCE_COVERAGE,
-                min_total_coverage=MIN_TOTAL_COVERAGE,
-            )
-            if p is not None:
-                all_prepared[wid] = p
-        shared_state = train_shared_encoder(
-            prepared_wells=all_prepared,
-            patch_short=int(cfg["paano_patch_short"]),
-            patch_long=int(cfg["paano_patch_long"]),
-            anomaly_key=anomaly_key,
-            device=device,
+    wells: dict[str, Any] = {}
+    for well_id in sorted(intervals_df["well_id"].unique()):
+        well_payload = _analyze_well(
+            anomaly_key=spec.anomaly_key,
+            well_id=str(well_id),
+            well_df=data_df[data_df["well_id"] == well_id].copy(),
+            well_scores=scores_df[scores_df["well_id"] == well_id].copy(),
+            well_intervals=intervals_df[intervals_df["well_id"] == well_id].copy(),
+            results_df=results_df,
+            predictions_df=predictions_df,
             verbose=verbose,
         )
-        print(f"  Shared encoder trained: {shared_state.detail}")
+        if well_payload is not None:
+            wells[str(well_id)] = well_payload
 
-    for wid in sorted(df["well_id"].unique()):
-        well_df = df[df["well_id"] == wid].copy()
-        print(f"\nСкважина {wid}:")
+    if not wells:
+        raise RuntimeError("Ни одна скважина не прошла анализ важности признаков")
 
-        set_seed()
-        if detector_key in ("paano_shared", "ensemble") and wid in all_prepared:
-            prepared = all_prepared[wid]
-        else:
-            prepared = prepare_engineered_well(
-                anomaly_key=anomaly_key,
-                well_id=wid,
-                split=split_map.get(wid, "train"),
-                well_df=well_df,
-                patch_size=int(cfg["prepare_patch_size"]),
-                reference_min_ratio=REFERENCE_MIN_RATIO,
-                reference_max_ratio=REFERENCE_MAX_RATIO,
-                reference_min_days=REFERENCE_MIN_DAYS,
-                min_reference_coverage=MIN_REFERENCE_COVERAGE,
-                min_total_coverage=MIN_TOTAL_COVERAGE,
-            )
-        if prepared is None:
-            print("  Пропуск: недостаточно данных после препроцессинга")
-            continue
+    summary = {
+        "version": FI_SUMMARY_VERSION,
+        "method": "interval_physical_model_grouped_importance",
+        "anomaly": spec.anomaly_key,
+        "detector": detector_key,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "score_column": "score",
+        "weights": {
+            "interval_final": {"physical": 0.55, "model": 0.30, "detection": 0.15},
+            "channel_final": {"mean_interval": 0.50, "stability": 0.25, "max_interval": 0.25},
+        },
+        "wells": wells,
+    }
 
-        well_intervals = intervals[intervals["well_id"] == wid].sort_values("start_date")
-        anomaly_mask = np.zeros(len(prepared.timestamps), dtype=bool)
-        for _, row in well_intervals.iterrows():
-            idx_mask = (
-                (prepared.timestamps >= np.datetime64(row["start_date"])) &
-                (prepared.timestamps <= np.datetime64(row["end_date"]))
-            )
-            anomaly_mask |= idx_mask
-
-        if not anomaly_mask.any():
-            print("  Пропуск: нет аномальных точек в данных")
-            continue
-
-        print(f"  Подготовлено: {prepared.detail['points']} точек, "
-              f"{len(prepared.raw_columns)} каналов, "
-              f"{int(anomaly_mask.sum())} аномальных точек")
-
-        result = compute_channel_importance(
-            anomaly_key, detector_key, prepared, anomaly_mask, device,
-            verbose=verbose, shared_state=shared_state,
-        )
-        if result is not None:
-            all_results.append(result)
-
-    if not all_results:
-        raise RuntimeError("Ни одна скважина не прошла анализ")
-
-    # Load detection results (one detection per interval, same as main report)
-    res_path = results_path(spec, detector_key)
-    if res_path.exists():
-        detections = read_table(res_path, dtypes={"well_id": str}, parse_dates=["detected_time"])
-        detections["well_id"] = detections["well_id"].astype(str).str.strip().str.lower()
-        # Keep only detected intervals
-        detections = detections.dropna(subset=["detected_time"])
-        print(f"Загружены результаты детекции: {len(detections)} обнаружений из {res_path.name}")
-    else:
-        detections = pd.DataFrame(columns=["well_id", "detected_time"])
-        print(f"Файл результатов детекции не найден: {res_path.name}")
-
-    html = _build_html(spec, detector_key, all_results, intervals, detections)
-
-    # Save importance summary as JSON for use by detection reports
-    import json
-    fi_summary: dict[str, dict[str, float]] = {}
-    for result in all_results:
-        wid = result["well_id"]
-        fi_summary[wid] = {ch: v["pct_drop"] for ch, v in result["importance"].items()}
     fi_json_path = DB_DIR / f"{spec.dataset.output_prefix}_{detector_key}_fi_summary.json"
-    fi_json_path.write_text(json.dumps(fi_summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    fi_json_path.write_text(json.dumps(_summary_for_backend(summary), ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Feature importance summary saved: {fi_json_path}")
+
+    html = _build_html(
+        spec=spec,
+        detector_key=detector_key,
+        summary=summary,
+        data_df=data_df,
+        scores_df=scores_df,
+        intervals_df=intervals_df,
+        predictions_df=predictions_df,
+    )
 
     if output_path is None:
         subdir = REPORTS_DIR / spec.anomaly_key
         subdir.mkdir(parents=True, exist_ok=True)
-        output_path = str(
-            subdir / f"{spec.dataset.output_prefix}_{detector_key}_feature_importance.html"
-        )
+        output_path = str(subdir / f"{spec.dataset.output_prefix}_{detector_key}_feature_importance.html")
     out = ensure_parent(Path(output_path))
     out.write_text(html, encoding="utf-8")
-    print(f"\nОтчёт сохранён: {out}")
+    print(f"Отчёт сохранён: {out}")
     return out

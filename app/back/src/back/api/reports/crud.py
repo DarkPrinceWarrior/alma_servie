@@ -289,16 +289,23 @@ def load_feature_importance(
         return None
 
     data = json.loads(path.read_text(encoding="utf-8"))
-    well_data = data.get(well_id)
-    if not isinstance(well_data, dict):
+    if data.get("version") != 2:
+        raise ValueError(
+            f"Legacy feature importance format in {path}; regenerate report with FI v2"
+        )
+
+    wells = data.get("wells")
+    well_data = wells.get(well_id) if isinstance(wells, dict) else None
+    channels = well_data.get("channels") if isinstance(well_data, dict) else None
+    if not isinstance(channels, dict):
         return FeatureImportanceResponse(
             well_id=well_id, anomaly=anomaly, detector=detector, items=[]
         )
 
     items = [
-        FeatureImportanceItem(feature=str(k), importance=float(v))
-        for k, v in well_data.items()
-        if isinstance(v, (int, float))
+        FeatureImportanceItem(feature=str(k), importance=float(v["final_score"]))
+        for k, v in channels.items()
+        if isinstance(v, dict) and isinstance(v.get("final_score"), (int, float))
     ]
     items.sort(key=lambda x: abs(x.importance), reverse=True)
     return FeatureImportanceResponse(
