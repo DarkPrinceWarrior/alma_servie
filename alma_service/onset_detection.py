@@ -189,6 +189,7 @@ def _detect_onsets_stateful(
     min_run_points: int,
     cooldown_hours: float,
     rearm_window_minutes: float,
+    bypass_cooldown_after_clear: bool = True,
 ) -> List[pd.Timestamp]:
     starts: List[pd.Timestamp] = []
     if len(entry_cond) == 0:
@@ -222,7 +223,7 @@ def _detect_onsets_stateful(
                     start_ts = pd.Timestamp(ts[run_start])
                     if (
                         last_start is None
-                        or rearmed_after_clear
+                        or (rearmed_after_clear and bypass_cooldown_after_clear)
                         or start_ts - last_start >= cooldown
                     ):
                         starts.append(start_ts)
@@ -364,6 +365,7 @@ def detect_causal_onsets_masked(
     gate_mode: str = "relaxed",
     rearm_window_minutes: float = 60.0,
     hysteresis_scale: float = 0.60,
+    bypass_cooldown_after_clear: bool = True,
 ) -> List[pd.Timestamp]:
     x = np.asarray(scores, dtype=np.float32)
     ref_mask = np.asarray(reference_mask, dtype=bool)
@@ -403,6 +405,7 @@ def detect_causal_onsets_masked(
         min_run_points=min_run_points,
         cooldown_hours=cooldown_hours,
         rearm_window_minutes=rearm_window_minutes,
+        bypass_cooldown_after_clear=bypass_cooldown_after_clear,
     )
 
 

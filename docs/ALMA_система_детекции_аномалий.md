@@ -65,6 +65,16 @@
 
 Данные поступают из **системы телеметрии скважин** — каждая скважина оснащена набором датчиков, которые передают показания с определённой периодичностью.
 
+Рабочие датасеты для детекции хранятся в Parquet:
+
+| Класс | Основной файл данных | Интервалы разметки |
+|---|---|---|
+| Негерметичность | `db/negermet_anomaly_database_2min.parquet` | `db/negermet_intervals.parquet` |
+| Приток | `db/pritok_anomaly_database_10min.parquet` | `db/pritok_intervals.parquet` |
+| Солеотложение | `db/salt_anomaly_database_15min.parquet` | `db/salt_intervals.parquet` |
+
+Для притока после последнего обновления добавлены новые скважины и используется файл `db/pritok_anomaly_database_10min.parquet`.
+
 ### 3.2 Каналы телеметрии (26 датчиков)
 
 Все датчики можно разделить на **четыре группы** по физическому смыслу:
@@ -140,13 +150,14 @@ flowchart TB
 
     subgraph PREPROCESS["⚙️ Препроцессинг"]
         LOAD["Загрузка и<br/>фильтрация данных"]
-        FEAT["Инженерия<br/>признаков<br/>(26 → 156-198)"]
+        FEAT["Инженерия<br/>признаков<br/>(24–26 → 144–234)"]
         SPLIT["Разделение на<br/>Reference / Stream"]
         MASK["Маска<br/>нестабильности"]
     end
 
     subgraph DETECT["🧠 Детекция"]
         PAANO["PaAno Shared<br/>Encoder<br/>(нейросеть)"]
+        PTR["Pressure Trend<br/>(физическая ветка<br/>для притока)"]
         PCA["PCA/SPE<br/>(линейный)"]
         ENS["Ensemble<br/>(PaAno + PCA)"]
     end
@@ -163,9 +174,12 @@ flowchart TB
     FEAT --> SPLIT
     SPLIT --> MASK
     MASK --> PAANO
+    MASK --> PTR
     MASK --> PCA
     PAANO --> ENS
     PCA --> ENS
+    PAANO --> SCORE
+    PTR --> SCORE
     ENS --> SCORE
     SCORE --> ONSET
     ONSET --> REPORT
@@ -189,7 +203,7 @@ flowchart TB
 
 ### 4.3 Инженерия признаков
 
-Из 26 «сырых» каналов система создаёт **156–198 производных признаков** (features), которые лучше отражают динамику процесса:
+Из 24–26 «сырых» каналов система создаёт **144–234 производных признаков** (features), которые лучше отражают динамику процесса:
 
 | Тип признака | Описание | Пример |
 |---|---|---|
@@ -202,11 +216,11 @@ flowchart TB
 
 ### 4.4 Отбор признаков (Feature Reduction)
 
-198 признаков — это избыточно. Система использует **двухстадийный отбор**:
+До 234 признаков — это избыточно. Система использует **двухстадийный отбор**:
 
 ```mermaid
 flowchart LR
-    A["198 признаков"] --> B["Стадия 1:<br/>Фильтр variance +<br/>корреляция"]
+    A["144–234 признака"] --> B["Стадия 1:<br/>Фильтр variance +<br/>корреляция"]
     B --> C["~120 признаков"]
     C --> D["Стадия 2:<br/>Стабильность<br/>на Reference"]
     D --> E["80 признаков<br/>(финальный набор)"]
@@ -222,7 +236,7 @@ flowchart LR
 
 ## 5. Алгоритмы детекции
 
-Система использует **три алгоритма** — каждый с разными сильными сторонами:
+Система использует **три базовых алгоритма** и одну специализированную физическую ветку для притока:
 
 ### 5.1 PaAno Shared Encoder (основной)
 
@@ -272,9 +286,37 @@ flowchart LR
 | **Короткий** (32–96 точек) | Локальные изменения | Резкие скачки, быстрые аномалии |
 | **Длинный** (64–192 точек) | Глобальные тренды | Медленные деградации, тренды |
 
-Финальный score = взвешенная комбинация двух масштабов.
+Финальный нейросетевой score = взвешенная комбинация двух масштабов.
 
-### 5.2 PCA/SPE (линейный базовый)
+### 5.2 Pressure Trend для притока
+
+Для аномалии **«Изменение притока»** к `paano_shared` добавлена отдельная физическая ветка по каналу **«Давление на приеме насоса кгс/см²»**. Это не новый детектор и не отдельный отчёт: ветка работает внутри `paano_shared` и усиливает score только для притока.
+
+Зачем это нужно:
+
+- приток физически часто проявляется как устойчивый тренд давления на приёме;
+- нейросетевой PaAno хорошо ловит многоканальные паттерны, но может поздно реагировать на слабый, но физически значимый тренд давления;
+- отдельная pressure-ветка делает алгоритм чувствительнее к началу притока, сохраняя общий PaAno-score и прежний формат отчётов.
+
+Как строится `pressure_trend_score`:
+
+1. Берётся reference-период каждой скважины.
+2. По давлению считаются robust baseline и scale: median/MAD, а не среднее/std.
+3. Автоматически выбираются несколько временных горизонтов относительно длины ряда и reference-периода.
+4. Для каждого момента оцениваются уровень давления, изменение относительно baseline, устойчивость тренда и практическая значимость сдвига.
+5. Эти компоненты объединяются в `pressure_trend_score`.
+
+Финальный score для притока:
+
+```text
+score = paano_score + pressure_trend_weight × pressure_trend_score
+```
+
+`pressure_trend_weight` подбирается auto-tune. В финальном прогоне притока выбран вес `0.0025`, то есть pressure-ветка не заменяет PaAno, а мягко подталкивает score в местах физически согласованного тренда.
+
+В HTML-отчёте по притоку score-график показывает общий score и дополнительные линии `paano_tail_score` / `pressure_trend_score`, чтобы было видно, какая часть сигнала пришла от PaAno, а какая — от давления.
+
+### 5.3 PCA/SPE (линейный базовый)
 
 **PCA** (Principal Component Analysis) — классический статистический метод.
 
@@ -295,7 +337,7 @@ PCA находит эти оси → проецирует данные → во�
 
 Score = T²_z + SPE_z (нормализованные z-оценки)
 
-### 5.3 Ensemble (ансамбль) — лучший для солей
+### 5.4 Ensemble (ансамбль) — лучший для солей
 
 **Комбинация** PaAno Shared + PCA/SPE:
 
@@ -311,7 +353,7 @@ PaAno и PCA ловят **разные типы паттернов**:
 
 На практике они **комплементарны**: есть аномалии, которые ловит PaAno, но не PCA, и наоборот. Ансамбль объединяет сильные стороны обоих.
 
-### 5.4 Сравнение алгоритмов
+### 5.5 Сравнение алгоритмов
 
 ```mermaid
 graph LR
@@ -321,6 +363,13 @@ graph LR
         P3["✅ Межскважинное обучение"]
         P4["❌ Требует GPU"]
         P5["❌ ~2 мин обучение"]
+    end
+
+    subgraph PTR["Pressure Trend"]
+        T1["✅ Физически согласован для притока"]
+        T2["✅ Адаптивен к длине скважины"]
+        T3["✅ Улучшает раннее обнаружение"]
+        T4["❌ Используется только для притока"]
     end
 
     subgraph PCASPE["PCA/SPE"]
@@ -352,15 +401,20 @@ sequenceDiagram
     participant R as Feature Reduction
     participant E as Shared Encoder
     participant M as Memory Bank
+    participant T as Pressure Trend
+    participant A as Auto-Tune
 
     D->>P: Загрузка данных всех скважин
     P->>F: Дискретизация + интерполяция
-    F->>R: 26 каналов → 156-198 признаков
-    R->>E: 198 → 80 лучших признаков
+    F->>R: 24–26 каналов → 144–234 признака
+    R->>E: Отбор до 80 стабильных признаков
     Note over E: Сбор пула Reference-данных<br/>со всех train-скважин
     E->>E: Обучение CNN (200 итераций)
     E->>M: Создание Memory Bank<br/>для каждой скважины
-    M-->>E: Готов к детекции
+    P->>T: Для притока:<br/>адаптивный pressure_trend_score
+    M->>A: PaAno score
+    T->>A: Pressure score
+    A-->>E: Готовая конфигурация детекции
 ```
 
 ### 6.2 Разделение скважин
@@ -377,18 +431,22 @@ Encoder обучается **только на train-скважинах**, но 
 
 ```mermaid
 flowchart TB
-    SCORE["Score (непрерывный)"] --> GRID["Перебор конфигураций<br/>(~1000 комбинаций)"]
-    GRID --> PARAMS["Параметры:<br/>• Порог z-score<br/>• Min длина run<br/>• Cooldown<br/>• EMA сглаживание"]
+    SCORE["Score (непрерывный)"] --> GRID["Optuna TPE + seed-конфигурации<br/>(подбор по train-скважинам)"]
+    GRID --> PARAMS["Параметры:<br/>• Target FAR<br/>• Min длина run<br/>• Cooldown<br/>• Rearm window<br/>• EMA сглаживание<br/>• Pressure weight для притока"]
     PARAMS --> EVAL["Оценка на train:<br/>• Hit rate ↑<br/>• FAR ↓<br/>• Delay ↓"]
     EVAL --> BEST["Лучшая конфигурация"]
     BEST --> APPLY["Применение<br/>к test-скважинам"]
 ```
 
 Подбираются параметры:
-- **Порог** — при каком уровне score считать аномалией
+- **Target FAR** — целевой уровень ложных срабатываний на reference-периоде
 - **Min run points** — сколько подряд точек должны быть выше порога
-- **Cooldown** — пауза между повторными алертами (8–24 часа)
+- **Cooldown** — пауза между повторными алертами; для притока используются более длинные окна, потому что процесс длится днями и неделями
+- **Rearm window** — окно, после которого разрешается новый старт при новом устойчивом превышении
 - **EMA alpha** — сглаживание score для устойчивости
+- **Pressure trend weight** — вес физической pressure-ветки для притока
+
+Для притока дополнительно запрещён режим мгновенного обхода cooldown после clear (`bypass_cooldown_after_clear=False`). Это снижает дробление одной длинной аномалии на десятки повторных стартов.
 
 ---
 
@@ -446,27 +504,46 @@ Run:                                    1      2      3      4
 
 | Скважина | Сплит | Статус | Задержка |
 |---|---|---|---|
-| 1123л | train | ✅ Detected | ~ 0 часов |
-| 172г | train | ✅ Detected | ~ 0 часов |
-| 3509г | **test** | ✅ Detected | ~ 0 часов |
-| 524 | train | ✅ Detected | ~ 0 часов |
-| 5271г | train | ✅ Detected | ~ 0 часов |
+| 1123л | train | ✅ Detected | около 0 ч |
+| 172г | train | ✅ Detected | около 0 ч |
+| 3509г | **test** | ✅ Detected | около 0 ч |
+| 524 | train | ✅ Detected | около 0 ч |
+| 5271г | train | ✅ Detected | около 0 ч |
 
 ```
-📊 Hit Rate: 5/5 (100%)  |  FAR: 0.267/день  |  P90 delay: 0.5%
+📊 Hit Rate: 5/5 (100%)  |  FAR: 0.250/день  |  P90 delay ratio: 5.4%
 ```
 
-#### Изменение притока — PaAno Shared
+#### Изменение притока — PaAno Shared + Pressure Trend
 
 | Скважина | Сплит | Статус | Задержка |
 |---|---|---|---|
+| 1062 | train | ✅ Detected | 26.0 ч |
 | 129л | train | ✅ Detected | 31.5 ч |
-| 3261 | train | ✅ Detected | 0 ч |
-| 495 | train | ✅ Detected | 0 ч |
-| 902 | **test** | ✅ Detected | 6.7 ч |
+| 495 | train | ✅ Detected | 13.2 ч |
+| 5144г | train | ✅ Detected | 4.7 ч |
+| 610 | train | ✅ Detected | около 0 ч |
+| 691 | train | ✅ Detected | 0.2 ч |
+| 792 | train | ✅ Detected | 4.9 ч |
+| 902 | **test** | ✅ Detected | 1.7 ч |
 
 ```
-📊 Hit Rate: 4/4 (100%)  |  FAR: 0.197/день  |  P90 delay: 4.8%
+📊 Полная оценка по интервалам: 19/21 (90.5%)  |  FAR: 0.0666/день  |  P90 delay ratio: 13.9%
+📊 Первый интервал каждой скважины в основном отчёте: 18/18 detected
+```
+
+После добавления новых скважин притока в датасете стало 21 размеченных интервала. Основной HTML-отчёт строится по первому интервалу каждой скважины, потому что детекционный пайплайн обрезает ряд по концу первой аномалии для blind-сценария. Полная метрика `evaluate_onset_metrics.py` дополнительно учитывает вторые интервалы; в последнем прогоне не пойманы вторые интервалы `602` и `691`.
+
+Финальная auto-tune конфигурация для притока:
+
+```text
+gate = strict
+min_run_points = 3
+cooldown_hours = 72
+rearm_window_minutes = 60
+ema_alpha = 0.12
+pressure_trend_weight = 0.0025
+bypass_cooldown_after_clear = false
 ```
 
 #### Солеотложение — Ensemble (PaAno + PCA)
@@ -483,7 +560,7 @@ Run:                                    1      2      3      4
 | 408 | train | ✅ Detected | 2.8 ч |
 
 ```
-📊 Hit Rate: 6/7 (86%)  |  FAR: 0.131/день  |  P90 delay: 25.6%
+📊 Hit Rate: 7/8 (87.5%)  |  FAR: 0.130/день  |  P90 delay ratio: 21.1%
 ```
 
 ### 8.3 Сводная таблица
@@ -492,9 +569,9 @@ Run:                                    1      2      3      4
 ┌─────────────────┬─────────────────┬───────────┬──────────┬───────────┐
 │   Аномалия      │    Детектор     │ Hit Rate  │ FAR/день │ P90 Delay │
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
-│ Негерметичность │ PaAno Shared    │  5/5 100% │   0.267  │    0.5%   │
-│ Приток          │ PaAno Shared    │  4/4 100% │   0.197  │    4.8%   │
-│ Соли            │ Ensemble        │  6/7  86% │   0.131  │   25.6%   │
+│ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
+│ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.067  │   13.9%   │
+│ Соли            │ Ensemble        │  7/8  88% │   0.130  │   21.1%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```
 
@@ -505,7 +582,7 @@ xychart-beta
     title "Hit Rate по типам аномалий (%)"
     x-axis ["Негерметичность", "Приток", "Соли"]
     y-axis "Hit Rate, %" 0 --> 110
-    bar [100, 100, 86]
+    bar [100, 90.5, 87.5]
 ```
 
 ---
@@ -522,6 +599,8 @@ xychart-beta
 2. 📊 **Давление на приёме** — ключевой физический параметр
 3. 📊 **Самый значимый канал** — канал, который больше всего «помог» обнаружить аномалию
 
+Для притока score-панель дополнительно показывает компоненты `paano_tail_score` и `pressure_trend_score`. Это позволяет отличить нейросетевой сигнал PaAno от физического сигнала по тренду давления.
+
 На графиках отмечены:
 - 🟩 Зелёная линия — фактическое начало аномалии
 - 🔴 Красная зона — период аномалии
@@ -529,19 +608,24 @@ xychart-beta
 
 ### 9.2 Отчёт по значимости каналов (Feature Importance)
 
-Показывает, **какие датчики больше всего повлияли** на обнаружение каждой конкретной аномалии.
+Показывает, **какие датчики наиболее согласованы с обнаруженной аномалией** на конкретной скважине и интервале.
 
-Методика: последовательно «отключаем» каждый канал и смотрим, насколько ухудшилось обнаружение.
+Текущая версия использует FI v2: канал оценивается не через старое «отключение признака», а через честное сопоставление поведения канала с интервалом аномалии и score детектора. Учитываются:
+
+- изменение канала внутри размеченного интервала относительно reference;
+- устойчивость изменения, а не одиночный выброс;
+- согласованность с модельным score;
+- нормировка на длину ряда и длину аномального интервала, чтобы короткие и длинные скважины сравнивались корректно.
+
+FI v2 не является фильтром обучения модели и не удаляет признаки из PaAno. Это объяснительный отчёт: он показывает, какие физические каналы лучше всего объясняют уже найденный интервал.
 
 ```
-Пример для скважины 3245 (соли):
-  Коэф. загрузки ПЭД:  +13.6%  ← ключевой канал
-  Фазное напряжение Uc: +12.4%
-  Линейное напр. СA:    +12.1%
-  Ток на фазе В:        +11.5%
-  Ток на фазе А:        +10.4%
+Пример для притока:
+  Давление на приеме насоса: 99.9  ← ключевой физический канал
+  Температура на приёме:      56.6
+  Температура масла двигателя:56.6
   ...
-  Вибрация XYZ:          -0.9%  ← вносит шум
+  низкий score: канал слабо согласован с интервалом
 ```
 
 ### 9.3 Структура отчётов
@@ -575,10 +659,16 @@ artifacts/reports/
 # Активация виртуального окружения
 source venv/bin/activate
 
-# Детекция (каждый скрипт автоматически выберет лучший детектор)
-python scripts/detection/detect_negermet.py --retune
-python scripts/detection/detect_pritok.py --source db/pritok_anomaly_database_10min.parquet --retune
-python scripts/detection/detect_salt.py --source db/salt_anomaly_database_15min.parquet --retune
+# Детекция
+python scripts/detection/detect_negermet.py --detector paano_shared --retune
+python scripts/detection/detect_pritok.py \
+    --detector paano_shared \
+    --source db/pritok_anomaly_database_10min.parquet \
+    --retune
+python scripts/detection/detect_salt.py \
+    --detector ensemble \
+    --source db/salt_anomaly_database_15min.parquet \
+    --retune
 ```
 
 Флаг `--retune` означает: заново подобрать пороги (рекомендуется при обновлении данных).
@@ -587,14 +677,26 @@ python scripts/detection/detect_salt.py --source db/salt_anomaly_database_15min.
 
 ```bash
 # Отчёты по детекции
-python scripts/reports/generate_negermet_paano_report.py
-python scripts/reports/generate_pritok_paano_report.py
-python scripts/reports/generate_salt_paano_report.py
+python scripts/reports/generate_negermet_paano_report.py --detector paano_shared
+python scripts/reports/generate_pritok_paano_report.py \
+    --detector paano_shared \
+    --source db/pritok_anomaly_database_10min.parquet
+python scripts/reports/generate_salt_paano_report.py \
+    --detector ensemble \
+    --source db/salt_anomaly_database_15min.parquet
 
 # Отчёты по значимости каналов
-python scripts/reports/generate_feature_importance_report.py --anomaly negermet
-python scripts/reports/generate_feature_importance_report.py --anomaly pritok --source db/pritok_anomaly_database_10min.parquet
-python scripts/reports/generate_feature_importance_report.py --anomaly salt --source db/salt_anomaly_database_15min.parquet
+python scripts/reports/generate_feature_importance_report.py \
+    --anomaly negermet \
+    --detector paano_shared
+python scripts/reports/generate_feature_importance_report.py \
+    --anomaly pritok \
+    --detector paano_shared \
+    --source db/pritok_anomaly_database_10min.parquet
+python scripts/reports/generate_feature_importance_report.py \
+    --anomaly salt \
+    --detector ensemble \
+    --source db/salt_anomaly_database_15min.parquet
 ```
 
 ### 10.4 Использование конкретного детектора
@@ -604,6 +706,15 @@ python scripts/reports/generate_feature_importance_report.py --anomaly salt --so
 python scripts/detection/detect_salt.py --detector pca_spe --retune
 python scripts/detection/detect_salt.py --detector paano_shared --retune
 python scripts/detection/detect_salt.py --detector ensemble --retune
+```
+
+### 10.5 Оценка качества
+
+```bash
+python scripts/evaluation/evaluate_onset_metrics.py \
+    --anomaly pritok \
+    --detector paano_shared \
+    --name pritok_paano_shared
 ```
 
 ---
@@ -628,9 +739,13 @@ python scripts/detection/detect_salt.py --detector ensemble --retune
 | **PCA** | Principal Component Analysis — метод главных компонент |
 | **SPE** | Squared Prediction Error — ошибка реконструкции данных |
 | **Ensemble** | Комбинация нескольких алгоритмов для улучшения результата |
+| **Pressure Trend** | Физическая ветка для притока, оценивающая устойчивый тренд давления на приёме насоса |
+| **Cooldown** | Минимальная пауза между повторными стартами, чтобы одна длинная аномалия не дробилась на много алертов |
+| **Rearm window** | Окно повторной готовности детектора после завершения предыдущего превышения |
+| **FI v2** | Текущий метод важности признаков: интервальная физическая согласованность канала + согласованность со score детектора |
 
 ---
 
-> **Документ подготовлен:** Март 2026  
-> **Версия системы:** ALMA v2.0 (Shared Encoder + Ensemble)  
+> **Документ обновлён:** Апрель 2026
+> **Версия системы:** ALMA v2.1 (Shared Encoder + Ensemble + Pressure Trend для притока)
 > **Технологический стек:** Python, PyTorch, scikit-learn, matplotlib

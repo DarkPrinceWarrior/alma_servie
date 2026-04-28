@@ -226,6 +226,8 @@ def _create_plot_html(
     well_id = str(result_row["well_id"])
     score_col = _score_column(scores_df)
     has_scores = score_col is not None
+    has_paano_tail = scores_df is not None and "paano_tail_score" in scores_df.columns
+    has_pressure_trend = scores_df is not None and "pressure_trend_score" in scores_df.columns
 
     x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
     x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
@@ -301,7 +303,25 @@ def _create_plot_html(
                 sts = pd.to_datetime(score_view["timestamp"])
                 vals = score_view[score_col].values
                 ax.fill_between(sts, 0, vals, color=accent, alpha=0.18)
-                ax.plot(sts, vals, color=accent, linewidth=0.7)
+                ax.plot(sts, vals, color=accent, linewidth=0.7, label="Итоговый score")
+                if "paano_tail_score" in score_view.columns:
+                    ax.plot(
+                        sts,
+                        score_view["paano_tail_score"].values,
+                        color="#0f766e",
+                        linewidth=0.55,
+                        alpha=0.75,
+                        label="PaAno tail-score",
+                    )
+                if "pressure_trend_score" in score_view.columns:
+                    ax.plot(
+                        sts,
+                        score_view["pressure_trend_score"].values,
+                        color="#ea580c",
+                        linewidth=0.65,
+                        alpha=0.78,
+                        label="Pressure trend",
+                    )
         elif col_name is not None and col_name in well_df.columns:
             vals = pd.to_numeric(well_df[col_name], errors="coerce")
             ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
@@ -323,6 +343,14 @@ def _create_plot_html(
     legend_handles = [zone_patch, start_line, end_line]
     if pd.notna(result_row["detected_time"]):
         legend_handles.append(detect_line)
+    if has_paano_tail:
+        legend_handles.append(
+            plt.Line2D([0], [0], color="#0f766e", linewidth=0.75, label="PaAno tail-score")
+        )
+    if has_pressure_trend:
+        legend_handles.append(
+            plt.Line2D([0], [0], color="#ea580c", linewidth=0.85, label="Pressure trend")
+        )
     axes[0].legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.9)
 
     axes[-1].set_xlabel("Время")

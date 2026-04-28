@@ -72,6 +72,7 @@ BASE_ONSET_CONFIG = {
     "ema_alpha": 0.08,
     "gate_mode": "score_ema",
     "hysteresis_scale": 0.60,
+    "bypass_cooldown_after_clear": True,
 }
 
 BASE_ONSET_TUNE_GRID = {
@@ -86,9 +87,12 @@ BASE_ONSET_TUNE_GRID = {
 ANOMALY_ONSET_PROFILES = {
     "negermet": {},
     "pritok": {
+        "defaults": {
+            "bypass_cooldown_after_clear": False,
+        },
         "grid": {
-            "min_run_points": [2, 3, 4],
-            "cooldown_hours": [8.0, 12.0, 24.0],
+            "min_run_points": [3, 4],
+            "cooldown_hours": [12.0, 24.0, 72.0, 120.0, 168.0],
             "rearm_window_minutes": [30.0, 60.0, 120.0],
         },
     },
@@ -96,6 +100,7 @@ ANOMALY_ONSET_PROFILES = {
 }
 
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
+PRESSURE_TREND_WEIGHT_GRID = [0.0, 0.0025, 0.005]
 ANOMALY_RUNTIME_CONFIG = {
     "negermet": {
         "prepare_patch_size": PATCH_SIZES["negermet"][1],
@@ -110,8 +115,8 @@ ANOMALY_RUNTIME_CONFIG = {
         "paano_patch_short": PATCH_SIZES["pritok"][0],
         "paano_patch_long": PATCH_SIZES["pritok"][1],
         "max_far_per_day": 0.25,
-        "max_starts_per_interval": 6.0,
-        "max_p90_delay_ratio": 0.40,
+        "max_starts_per_interval": 7.0,
+        "max_p90_delay_ratio": 0.45,
     },
     "salt": {
         "prepare_patch_size": PATCH_SIZES["salt"][1],
@@ -176,6 +181,8 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     starts = _safe_metric(summary.get("avg_starts_per_interval"), large=1e9)
     p90_ratio = _safe_metric(summary.get("p90_delay_ratio"), large=1e9)
     p90_abs_delay = _safe_metric(summary.get("p90_abs_delay_hours"), large=1e9)
+    median_abs_delay = _safe_metric(summary.get("median_abs_delay_hours"), large=1e9)
+    hit_count = float(summary.get("hit_count", 0))
     feasible_far = int(far <= max_far)
     feasible_starts = int(starts <= max_starts)
     feasible_delay = int(p90_ratio <= max_delay_ratio)
@@ -184,16 +191,17 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     delay_over = max(p90_ratio - max_delay_ratio, 0.0)
     priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
     return (
-        float(summary.get("hit_count", 0)),
-        float(feasible_delay),
         float(feasible_starts),
         float(feasible_far),
-        -delay_over,
-        -far_over,
+        float(feasible_delay),
         -starts_over,
+        -far_over,
+        -delay_over,
+        hit_count,
         -p90_ratio,
-        -starts,
         -p90_abs_delay,
+        -median_abs_delay,
+        -starts,
         -far,
         float(priority),
     )
@@ -367,6 +375,29 @@ def _build_local_runs(
             X_ref_proj = X_proj[prepared.reference_mask]
             detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
             score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
+            if anomaly_key == "pritok":
+                from alma_service.pressure_trend import (
+                    build_pressure_trend_branch,
+                    fuse_model_with_pressure_trend,
+                )
+
+                pressure_output = build_pressure_trend_branch(prepared)
+                fused, fusion_components, fusion_detail = fuse_model_with_pressure_trend(
+                    model_score=score_output.primary,
+                    pressure_output=pressure_output,
+                    reference_mask=prepared.reference_mask,
+                )
+                score_output = DetectorScoreOutput(
+                    primary=fused.astype(np.float32),
+                    components={
+                        **score_output.components,
+                        **fusion_components,
+                    },
+                    detail={
+                        **score_output.detail,
+                        **fusion_detail,
+                    },
+                )
             out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
         else:
             detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
@@ -378,6 +409,19 @@ def _build_local_runs(
 
 
 def _score_for_config(run: PreparedDetectorRun, detector_key: str, cfg: dict[str, Any]) -> np.ndarray:
+    if detector_key == "paano_shared":
+        pressure_score = run.score_output.components.get("pressure_trend_score")
+        model_score = run.score_output.components.get("paano_score")
+        if pressure_score is not None and model_score is not None:
+            pressure_weight = float(cfg.get("pressure_trend_weight", 0.0))
+            if pressure_weight <= 0.0:
+                return np.asarray(model_score, dtype=np.float32)
+            return (
+                np.asarray(model_score, dtype=np.float32)
+                + pressure_weight * np.asarray(pressure_score, dtype=np.float32)
+            ).astype(np.float32)
+        return run.score_output.primary.astype(np.float32)
+
     if detector_key != "paano_feat":
         return run.score_output.primary.astype(np.float32)
 
@@ -416,6 +460,7 @@ def _detect_starts_for_run(
         rearm_window_minutes=float(cfg["rearm_window_minutes"]),
         gate_mode=str(cfg["gate_mode"]),
         hysteresis_scale=float(cfg["hysteresis_scale"]),
+        bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
     )
     return score, thresholds, starts
 
@@ -423,6 +468,11 @@ def _detect_starts_for_run(
 def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     weight_grid = PAANO_WEIGHT_GRID if detector_key == "paano_feat" else [None]
+    pressure_weight_grid = (
+        PRESSURE_TREND_WEIGHT_GRID
+        if anomaly_key == "pritok" and detector_key == "paano_shared"
+        else [None]
+    )
     grid = _onset_tune_grid(anomaly_key)
     default_cfg = _default_onset_config(anomaly_key, detector_key)
     for target_far_per_day in grid["target_far_per_day"]:
@@ -432,20 +482,23 @@ def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, An
                     for ema_alpha in grid["ema_alpha"]:
                         for gate_mode in grid["gate_mode"]:
                             for fusion_weight_short in weight_grid:
-                                cfg = default_cfg.copy()
-                                cfg.update(
-                                    {
-                                        "target_far_per_day": float(target_far_per_day),
-                                        "min_run_points": int(min_run_points),
-                                        "cooldown_hours": float(cooldown_hours),
-                                        "rearm_window_minutes": float(rearm_window_minutes),
-                                        "ema_alpha": float(ema_alpha),
-                                        "gate_mode": str(gate_mode),
-                                    }
-                                )
-                                if fusion_weight_short is not None:
-                                    cfg["fusion_weight_short"] = float(fusion_weight_short)
-                                candidates.append(cfg)
+                                for pressure_trend_weight in pressure_weight_grid:
+                                    cfg = default_cfg.copy()
+                                    cfg.update(
+                                        {
+                                            "target_far_per_day": float(target_far_per_day),
+                                            "min_run_points": int(min_run_points),
+                                            "cooldown_hours": float(cooldown_hours),
+                                            "rearm_window_minutes": float(rearm_window_minutes),
+                                            "ema_alpha": float(ema_alpha),
+                                            "gate_mode": str(gate_mode),
+                                        }
+                                    )
+                                    if fusion_weight_short is not None:
+                                        cfg["fusion_weight_short"] = float(fusion_weight_short)
+                                    if pressure_trend_weight is not None:
+                                        cfg["pressure_trend_weight"] = float(pressure_trend_weight)
+                                    candidates.append(cfg)
     return candidates
 
 
@@ -507,6 +560,10 @@ def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> d
         cfg["fusion_weight_short"] = float(
             trial.suggest_categorical("fusion_weight_short", PAANO_WEIGHT_GRID)
         )
+    if anomaly_key == "pritok" and detector_key == "paano_shared":
+        cfg["pressure_trend_weight"] = float(
+            trial.suggest_categorical("pressure_trend_weight", PRESSURE_TREND_WEIGHT_GRID)
+        )
     return cfg
 
 
@@ -524,6 +581,47 @@ def _tune_config_with_optuna(
     sampler = optuna.samplers.TPESampler(seed=2027)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     n_trials = 48 if detector_key == "paano_feat" else 36
+    if anomaly_key == "pritok" and detector_key == "paano_shared":
+        n_trials = 72
+        for seed_cfg in (
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "relaxed",
+                "pressure_trend_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "score_ema",
+                "pressure_trend_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 120.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "relaxed",
+                "pressure_trend_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 168.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "score_ema",
+                "pressure_trend_weight": 0.0025,
+            },
+        ):
+            study.enqueue_trial(seed_cfg)
 
     def objective(trial: Any) -> float:
         cfg = _suggest_optuna_config(trial, anomaly_key, detector_key)
@@ -592,6 +690,11 @@ def _tune_config_with_optuna(
                 + (
                     f", w={cfg['fusion_weight_short']:.2f}"
                     if "fusion_weight_short" in cfg
+                    else ""
+                )
+                + (
+                    f", pw={cfg['pressure_trend_weight']:.4f}"
+                    if "pressure_trend_weight" in cfg
                     else ""
                 )
             )
