@@ -134,6 +134,74 @@ For root research changes, no global lint/format/test runner is configured in
 For backend changes under `app/back/`, use the validation commands documented
 in `app/back/AGENTS.md`.
 
+## Server workflow (a100)
+
+When to switch to the server: PaAno training with `epochs >= 50`, long
+benchmark runs (`run_full_detection_benchmark.sh` over all wells), Optuna/TPE
+tuning with many trials. Keep smoke tests, code edits, and debugging on the
+laptop.
+
+SSH hosts (already in global `~/.ssh/config`):
+
+- `ssh a100` - LAN (`192.168.101.12`), office/VPN only.
+- `ssh a100-remote` - remote access via jump host (any network):
+  `ProxyJump root@37.9.4.106:12921` -> target `10.10.40.201`. Same physical
+  server as `a100`.
+
+Hardware: 6x A100-SXM4-40GB, Debian 13, CUDA 13.0. Project path on server:
+`/root/projects/alma_servie/`. Virtual env on server is `venv/` (pip-style,
+not uv).
+
+Rules:
+
+1. Code is written locally only (via Edit/Serena). No edits on the server.
+   Sync flow: `git push origin main` ->
+   `ssh a100 'git -C /root/projects/alma_servie pull'`.
+2. Artifacts (`models/`, `artifacts/`, `db/`) stay on the server. They are
+   already gitignored. Pull final weights/reports back via `scp` when needed.
+3. Long-running jobs go through `tmux new -d -s <name>` so an SSH disconnect
+   does not kill the process.
+4. GPU0 on the server is taken by another process (~8.4 GB). Use
+   `CUDA_VISIBLE_DEVICES=1..5`.
+
+Commands:
+
+```bash
+# PaAno training in tmux on GPU 1
+ssh a100 'tmux new -d -s paano \
+    "cd /root/projects/alma_servie && \
+     source venv/bin/activate && \
+     CUDA_VISIBLE_DEVICES=1 python paano/train.py 2>&1 | tee runs/paano.log"'
+ssh a100 'tmux capture-pane -t paano -p | tail -30'   # progress
+ssh a100 'tmux ls'                                     # active sessions
+
+# Full benchmark detection
+ssh a100 'tmux new -d -s benchmark \
+    "cd /root/projects/alma_servie && \
+     source venv/bin/activate && \
+     bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
+
+# Single detector run
+ssh a100 'cd /root/projects/alma_servie && \
+    source venv/bin/activate && \
+    CUDA_VISIBLE_DEVICES=1 python scripts/detection/detect_salt.py --detector pca_spe'
+
+# File transfer (no rsync on server - use scp)
+scp -p data/raw/<new>.xlsx a100:/root/projects/alma_servie/data/raw/
+scp a100:/root/projects/alma_servie/models/<new>.pt models/
+scp -r a100:/root/projects/alma_servie/artifacts/reports/ artifacts/
+```
+
+Known gotchas:
+
+- IPv6 routing is broken on the server. `/etc/gai.conf` already contains
+  `precedence ::ffff:0:0/96 100` to prefer IPv4. Do not revert.
+- `rsync` is not installed - use `scp -p`.
+- The server has its own SSH key for GitLab (`/root/.ssh/id_ed25519`, title
+  `a100-server` in GitLab) - pushing from the server works directly.
+- For multi-GPU DDP (if PaAno is scaled out): NCCL on VM135 requires
+  `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
+
 ## Coding conventions
 
 - Use `from __future__ import annotations` at the top of Python modules.

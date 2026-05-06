@@ -66,6 +66,61 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 
 No linting, formatting, or test runner is configured. After changes, run the affected script directly to check for import/runtime errors.
 
+## Server workflow (a100)
+
+**Когда переключаться на сервер:** все тренировки PaAno от `epochs ≥ 50`, длинные benchmark-прогоны (`run_full_detection_benchmark.sh` по всем скважинам), Optuna/TPE-тюнинг с большим числом trials. Smoke-тесты, разработка и отладка кода — локально.
+
+### SSH хосты (уже в `~/.ssh/config`, глобально)
+
+- **`ssh a100`** — LAN (`192.168.101.12`), только из офиса/VPN.
+- **`ssh a100-remote`** — удалённый доступ через jump host (из дома, любая сеть): `ProxyJump root@37.9.4.106:12921` → target `10.10.40.201`. Тот же физический сервер.
+
+### Hardware
+
+6× A100-SXM4-40GB (240 ГБ суммарно), Debian 13, CUDA 13.0. Проектная директория на серваке: `/root/projects/alma_servie/`. Виртуальное окружение там — `venv/` (pip-стиль, не uv).
+
+### Правила
+
+1. **Код пишется только локально** (через Edit/Serena). На серваке — никаких правок. После изменения: `git push origin main` → `ssh a100 'git -C /root/projects/alma_servie pull'`.
+2. **Артефакты** (`models/`, `artifacts/`, `db/`) **остаются на серваке.** В git они и так в `.gitignore`. Финальные веса/отчёты — `scp` обратно на лэптоп.
+3. **Long-running** (тренировка PaAno, full benchmark) запускать через `tmux new -d -s <name>` чтобы SSH-разрыв не убивал процесс.
+4. **GPU0 на серваке занят чужим процессом (~8.4 ГБ)** — использовать `CUDA_VISIBLE_DEVICES=1..5`.
+
+### Команды
+
+```bash
+# PaAno training в tmux на GPU 1
+ssh a100 'tmux new -d -s paano \
+    "cd /root/projects/alma_servie && \
+     source venv/bin/activate && \
+     CUDA_VISIBLE_DEVICES=1 python paano/train.py 2>&1 | tee runs/paano.log"'
+ssh a100 'tmux capture-pane -t paano -p | tail -30'   # прогресс
+ssh a100 'tmux ls'                                     # активные сессии
+
+# full benchmark detection (длинный прогон)
+ssh a100 'tmux new -d -s benchmark \
+    "cd /root/projects/alma_servie && \
+     source venv/bin/activate && \
+     bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
+
+# одиночный detector run на серваке
+ssh a100 'cd /root/projects/alma_servie && \
+    source venv/bin/activate && \
+    CUDA_VISIBLE_DEVICES=1 python scripts/detection/detect_salt.py --detector pca_spe'
+
+# перенос файлов (rsync на серваке нет — только scp)
+scp -p data/raw/<new>.xlsx a100:/root/projects/alma_servie/data/raw/
+scp a100:/root/projects/alma_servie/models/<new>.pt models/
+scp -r a100:/root/projects/alma_servie/artifacts/reports/ artifacts/
+```
+
+### Известные грабли
+
+- IPv6 routing сломан → `/etc/gai.conf` уже содержит `precedence ::ffff:0:0/96 100` для приоритета IPv4. Не откатывать.
+- `rsync` отсутствует — использовать `scp -p`.
+- На серваке отдельный SSH-ключ для GitLab (`/root/.ssh/id_ed25519`, Title `a100-server` в GitLab) — push с сервера работает напрямую.
+- DDP (если PaAno будет тренироваться на нескольких GPU): NCCL на VM135 требует `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
+
 ## Architecture
 
 ### Data flow
