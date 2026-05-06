@@ -149,20 +149,40 @@ SSH hosts (already in global `~/.ssh/config`):
   server as `a100`.
 
 Hardware: 6x A100-SXM4-40GB, Debian 13, CUDA 13.0. Project path on server:
-`/root/projects/alma_servie/`. Virtual env on server is `venv/` (pip-style,
-not uv).
+`/root/projects/alma_servie/` inside the lowercase `/root/projects` directory.
+There is no `/root/Projects` directory on the server.
+
+Server Python environment is managed with `uv`, not plain `pip`:
+
+- `.python-version`: `3.13`;
+- virtual environment: `.venv/`, created by `uv venv --python 3.13 .venv`;
+- install command:
+  `uv pip install -e . -r requirements.txt torch==2.11.0`;
+- verified stack: Python `3.13.5`, PyTorch `2.11.0+cu130`,
+  `torch.version.cuda == "13.0"`, A100 visible with
+  `CUDA_VISIBLE_DEVICES=1`.
+
+Do not install `paano/requirements.txt` as-is on the server: it pins the old
+`torch==2.7.1` and would replace the CUDA 13.0 PyTorch stack.
 
 Rules:
 
-1. Code is written locally only (via Edit/Serena). No edits on the server.
-   Sync flow: `git push origin main` ->
-   `ssh a100 'git -C /root/projects/alma_servie pull'`.
-2. Artifacts (`models/`, `artifacts/`, `db/`) stay on the server. They are
+1. Source of truth is the server copy at `/root/projects/alma_servie`. Current
+   active work happens on the server. The laptop/local copy is only a consumer
+   that pulls/syncs changes from the server when needed.
+2. Use `uv run python ...` for server commands. For GPU-only PaAno runs, set
+   `CUDA_VISIBLE_DEVICES=1` or another non-zero GPU explicitly.
+3. Artifacts (`models/`, `artifacts/`, `db/`) stay on the server. They are
    already gitignored. Pull final weights/reports back via `scp` when needed.
-3. Long-running jobs go through `tmux new -d -s <name>` so an SSH disconnect
+4. Long-running jobs go through `tmux new -d -s <name>` so an SSH disconnect
    does not kill the process.
-4. GPU0 on the server is taken by another process (~8.4 GB). Use
+5. GPU0 on the server is taken by another process (~8.4 GB). Use
    `CUDA_VISIBLE_DEVICES=1..5`.
+6. `.serena/` was copied to the server for this project. Treat it as local
+   tool state, not as repository source.
+7. Current transferred runtime data on the server includes `db/`, `artifacts/`,
+   `models/`, `salym/`, and `salym_prepared/`. Sizes verified on 2026-05-06:
+   `salym` = `71894737195` bytes, `salym_prepared` = `34105867675` bytes.
 
 Commands:
 
@@ -170,26 +190,35 @@ Commands:
 # PaAno training in tmux on GPU 1
 ssh a100 'tmux new -d -s paano \
     "cd /root/projects/alma_servie && \
-     source venv/bin/activate && \
-     CUDA_VISIBLE_DEVICES=1 python paano/train.py 2>&1 | tee runs/paano.log"'
+     CUDA_VISIBLE_DEVICES=1 uv run python paano/train.py 2>&1 | tee runs/paano.log"'
 ssh a100 'tmux capture-pane -t paano -p | tail -30'   # progress
 ssh a100 'tmux ls'                                     # active sessions
 
 # Full benchmark detection
 ssh a100 'tmux new -d -s benchmark \
     "cd /root/projects/alma_servie && \
-     source venv/bin/activate && \
-     bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
+     CUDA_VISIBLE_DEVICES=1 uv run bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
 
 # Single detector run
 ssh a100 'cd /root/projects/alma_servie && \
-    source venv/bin/activate && \
-    CUDA_VISIBLE_DEVICES=1 python scripts/detection/detect_salt.py --detector pca_spe'
+    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector pca_spe'
+
+# Recreate server uv environment
+ssh a100 'cd /root/projects/alma_servie && \
+    printf "3.13\n" > .python-version && \
+    uv venv --python 3.13 .venv && \
+    uv pip install -e . -r requirements.txt torch==2.11.0'
+
+# Verify PyTorch CUDA stack
+ssh a100 'cd /root/projects/alma_servie && \
+    CUDA_VISIBLE_DEVICES=1 uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
 
 # File transfer (no rsync on server - use scp)
 scp -p data/raw/<new>.xlsx a100:/root/projects/alma_servie/data/raw/
 scp a100:/root/projects/alma_servie/models/<new>.pt models/
 scp -r a100:/root/projects/alma_servie/artifacts/reports/ artifacts/
+scp -rp .serena a100:/root/projects/alma_servie/
+scp -rp salym salym_prepared a100:/root/projects/alma_servie/
 ```
 
 Known gotchas:
@@ -201,6 +230,11 @@ Known gotchas:
   `a100-server` in GitLab) - pushing from the server works directly.
 - For multi-GPU DDP (if PaAno is scaled out): NCCL on VM135 requires
   `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
+- The main repo records `paano` as a gitlink without `.gitmodules`. On the
+  server, `paano/` was restored manually from `https://github.com/jinnnju/PaAno.git`
+  at commit `0e93e93a857af216642d1685f2ce2d2589b35e2e`, then local changes to
+  `paano/main.py` and `paano/train.py` were copied over. Therefore server
+  `git status` is expected to show `m paano`.
 
 ## Coding conventions
 

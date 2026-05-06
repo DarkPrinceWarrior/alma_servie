@@ -77,14 +77,29 @@ No linting, formatting, or test runner is configured. After changes, run the aff
 
 ### Hardware
 
-6× A100-SXM4-40GB (240 ГБ суммарно), Debian 13, CUDA 13.0. Проектная директория на серваке: `/root/projects/alma_servie/`. Виртуальное окружение там — `venv/` (pip-стиль, не uv).
+6× A100-SXM4-40GB (240 ГБ суммарно), Debian 13, CUDA 13.0. Проектная директория на серваке: `/root/projects/alma_servie/` внутри каталога `/root/projects` в нижнем регистре. Каталога `/root/Projects` на сервере нет.
+
+Окружение на сервере управляется через `uv`, не через обычный pip-style `venv`:
+
+- `.python-version`: `3.13`;
+- виртуальное окружение: `.venv/`, создано через `uv venv --python 3.13 .venv`;
+- команда установки:
+  `uv pip install -e . -r requirements.txt torch==2.11.0`;
+- проверенная связка: Python `3.13.5`, PyTorch `2.11.0+cu130`,
+  `torch.version.cuda == "13.0"`, A100 видна при `CUDA_VISIBLE_DEVICES=1`.
+
+Не ставить `paano/requirements.txt` как есть: там закреплен старый `torch==2.7.1`, который может откатить рабочую CUDA 13.0 связку.
 
 ### Правила
 
-1. **Код пишется только локально** (через Edit/Serena). На серваке — никаких правок. После изменения: `git push origin main` → `ssh a100 'git -C /root/projects/alma_servie pull'`.
-2. **Артефакты** (`models/`, `artifacts/`, `db/`) **остаются на серваке.** В git они и так в `.gitignore`. Финальные веса/отчёты — `scp` обратно на лэптоп.
-3. **Long-running** (тренировка PaAno, full benchmark) запускать через `tmux new -d -s <name>` чтобы SSH-разрыв не убивал процесс.
-4. **GPU0 на серваке занят чужим процессом (~8.4 ГБ)** — использовать `CUDA_VISIBLE_DEVICES=1..5`.
+1. **Source of truth теперь сервер**: актуальная рабочая копия находится в `/root/projects/alma_servie`. Вся текущая работа, анализ, правки, прогоны и отчёты выполняются на сервере.
+2. **Локальная/ноутбучная копия больше не источник работы**. Она только подтягивает изменения с сервера, когда это нужно.
+3. На сервере запускать команды через `uv run python ...`. Для GPU-only PaAno запусков явно задавать `CUDA_VISIBLE_DEVICES=1` или другой не-нулевой GPU.
+4. **Артефакты** (`models/`, `artifacts/`, `db/`) **остаются на серваке.** В git они и так в `.gitignore`. Финальные веса/отчёты — `scp` обратно на лэптоп.
+5. **Long-running** (тренировка PaAno, full benchmark) запускать через `tmux new -d -s <name>` чтобы SSH-разрыв не убивал процесс.
+6. **GPU0 на серваке занят чужим процессом (~8.4 ГБ)** — использовать `CUDA_VISIBLE_DEVICES=1..5`.
+7. `.serena/` перенесена на сервер для этого проекта. Это локальное состояние инструмента, не исходный код репозитория.
+8. На сервер перенесены runtime-данные `db/`, `artifacts/`, `models/`, `salym/`, `salym_prepared/`. Размеры, сверенные 2026-05-06: `salym` = `71894737195` bytes, `salym_prepared` = `34105867675` bytes.
 
 ### Команды
 
@@ -92,26 +107,35 @@ No linting, formatting, or test runner is configured. After changes, run the aff
 # PaAno training в tmux на GPU 1
 ssh a100 'tmux new -d -s paano \
     "cd /root/projects/alma_servie && \
-     source venv/bin/activate && \
-     CUDA_VISIBLE_DEVICES=1 python paano/train.py 2>&1 | tee runs/paano.log"'
+     CUDA_VISIBLE_DEVICES=1 uv run python paano/train.py 2>&1 | tee runs/paano.log"'
 ssh a100 'tmux capture-pane -t paano -p | tail -30'   # прогресс
 ssh a100 'tmux ls'                                     # активные сессии
 
 # full benchmark detection (длинный прогон)
 ssh a100 'tmux new -d -s benchmark \
     "cd /root/projects/alma_servie && \
-     source venv/bin/activate && \
-     bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
+     CUDA_VISIBLE_DEVICES=1 uv run bash scripts/run_full_detection_benchmark.sh 2>&1 | tee runs/benchmark.log"'
 
 # одиночный detector run на серваке
 ssh a100 'cd /root/projects/alma_servie && \
-    source venv/bin/activate && \
-    CUDA_VISIBLE_DEVICES=1 python scripts/detection/detect_salt.py --detector pca_spe'
+    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector pca_spe'
+
+# пересоздание серверного uv-окружения
+ssh a100 'cd /root/projects/alma_servie && \
+    printf "3.13\n" > .python-version && \
+    uv venv --python 3.13 .venv && \
+    uv pip install -e . -r requirements.txt torch==2.11.0'
+
+# проверка CUDA/PyTorch
+ssh a100 'cd /root/projects/alma_servie && \
+    CUDA_VISIBLE_DEVICES=1 uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available(), torch.cuda.get_device_name(0))"'
 
 # перенос файлов (rsync на серваке нет — только scp)
 scp -p data/raw/<new>.xlsx a100:/root/projects/alma_servie/data/raw/
 scp a100:/root/projects/alma_servie/models/<new>.pt models/
 scp -r a100:/root/projects/alma_servie/artifacts/reports/ artifacts/
+scp -rp .serena a100:/root/projects/alma_servie/
+scp -rp salym salym_prepared a100:/root/projects/alma_servie/
 ```
 
 ### Известные грабли
@@ -120,6 +144,7 @@ scp -r a100:/root/projects/alma_servie/artifacts/reports/ artifacts/
 - `rsync` отсутствует — использовать `scp -p`.
 - На серваке отдельный SSH-ключ для GitLab (`/root/.ssh/id_ed25519`, Title `a100-server` в GitLab) — push с сервера работает напрямую.
 - DDP (если PaAno будет тренироваться на нескольких GPU): NCCL на VM135 требует `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
+- Основной репозиторий хранит `paano` как gitlink без `.gitmodules`. На сервере `paano/` восстановлен вручную из `https://github.com/jinnnju/PaAno.git` на commit `0e93e93a857af216642d1685f2ce2d2589b35e2e`, затем поверх перенесены локальные изменения `paano/main.py` и `paano/train.py`. Поэтому на сервере ожидаемый `git status` показывает `m paano`.
 
 ## Architecture
 
