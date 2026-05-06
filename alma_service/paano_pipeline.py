@@ -97,6 +97,21 @@ def set_seed(seed: int = SEED) -> None:
     torch.manual_seed(seed)
 
 
+def _require_cuda_device(verbose: bool = True) -> torch.device:
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA GPU is required for PaAno detection, "
+            "but torch.cuda.is_available() is False. "
+            "Check the active venv, CUDA drivers, and PyTorch CUDA build."
+        )
+    device = torch.device("cuda")
+    if verbose:
+        props = torch.cuda.get_device_properties(device)
+        memory_gb = props.total_memory / 1024**3
+        print(f"  Device: cuda ({props.name}, {memory_gb:.1f} GB)")
+    return device
+
+
 def _maybe_compile_module(module: torch.nn.Module) -> torch.nn.Module:
     if not ENABLE_TORCH_COMPILE or not hasattr(torch, "compile"):
         return module
@@ -519,7 +534,7 @@ def run_detection(
     set_seed()
     ensure_dir(DB_DIR)
     output = ensure_parent(Path(output_path) if output_path else spec.results_path)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _require_cuda_device(verbose=verbose)
 
     df = load_anomaly_data(spec, source_path=source_path)
     intervals = load_intervals(spec, required=True)
@@ -661,7 +676,7 @@ def run_single_well(anomaly_key: str, well_id: str, source_path: str | None, ret
     spec = get_detection_spec(anomaly_key)
     df = load_anomaly_data(spec, source_path=source_path)
     intervals = load_intervals(spec, required=False)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _require_cuda_device(verbose=True)
     well_id = well_id.strip().lower()
     well_df = df[df["well_id"] == well_id]
     if well_df.empty:

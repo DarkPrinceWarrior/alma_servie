@@ -53,7 +53,7 @@ SALT_WELL_FILES = {
 
 TEST_WELLS = {
     "negermet": {"3509г", "ю-я 39-651"},
-    "pritok": {"902"},
+    "pritok": {"902", "1395"},
     "salt": {"2991г", "1740"},
 }
 

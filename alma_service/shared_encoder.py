@@ -424,5 +424,10 @@ def select_shared_columns(
     shared_channels: list[str],
 ) -> np.ndarray:
     """Project a well's feature matrix to the shared channel set."""
-    col_indices = [feature_columns.index(ch) for ch in shared_channels]
-    return feature_matrix[:, col_indices].astype(np.float32)
+    col_lookup = {name: idx for idx, name in enumerate(feature_columns)}
+    projected = np.zeros((feature_matrix.shape[0], len(shared_channels)), dtype=np.float32)
+    for out_idx, channel in enumerate(shared_channels):
+        src_idx = col_lookup.get(channel)
+        if src_idx is not None:
+            projected[:, out_idx] = feature_matrix[:, src_idx].astype(np.float32)
+    return projected

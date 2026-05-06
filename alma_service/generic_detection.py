@@ -133,6 +133,25 @@ LOCAL_DEFAULT_PRIORITY = {
     "paano_shared": 5,
     "ensemble": 6,
 }
+CUDA_REQUIRED_DETECTORS = {"paano_feat", "paano_shared", "ensemble"}
+
+
+def _resolve_torch_device(detector_key: str, verbose: bool = True) -> torch.device:
+    if detector_key in CUDA_REQUIRED_DETECTORS and not torch.cuda.is_available():
+        raise RuntimeError(
+            f"CUDA GPU is required for detector '{detector_key}', "
+            "but torch.cuda.is_available() is False. "
+            "Check the active venv, CUDA drivers, and PyTorch CUDA build."
+        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if verbose:
+        if device.type == "cuda":
+            props = torch.cuda.get_device_properties(device)
+            memory_gb = props.total_memory / 1024**3
+            print(f"  Device: cuda ({props.name}, {memory_gb:.1f} GB)")
+        else:
+            print("  Device: cpu")
+    return device
 
 
 @dataclass
@@ -962,7 +981,7 @@ def run_detection(
     set_seed()
     ensure_dir(DB_DIR)
     output = ensure_parent(Path(output_path) if output_path else results_path(spec, detector_key))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _resolve_torch_device(detector_key, verbose=True)
 
     df = load_anomaly_data(spec, source_path=source_path)
     intervals = load_intervals(spec, required=True)
@@ -1118,10 +1137,10 @@ def run_single_well(
         print("No usable data after engineered preprocessing.")
         return
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if detector_key == "paano_shared":
         print("  Note: paano_shared requires all train wells; falling back to paano_feat for single-well mode.")
         detector_key = "paano_feat"
+    device = _resolve_torch_device(detector_key, verbose=True)
     detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
     detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
     score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)

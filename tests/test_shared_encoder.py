@@ -128,6 +128,19 @@ class SelectSharedColumnsTests(unittest.TestCase):
         np.testing.assert_array_equal(result[:, 0], matrix[:, 1])  # ch_b
         np.testing.assert_array_equal(result[:, 1], matrix[:, 3])  # ch_d
 
+    def test_projection_fills_missing_channels_with_neutral_zero(self) -> None:
+        from alma_service.shared_encoder import select_shared_columns
+
+        feature_columns = ["ch_a", "ch_c"]
+        n = 10
+        matrix = np.arange(n * 2, dtype=np.float32).reshape(n, 2)
+        shared_channels = ["ch_a", "ch_b", "ch_c"]
+        result = select_shared_columns(feature_columns, matrix, shared_channels)
+        self.assertEqual(result.shape, (n, 3))
+        np.testing.assert_array_equal(result[:, 0], matrix[:, 0])
+        np.testing.assert_array_equal(result[:, 1], np.zeros(n, dtype=np.float32))
+        np.testing.assert_array_equal(result[:, 2], matrix[:, 1])
+
 
 if __name__ == "__main__":
     unittest.main()
