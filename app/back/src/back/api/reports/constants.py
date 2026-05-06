@@ -11,5 +11,5 @@ ALL_DETECTORS: tuple[DetectorType, ...] = (
 BEST_DETECTOR_BY_ANOMALY: dict[AnomalyType, DetectorType] = {
     "negermet": "paano_shared",
     "pritok": "paano_shared",
-    "salt": "ensemble",
+    "salt": "paano_shared",
 }

@@ -337,21 +337,26 @@ PCA находит эти оси → проецирует данные → во�
 
 Score = T²_z + SPE_z (нормализованные z-оценки)
 
-### 5.4 Ensemble (ансамбль) — лучший для солей
+### 5.4 Physical Branches внутри PaAno Shared
 
-**Комбинация** PaAno Shared + PCA/SPE:
+После унификации финальная архитектура для основных классов строится как:
 
 ```
-Score_ensemble = 0.6 × Score_PaAno + 0.4 × Score_PCA
+Score_final = Score_PaAnoShared + tuned_weight × Score_PhysicalBranch
 ```
 
-#### Зачем ансамбль?
+Вес физической ветки подбирается только на train-скважинах. Test-скважины не
+используются для подбора веса, порогов и задержек.
 
-PaAno и PCA ловят **разные типы паттернов**:
-- PaAno (нейросеть) — нелинейные зависимости, сложные темпоральные паттерны
-- PCA (линейный) — линейные сдвиги, изменение корреляций
+Физические ветки разные по смыслу, но одинаковые по каркасу:
 
-На практике они **комплементарны**: есть аномалии, которые ловит PaAno, но не PCA, и наоборот. Ансамбль объединяет сильные стороны обоих.
+- **Приток**: `pressure_trend` по давлению на приеме насоса.
+- **Негермет**: `negermet_signature` как pressure-step/load-response диагностика.
+- **Соли**: `salt_deposition` как многоканальный grouped drift + PCA/SPE residual.
+
+Для соли `ensemble` остается benchmark-детектором, но сильная часть ансамбля
+перенесена внутрь `paano_shared`: PCA/SPE residual теперь работает как
+`salt_deposition_calibrated_fusion_score`, а не как отдельный production-путь.
 
 ### 5.5 Сравнение алгоритмов
 
@@ -380,10 +385,11 @@ graph LR
         Q5["❌ Поточечный"]
     end
 
-    subgraph ENSEMBLE["Ensemble"]
-        R1["✅ Лучший hit rate"]
-        R2["✅ Комплементарность"]
-        R3["❌ Двойное время"]
+    subgraph SALT["Salt Deposition Branch"]
+        R1["✅ Многоканальный drift"]
+        R2["✅ PCA/SPE residual внутри PaAno Shared"]
+        R3["✅ Раннее обнаружение 3244г"]
+        R4["❌ Больше стартов, нужен контроль FAR"]
     end
 ```
 
@@ -546,22 +552,27 @@ pressure_trend_weight = 0.0025
 bypass_cooldown_after_clear = false
 ```
 
-#### Солеотложение — Ensemble (PaAno + PCA)
+#### Солеотложение — PaAno Shared + Salt Deposition Residual
 
 | Скважина | Сплит | Статус | Задержка |
 |---|---|---|---|
 | 149г | train | ✅ Detected | ~0 ч |
 | 2991г | **test** | ✅ Detected | 4.0 ч |
-| 3244г | train | ❌ Not found | — |
+| 3244г | **test** | ✅ Detected | 0 ч |
 | 3245 | train | ✅ Detected | ~0 ч |
 | 3245(2) | train | ✅ Detected | 0 ч |
-| 3269 | train | ✅ Detected | 6 дней |
+| 3269 | train | ✅ Detected | ~2.4 дня |
 | 4039 | train | ✅ Detected | 0 ч |
-| 408 | train | ✅ Detected | 2.8 ч |
+| 408 | train | ✅ Detected | ~2.8 ч |
 
 ```
-📊 Hit Rate: 7/8 (87.5%)  |  FAR: 0.130/день  |  P90 delay ratio: 21.1%
+📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.158/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
 ```
+
+Текущий tradeoff по соли: раннее обнаружение резко улучшилось, включая blind-test
+`3244г`, но число стартов выше, чем у старого `ensemble`. Поэтому `ensemble`
+сохраняется как benchmark, а `paano_shared + salt_deposition` является основной
+унифицированной архитектурой для дальнейшей доводки FAR/starts.
 
 ### 8.3 Сводная таблица
 
@@ -571,7 +582,7 @@ bypass_cooldown_after_clear = false
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
 │ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
 │ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.067  │   13.9%   │
-│ Соли            │ Ensemble        │  7/8  88% │   0.130  │   21.1%   │
+│ Соли            │ PaAno+Salt      │  8/9  89% │   0.158  │    6.7%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```
 
@@ -639,8 +650,8 @@ artifacts/reports/
 │   ├── pritok_paano_shared_report.html
 │   └── pritok_paano_shared_feature_importance.html
 └── salt/
-    ├── salt_ensemble_report.html
-    └── salt_ensemble_feature_importance.html
+    ├── salt_paano_shared_report.html
+    └── salt_paano_shared_feature_importance.html
 ```
 
 ---
@@ -666,7 +677,7 @@ python scripts/detection/detect_pritok.py \
     --source db/pritok_anomaly_database_10min.parquet \
     --retune
 python scripts/detection/detect_salt.py \
-    --detector ensemble \
+    --detector paano_shared \
     --source db/salt_anomaly_database_15min.parquet \
     --retune
 ```
@@ -682,7 +693,7 @@ python scripts/reports/generate_pritok_paano_report.py \
     --detector paano_shared \
     --source db/pritok_anomaly_database_10min.parquet
 python scripts/reports/generate_salt_paano_report.py \
-    --detector ensemble \
+    --detector paano_shared \
     --source db/salt_anomaly_database_15min.parquet
 
 # Отчёты по значимости каналов
@@ -695,7 +706,7 @@ python scripts/reports/generate_feature_importance_report.py \
     --source db/pritok_anomaly_database_10min.parquet
 python scripts/reports/generate_feature_importance_report.py \
     --anomaly salt \
-    --detector ensemble \
+    --detector paano_shared \
     --source db/salt_anomaly_database_15min.parquet
 ```
 
@@ -705,7 +716,7 @@ python scripts/reports/generate_feature_importance_report.py \
 # Можно явно указать алгоритм:
 python scripts/detection/detect_salt.py --detector pca_spe --retune
 python scripts/detection/detect_salt.py --detector paano_shared --retune
-python scripts/detection/detect_salt.py --detector ensemble --retune
+python scripts/detection/detect_salt.py --detector ensemble --retune  # benchmark
 ```
 
 ### 10.5 Оценка качества

@@ -228,6 +228,8 @@ def _create_plot_html(
     has_scores = score_col is not None
     has_paano_tail = scores_df is not None and "paano_tail_score" in scores_df.columns
     has_pressure_trend = scores_df is not None and "pressure_trend_score" in scores_df.columns
+    has_negermet_signature = scores_df is not None and "negermet_signature_score" in scores_df.columns
+    has_salt_trend = scores_df is not None and "salt_deposition_score" in scores_df.columns
 
     x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
     x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
@@ -322,6 +324,24 @@ def _create_plot_html(
                         alpha=0.78,
                         label="Pressure trend",
                     )
+                if "negermet_signature_score" in score_view.columns:
+                    ax.plot(
+                        sts,
+                        score_view["negermet_signature_score"].values,
+                        color="#b45309",
+                        linewidth=0.65,
+                        alpha=0.78,
+                        label="Negermet signature",
+                    )
+                if "salt_deposition_score" in score_view.columns:
+                    ax.plot(
+                        sts,
+                        score_view["salt_deposition_score"].values,
+                        color="#0891b2",
+                        linewidth=0.65,
+                        alpha=0.78,
+                        label="Salt deposition trend",
+                    )
         elif col_name is not None and col_name in well_df.columns:
             vals = pd.to_numeric(well_df[col_name], errors="coerce")
             ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
@@ -350,6 +370,14 @@ def _create_plot_html(
     if has_pressure_trend:
         legend_handles.append(
             plt.Line2D([0], [0], color="#ea580c", linewidth=0.85, label="Pressure trend")
+        )
+    if has_negermet_signature:
+        legend_handles.append(
+            plt.Line2D([0], [0], color="#b45309", linewidth=0.85, label="Negermet signature")
+        )
+    if has_salt_trend:
+        legend_handles.append(
+            plt.Line2D([0], [0], color="#0891b2", linewidth=0.85, label="Salt deposition trend")
         )
     axes[0].legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.9)
 

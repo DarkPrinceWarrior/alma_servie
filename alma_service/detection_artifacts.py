@@ -23,7 +23,7 @@ DEFAULT_DETECTOR = "paano_feat"
 ANOMALY_DEFAULT_DETECTOR = {
     "negermet": "paano_shared",
     "pritok": "paano_shared",
-    "salt": "ensemble",
+    "salt": "paano_shared",
 }
 
 

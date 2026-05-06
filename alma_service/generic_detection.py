@@ -99,8 +99,24 @@ ANOMALY_ONSET_PROFILES = {
     "salt": {},
 }
 
+SALT_SHARED_ONSET_TUNE_GRID = {
+    "target_far_per_day": [0.10, 0.25, 0.50],
+    "min_run_points": [3, 4, 6],
+    "cooldown_hours": [8.0, 12.0, 24.0],
+    "rearm_window_minutes": [120.0],
+    "ema_alpha": [0.04, 0.08, 0.12],
+    "gate_mode": ["relaxed"],
+}
+
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
 PRESSURE_TREND_WEIGHT_GRID = [0.0, 0.0025, 0.005]
+NEGERMET_SIGNATURE_WEIGHT_GRID = [0.0, 0.0025, 0.005]
+PHYSICAL_BRANCH_WEIGHT_GRIDS = {
+    "pritok": PRESSURE_TREND_WEIGHT_GRID,
+    "negermet": NEGERMET_SIGNATURE_WEIGHT_GRID,
+    "salt": [0.0, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.02],
+}
+SALT_TREND_WEIGHT_GRID = PHYSICAL_BRANCH_WEIGHT_GRIDS["salt"]
 ANOMALY_RUNTIME_CONFIG = {
     "negermet": {
         "prepare_patch_size": PATCH_SIZES["negermet"][1],
@@ -209,6 +225,37 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     starts_over = max(starts - max_starts, 0.0)
     delay_over = max(p90_ratio - max_delay_ratio, 0.0)
     priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
+    if anomaly_key == "salt":
+        return (
+            hit_count,
+            float(feasible_far),
+            float(feasible_delay),
+            -delay_over,
+            -p90_ratio,
+            -p90_abs_delay,
+            -median_abs_delay,
+            float(feasible_starts),
+            -starts_over,
+            -starts,
+            -far,
+            float(priority),
+        )
+    if anomaly_key == "negermet":
+        return (
+            hit_count,
+            float(feasible_starts),
+            float(feasible_far),
+            float(feasible_delay),
+            -starts_over,
+            -far_over,
+            -delay_over,
+            -p90_ratio,
+            -p90_abs_delay,
+            -median_abs_delay,
+            -starts,
+            -far,
+            float(priority),
+        )
     return (
         float(feasible_starts),
         float(feasible_far),
@@ -417,6 +464,52 @@ def _build_local_runs(
                         **fusion_detail,
                     },
                 )
+            elif anomaly_key == "negermet":
+                from alma_service.negermet_signature import (
+                    build_negermet_signature_branch,
+                    fuse_model_with_negermet_signature,
+                )
+
+                signature_output = build_negermet_signature_branch(prepared)
+                fused, fusion_components, fusion_detail = fuse_model_with_negermet_signature(
+                    model_score=score_output.primary,
+                    signature_output=signature_output,
+                    reference_mask=prepared.reference_mask,
+                )
+                score_output = DetectorScoreOutput(
+                    primary=fused.astype(np.float32),
+                    components={
+                        **score_output.components,
+                        **fusion_components,
+                    },
+                    detail={
+                        **score_output.detail,
+                        **fusion_detail,
+                    },
+                )
+            elif anomaly_key == "salt":
+                from alma_service.salt_trend import (
+                    build_salt_deposition_branch,
+                    fuse_model_with_salt_trend,
+                )
+
+                salt_output = build_salt_deposition_branch(prepared)
+                fused, fusion_components, fusion_detail = fuse_model_with_salt_trend(
+                    model_score=score_output.primary,
+                    salt_output=salt_output,
+                    reference_mask=prepared.reference_mask,
+                )
+                score_output = DetectorScoreOutput(
+                    primary=fused.astype(np.float32),
+                    components={
+                        **score_output.components,
+                        **fusion_components,
+                    },
+                    detail={
+                        **score_output.detail,
+                        **fusion_detail,
+                    },
+                )
             out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
         else:
             detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
@@ -438,6 +531,24 @@ def _score_for_config(run: PreparedDetectorRun, detector_key: str, cfg: dict[str
             return (
                 np.asarray(model_score, dtype=np.float32)
                 + pressure_weight * np.asarray(pressure_score, dtype=np.float32)
+            ).astype(np.float32)
+        signature_score = run.score_output.components.get("negermet_signature_score")
+        if signature_score is not None and model_score is not None:
+            signature_weight = float(cfg.get("negermet_signature_weight", 0.0))
+            if signature_weight <= 0.0:
+                return np.asarray(model_score, dtype=np.float32)
+            return (
+                np.asarray(model_score, dtype=np.float32)
+                + signature_weight * np.asarray(signature_score, dtype=np.float32)
+            ).astype(np.float32)
+        salt_score = run.score_output.components.get("salt_deposition_calibrated_fusion_score")
+        if salt_score is not None and model_score is not None:
+            salt_weight = float(cfg.get("salt_trend_weight", 0.0))
+            if salt_weight <= 0.0:
+                return np.asarray(model_score, dtype=np.float32)
+            return (
+                np.asarray(model_score, dtype=np.float32)
+                + salt_weight * np.asarray(salt_score, dtype=np.float32)
             ).astype(np.float32)
         return run.score_output.primary.astype(np.float32)
 
@@ -492,7 +603,21 @@ def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, An
         if anomaly_key == "pritok" and detector_key == "paano_shared"
         else [None]
     )
-    grid = _onset_tune_grid(anomaly_key)
+    negermet_signature_weight_grid = (
+        NEGERMET_SIGNATURE_WEIGHT_GRID
+        if anomaly_key == "negermet" and detector_key == "paano_shared"
+        else [None]
+    )
+    salt_trend_weight_grid = (
+        SALT_TREND_WEIGHT_GRID
+        if anomaly_key == "salt" and detector_key == "paano_shared"
+        else [None]
+    )
+    grid = (
+        {key: list(values) for key, values in SALT_SHARED_ONSET_TUNE_GRID.items()}
+        if anomaly_key == "salt" and detector_key == "paano_shared"
+        else _onset_tune_grid(anomaly_key)
+    )
     default_cfg = _default_onset_config(anomaly_key, detector_key)
     for target_far_per_day in grid["target_far_per_day"]:
         for min_run_points in grid["min_run_points"]:
@@ -502,22 +627,28 @@ def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, An
                         for gate_mode in grid["gate_mode"]:
                             for fusion_weight_short in weight_grid:
                                 for pressure_trend_weight in pressure_weight_grid:
-                                    cfg = default_cfg.copy()
-                                    cfg.update(
-                                        {
-                                            "target_far_per_day": float(target_far_per_day),
-                                            "min_run_points": int(min_run_points),
-                                            "cooldown_hours": float(cooldown_hours),
-                                            "rearm_window_minutes": float(rearm_window_minutes),
-                                            "ema_alpha": float(ema_alpha),
-                                            "gate_mode": str(gate_mode),
-                                        }
-                                    )
-                                    if fusion_weight_short is not None:
-                                        cfg["fusion_weight_short"] = float(fusion_weight_short)
-                                    if pressure_trend_weight is not None:
-                                        cfg["pressure_trend_weight"] = float(pressure_trend_weight)
-                                    candidates.append(cfg)
+                                    for negermet_signature_weight in negermet_signature_weight_grid:
+                                        for salt_trend_weight in salt_trend_weight_grid:
+                                            cfg = default_cfg.copy()
+                                            cfg.update(
+                                                {
+                                                    "target_far_per_day": float(target_far_per_day),
+                                                    "min_run_points": int(min_run_points),
+                                                    "cooldown_hours": float(cooldown_hours),
+                                                    "rearm_window_minutes": float(rearm_window_minutes),
+                                                    "ema_alpha": float(ema_alpha),
+                                                    "gate_mode": str(gate_mode),
+                                                }
+                                            )
+                                            if fusion_weight_short is not None:
+                                                cfg["fusion_weight_short"] = float(fusion_weight_short)
+                                            if pressure_trend_weight is not None:
+                                                cfg["pressure_trend_weight"] = float(pressure_trend_weight)
+                                            if negermet_signature_weight is not None:
+                                                cfg["negermet_signature_weight"] = float(negermet_signature_weight)
+                                            if salt_trend_weight is not None:
+                                                cfg["salt_trend_weight"] = float(salt_trend_weight)
+                                            candidates.append(cfg)
     return candidates
 
 
@@ -583,6 +714,17 @@ def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> d
         cfg["pressure_trend_weight"] = float(
             trial.suggest_categorical("pressure_trend_weight", PRESSURE_TREND_WEIGHT_GRID)
         )
+    if anomaly_key == "negermet" and detector_key == "paano_shared":
+        cfg["negermet_signature_weight"] = float(
+            trial.suggest_categorical(
+                "negermet_signature_weight",
+                NEGERMET_SIGNATURE_WEIGHT_GRID,
+            )
+        )
+    if anomaly_key == "salt" and detector_key == "paano_shared":
+        cfg["salt_trend_weight"] = float(
+            trial.suggest_categorical("salt_trend_weight", SALT_TREND_WEIGHT_GRID)
+        )
     return cfg
 
 
@@ -638,6 +780,79 @@ def _tune_config_with_optuna(
                 "ema_alpha": 0.12,
                 "gate_mode": "score_ema",
                 "pressure_trend_weight": 0.0025,
+            },
+        ):
+            study.enqueue_trial(seed_cfg)
+    elif anomaly_key == "negermet" and detector_key == "paano_shared":
+        n_trials = 48
+        for seed_cfg in (
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 3,
+                "cooldown_hours": 12.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "score_ema",
+                "negermet_signature_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 3,
+                "cooldown_hours": 24.0,
+                "rearm_window_minutes": 30.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "strict",
+                "negermet_signature_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.10,
+                "min_run_points": 4,
+                "cooldown_hours": 24.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "relaxed",
+                "negermet_signature_weight": 0.005,
+            },
+        ):
+            study.enqueue_trial(seed_cfg)
+    elif anomaly_key == "salt" and detector_key == "paano_shared":
+        n_trials = 72
+        for seed_cfg in (
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 6,
+                "cooldown_hours": 8.0,
+                "rearm_window_minutes": 120.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "salt_trend_weight": 0.001,
+            },
+            {
+                "target_far_per_day": 0.50,
+                "min_run_points": 6,
+                "cooldown_hours": 12.0,
+                "rearm_window_minutes": 120.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "salt_trend_weight": 0.0025,
+            },
+            {
+                "target_far_per_day": 0.50,
+                "min_run_points": 4,
+                "cooldown_hours": 12.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "score_ema",
+                "salt_trend_weight": 0.005,
+            },
+            {
+                "target_far_per_day": 0.10,
+                "min_run_points": 6,
+                "cooldown_hours": 24.0,
+                "rearm_window_minutes": 120.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "relaxed",
+                "salt_trend_weight": 0.0,
             },
         ):
             study.enqueue_trial(seed_cfg)
@@ -716,6 +931,16 @@ def _tune_config_with_optuna(
                     if "pressure_trend_weight" in cfg
                     else ""
                 )
+                + (
+                    f", nw={cfg['negermet_signature_weight']:.4f}"
+                    if "negermet_signature_weight" in cfg
+                    else ""
+                )
+                + (
+                    f", sw={cfg['salt_trend_weight']:.4f}"
+                    if "salt_trend_weight" in cfg
+                    else ""
+                )
             )
     return best_cfg, tuning_summary
 
@@ -780,6 +1005,21 @@ def _tune_config_with_grid(
                     if "fusion_weight_short" in cfg
                     else ""
                 )
+                + (
+                    f", pw={cfg['pressure_trend_weight']:.4f}"
+                    if "pressure_trend_weight" in cfg
+                    else ""
+                )
+                + (
+                    f", nw={cfg['negermet_signature_weight']:.4f}"
+                    if "negermet_signature_weight" in cfg
+                    else ""
+                )
+                + (
+                    f", sw={cfg['salt_trend_weight']:.4f}"
+                    if "salt_trend_weight" in cfg
+                    else ""
+                )
             )
     return best_cfg, tuning_summary
 
@@ -791,6 +1031,8 @@ def _tune_config(
     train_intervals: pd.DataFrame,
     verbose: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if anomaly_key in {"negermet", "salt"} and detector_key == "paano_shared":
+        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     if optuna is None:
         return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     return _tune_config_with_optuna(anomaly_key, detector_key, train_runs, train_intervals, verbose)
