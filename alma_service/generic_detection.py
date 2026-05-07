@@ -1309,8 +1309,6 @@ def _tune_config(
     train_intervals: pd.DataFrame,
     verbose: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    if anomaly_key in {"negermet", "salt"} and detector_key == "paano_shared":
-        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     if optuna is None:
         return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     return _tune_config_with_optuna(anomaly_key, detector_key, train_runs, train_intervals, verbose)
