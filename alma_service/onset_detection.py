@@ -180,61 +180,56 @@ def _build_gate_condition(
     return score_cond & (ema_cond | cusum_cond)
 
 
-def _detect_onsets_stateful(
+@njit(cache=True)
+def _detect_onsets_stateful_indices_impl(
     entry_cond: np.ndarray,
     sustain_cond: np.ndarray,
-    timestamps: np.ndarray,
-    *,
+    timestamps_ns: np.ndarray,
     start_i: int,
     min_run_points: int,
-    cooldown_hours: float,
-    rearm_window_minutes: float,
-    bypass_cooldown_after_clear: bool = True,
-) -> List[pd.Timestamp]:
-    starts: List[pd.Timestamp] = []
+    cooldown_ns: int,
+    clear_points: int,
+    bypass_cooldown_after_clear: bool,
+) -> np.ndarray:
+    starts = np.empty(len(entry_cond), dtype=np.int64)
+    start_count = 0
     if len(entry_cond) == 0:
-        return starts
-
-    ts = pd.to_datetime(timestamps)
-    step_seconds = infer_step_seconds(timestamps)
-    clear_points = max(
-        int(np.ceil((float(rearm_window_minutes) * 60.0) / max(step_seconds, 1.0))),
-        int(min_run_points),
-    )
-    cooldown = pd.Timedelta(hours=float(cooldown_hours))
+        return starts[:start_count]
 
     armed = True
-    run_start = None
+    run_start = -1
     run_len = 0
     clear_len = 0
-    last_start: pd.Timestamp | None = None
+    last_start_ns = np.int64(-9223372036854775808)
     rearmed_after_clear = False
 
-    for i in range(int(np.clip(start_i, 0, len(entry_cond))), len(entry_cond)):
-        current_ts = pd.Timestamp(ts[i])
+    begin = min(max(int(start_i), 0), len(entry_cond))
+    min_points = int(min_run_points)
+    for i in range(begin, len(entry_cond)):
         if armed:
             if entry_cond[i]:
-                if run_start is None:
+                if run_start < 0:
                     run_start = i
                     run_len = 1
                 else:
                     run_len += 1
-                if run_len >= int(min_run_points):
-                    start_ts = pd.Timestamp(ts[run_start])
+                if run_len >= min_points:
+                    start_ns = timestamps_ns[run_start]
                     if (
-                        last_start is None
+                        last_start_ns == np.int64(-9223372036854775808)
                         or (rearmed_after_clear and bypass_cooldown_after_clear)
-                        or start_ts - last_start >= cooldown
+                        or start_ns - last_start_ns >= cooldown_ns
                     ):
-                        starts.append(start_ts)
-                        last_start = start_ts
+                        starts[start_count] = run_start
+                        start_count += 1
+                        last_start_ns = start_ns
                     armed = False
                     rearmed_after_clear = False
-                    run_start = None
+                    run_start = -1
                     run_len = 0
                     clear_len = 0
             else:
-                run_start = None
+                run_start = -1
                 run_len = 0
             continue
 
@@ -246,11 +241,46 @@ def _detect_onsets_stateful(
         if clear_len >= clear_points:
             armed = True
             rearmed_after_clear = True
-            run_start = None
+            run_start = -1
             run_len = 0
             clear_len = 0
 
-    return starts
+    return starts[:start_count]
+
+
+def _detect_onsets_stateful(
+    entry_cond: np.ndarray,
+    sustain_cond: np.ndarray,
+    timestamps: np.ndarray,
+    *,
+    start_i: int,
+    min_run_points: int,
+    cooldown_hours: float,
+    rearm_window_minutes: float,
+    bypass_cooldown_after_clear: bool = True,
+) -> List[pd.Timestamp]:
+    if len(entry_cond) == 0:
+        return []
+
+    ts = pd.to_datetime(timestamps)
+    timestamps_ns = np.asarray(ts, dtype="datetime64[ns]").astype(np.int64)
+    step_seconds = infer_step_seconds(timestamps)
+    clear_points = max(
+        int(np.ceil((float(rearm_window_minutes) * 60.0) / max(step_seconds, 1.0))),
+        int(min_run_points),
+    )
+    cooldown_ns = int(pd.Timedelta(hours=float(cooldown_hours)).value)
+    start_indices = _detect_onsets_stateful_indices_impl(
+        np.asarray(entry_cond, dtype=np.bool_),
+        np.asarray(sustain_cond, dtype=np.bool_),
+        timestamps_ns,
+        int(start_i),
+        int(min_run_points),
+        cooldown_ns,
+        int(clear_points),
+        bool(bypass_cooldown_after_clear),
+    )
+    return [pd.Timestamp(ts[int(i)]) for i in start_indices]
 
 
 def calibrate_causal_thresholds(

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -696,16 +698,42 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     )
 
 
-def _per_well_tuning_summaries(
-    train_intervals: pd.DataFrame,
-    pred_df: pd.DataFrame,
+def _normalize_well_id(value: Any) -> str:
+    return str(value).strip().lower()
+
+
+def _build_per_well_tuning_intervals(train_intervals: pd.DataFrame) -> dict[str, pd.DataFrame]:
+    if train_intervals.empty:
+        return {}
+    normalized = train_intervals["well_id"].map(_normalize_well_id)
+    groups: dict[str, pd.DataFrame] = {}
+    for well_id in sorted(normalized.unique()):
+        groups[str(well_id)] = train_intervals.loc[normalized == well_id].copy()
+    return groups
+
+
+def _config_cache_key(cfg: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
+    def _normalize_value(value: Any) -> Any:
+        if isinstance(value, (np.floating, float)):
+            return round(float(value), 10)
+        if isinstance(value, (np.integer, int)):
+            return int(value)
+        if isinstance(value, (np.bool_, bool)):
+            return bool(value)
+        return value
+
+    return tuple(sorted((str(key), _normalize_value(value)) for key, value in cfg.items()))
+
+
+def _per_well_tuning_summaries_from_mapping(
+    per_well_intervals: dict[str, pd.DataFrame],
+    predicted: dict[str, list[pd.Timestamp]],
 ) -> dict[str, dict[str, Any]]:
+    predictions_by_well = {_normalize_well_id(well_id): starts for well_id, starts in predicted.items()}
     per_well: dict[str, dict[str, Any]] = {}
-    for well_id in sorted(train_intervals["well_id"].astype(str).str.strip().str.lower().unique()):
-        well_intervals = train_intervals[train_intervals["well_id"].astype(str).str.strip().str.lower() == well_id]
-        well_predictions = pred_df[pred_df["well_id"].astype(str).str.strip().str.lower() == well_id]
-        if well_intervals.empty:
-            continue
+    for well_id, well_intervals in per_well_intervals.items():
+        starts = predictions_by_well.get(well_id, [])
+        well_predictions = predicted_from_mapping({well_id: starts})
         per_well[well_id], _ = evaluate_predictions(
             well_intervals,
             well_predictions,
@@ -713,6 +741,51 @@ def _per_well_tuning_summaries(
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
     return per_well
+
+
+def _per_well_tuning_summaries(
+    train_intervals: pd.DataFrame,
+    pred_df: pd.DataFrame,
+) -> dict[str, dict[str, Any]]:
+    per_well_intervals = _build_per_well_tuning_intervals(train_intervals)
+    pred_groups: dict[str, list[pd.Timestamp]] = {}
+    if not pred_df.empty:
+        for well_id, group in pred_df.groupby(pred_df["well_id"].map(_normalize_well_id), sort=True):
+            pred_groups[str(well_id)] = [pd.Timestamp(ts) for ts in group["detected_time"].tolist()]
+    return _per_well_tuning_summaries_from_mapping(per_well_intervals, pred_groups)
+
+
+def _detect_starts_for_config(
+    detector_key: str,
+    train_runs: dict[str, PreparedDetectorRun],
+    cfg: dict[str, Any],
+    starts_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], list[pd.Timestamp]] | None = None,
+) -> dict[str, list[pd.Timestamp]]:
+    cfg_key = _config_cache_key({**BASE_ONSET_CONFIG, **cfg})
+    predicted: dict[str, list[pd.Timestamp]] = {}
+    for well_id, run in train_runs.items():
+        cache_key = (str(well_id), cfg_key)
+        if starts_cache is not None and cache_key in starts_cache:
+            predicted[well_id] = starts_cache[cache_key]
+            continue
+        _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
+        predicted[well_id] = starts
+        if starts_cache is not None:
+            starts_cache[cache_key] = starts
+    return predicted
+
+
+def _tuning_n_jobs(anomaly_key: str, detector_key: str) -> int:
+    raw_value = os.environ.get("ALMA_OPTUNA_N_JOBS", "1").strip()
+    try:
+        n_jobs = int(raw_value)
+    except ValueError:
+        n_jobs = 1
+    if n_jobs < 1:
+        return 1
+    if anomaly_key == "salt" and detector_key == "paano_shared":
+        return min(n_jobs, 16)
+    return min(n_jobs, 8)
 
 
 def _well_balance_stats(per_well_summaries: dict[str, dict[str, Any]]) -> dict[str, float]:
@@ -870,6 +943,9 @@ def _tune_config_with_optuna(
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     sampler = optuna.samplers.TPESampler(seed=2027)
     study = optuna.create_study(direction="maximize", sampler=sampler)
+    per_well_intervals = _build_per_well_tuning_intervals(train_intervals)
+    starts_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], list[pd.Timestamp]] = {}
+    objective_calls = 0
     n_trials = 48 if detector_key == "paano_feat" else 36
     if anomaly_key == "pritok" and detector_key == "paano_shared":
         n_trials = 72
@@ -1001,11 +1077,10 @@ def _tune_config_with_optuna(
             study.enqueue_trial(seed_cfg)
 
     def objective(trial: Any) -> float:
+        nonlocal objective_calls
+        objective_calls += 1
         cfg = _suggest_optuna_config(trial, anomaly_key, detector_key)
-        predicted: dict[str, list[pd.Timestamp]] = {}
-        for well_id, run in train_runs.items():
-            _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
-            predicted[well_id] = starts
+        predicted = _detect_starts_for_config(detector_key, train_runs, cfg, starts_cache)
         pred_df = predicted_from_mapping(predicted)
         summary, _ = evaluate_predictions(
             train_intervals,
@@ -1013,7 +1088,7 @@ def _tune_config_with_optuna(
             scores=None,
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
-        per_well_summaries = _per_well_tuning_summaries(train_intervals, pred_df)
+        per_well_summaries = _per_well_tuning_summaries_from_mapping(per_well_intervals, predicted)
         score_key = _robust_tuning_score_key(
             anomaly_key,
             detector_key,
@@ -1033,7 +1108,12 @@ def _tune_config_with_optuna(
             per_well_summaries,
         )
 
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    n_jobs = _tuning_n_jobs(anomaly_key, detector_key)
+    if verbose:
+        print(f"  Auto-tune backend: optuna_tpe, trials={n_trials}, n_jobs={n_jobs}")
+    tuning_start = time.monotonic()
+    study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
+    tuning_seconds = time.monotonic() - tuning_start
 
     leaderboard = []
     for trial in study.trials:
@@ -1066,10 +1146,19 @@ def _tune_config_with_optuna(
     tuning_summary = {
         "backend": "optuna_tpe",
         "n_trials": n_trials,
+        "n_jobs": n_jobs,
+        "elapsed_seconds": float(tuning_seconds),
+        "objective_calls": int(objective_calls),
+        "starts_cache_entries": int(len(starts_cache)),
         "best_score_key": list(best_key),
         "top10": leaderboard[:10],
     }
     if verbose and tuning_summary["top10"]:
+        print(
+            "  Auto-tune finished: "
+            f"{tuning_seconds:.1f}s, objective_calls={objective_calls}, "
+            f"starts_cache_entries={len(starts_cache)}"
+        )
         print("  Auto-tune top configs:")
         for idx, row in enumerate(tuning_summary["top10"][:5], 1):
             summary = row["summary"]
@@ -1127,12 +1216,12 @@ def _tune_config_with_grid(
     best_cfg: dict[str, Any] | None = None
     best_key: tuple[float, ...] | None = None
     leaderboard: list[dict[str, Any]] = []
+    per_well_intervals = _build_per_well_tuning_intervals(train_intervals)
+    starts_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], list[pd.Timestamp]] = {}
+    tuning_start = time.monotonic()
 
     for cfg in _candidate_configs(anomaly_key, detector_key):
-        predicted: dict[str, list[pd.Timestamp]] = {}
-        for well_id, run in train_runs.items():
-            _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
-            predicted[well_id] = starts
+        predicted = _detect_starts_for_config(detector_key, train_runs, cfg, starts_cache)
         pred_df = predicted_from_mapping(predicted)
         summary, _ = evaluate_predictions(
             train_intervals,
@@ -1140,7 +1229,7 @@ def _tune_config_with_grid(
             scores=None,
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
-        per_well_summaries = _per_well_tuning_summaries(train_intervals, pred_df)
+        per_well_summaries = _per_well_tuning_summaries_from_mapping(per_well_intervals, predicted)
         key = _robust_tuning_score_key(anomaly_key, detector_key, summary, per_well_summaries)
         leaderboard.append(
             {
@@ -1158,11 +1247,20 @@ def _tune_config_with_grid(
     leaderboard = sorted(leaderboard, key=lambda row: tuple(row["score_key"]), reverse=True)
     if best_cfg is None:
         best_cfg = _default_onset_config(anomaly_key, detector_key)
+    tuning_seconds = time.monotonic() - tuning_start
     tuning_summary = {
+        "backend": "grid",
+        "elapsed_seconds": float(tuning_seconds),
+        "starts_cache_entries": int(len(starts_cache)),
         "best_score_key": list(best_key) if best_key is not None else None,
         "top10": leaderboard[:10],
     }
     if verbose and tuning_summary["top10"]:
+        print(
+            "  Auto-tune finished: "
+            f"{tuning_seconds:.1f}s, candidates={len(leaderboard)}, "
+            f"starts_cache_entries={len(starts_cache)}"
+        )
         print("  Auto-tune top configs:")
         for idx, row in enumerate(tuning_summary["top10"][:5], 1):
             summary = row["summary"]
