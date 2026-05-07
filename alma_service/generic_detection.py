@@ -1060,8 +1060,8 @@ def _tune_config_with_optuna(
             study.enqueue_trial(seed_cfg)
     elif anomaly_key == "salt" and detector_key == "paano_shared":
         n_trials = 96
-        for seed_cfg in (
-            {
+        for seed_cfg, seeded_safe in (
+            ({
                 "target_far_per_day": 0.10,
                 "min_run_points": 4,
                 "cooldown_hours": 72.0,
@@ -1070,8 +1070,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.01,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.50,
                 "min_run_points": 4,
                 "cooldown_hours": 24.0,
@@ -1080,8 +1080,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.02,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.50,
                 "min_run_points": 4,
                 "cooldown_hours": 72.0,
@@ -1090,8 +1090,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.02,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 8.0,
@@ -1100,8 +1100,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": True,
                 "salt_trend_weight": 0.01,
-            },
-            {
+            }, False),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 8.0,
@@ -1110,8 +1110,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": True,
                 "salt_trend_weight": 0.01,
-            },
-            {
+            }, False),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 24.0,
@@ -1120,8 +1120,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.01,
-            },
-            {
+            }, False),
+            ({
                 "target_far_per_day": 0.10,
                 "min_run_points": 4,
                 "cooldown_hours": 48.0,
@@ -1130,8 +1130,8 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.01,
-            },
-            {
+            }, False),
+            ({
                 "target_far_per_day": 0.10,
                 "min_run_points": 4,
                 "cooldown_hours": 72.0,
@@ -1140,9 +1140,9 @@ def _tune_config_with_optuna(
                 "gate_mode": "relaxed",
                 "bypass_cooldown_after_clear": False,
                 "salt_trend_weight": 0.01,
-            },
+            }, True),
         ):
-            study.enqueue_trial(seed_cfg)
+            study.enqueue_trial(seed_cfg, user_attrs={"seeded_safe": seeded_safe})
         if mode == RETUNE_MODE_QUALITY:
             n_trials = max(n_trials, 192)
 
@@ -1207,6 +1207,7 @@ def _tune_config_with_optuna(
                 "summary": summary,
                 "per_well_summaries": per_well_summaries or {},
                 "well_balance": well_balance or {},
+                "seeded_safe": bool(trial.user_attrs.get("seeded_safe", False)),
             }
         )
 
@@ -1214,8 +1215,23 @@ def _tune_config_with_optuna(
     if not leaderboard:
         return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
 
-    best_cfg = dict(leaderboard[0]["config"])
-    best_key = tuple(leaderboard[0]["score_key"])
+    selected = leaderboard[0]
+    selected_reason = "best_score_key"
+    if mode == RETUNE_MODE_QUALITY and anomaly_key == "salt" and detector_key == "paano_shared":
+        seeded_safe_rows = [
+            row
+            for row in leaderboard
+            if row.get("seeded_safe")
+            and row["summary"].get("hit_count", 0) == row["summary"].get("interval_count", -1)
+            and float(row["summary"].get("false_alarms_per_day", float("inf"))) <= 0.02
+            and float(row["summary"].get("p90_delay_ratio", float("inf"))) <= 0.11
+        ]
+        if seeded_safe_rows:
+            selected = sorted(seeded_safe_rows, key=lambda row: tuple(row["score_key"]), reverse=True)[0]
+            selected_reason = "seeded_safe_quality_guard"
+
+    best_cfg = dict(selected["config"])
+    best_key = tuple(selected["score_key"])
     tuning_summary = {
         "backend": backend,
         "mode": mode,
@@ -1226,6 +1242,8 @@ def _tune_config_with_optuna(
         "elapsed_seconds": float(tuning_seconds),
         "objective_calls": int(objective_calls),
         "starts_cache_entries": int(len(starts_cache)),
+        "selected_reason": selected_reason,
+        "selected_seeded_safe": bool(selected.get("seeded_safe", False)),
         "best_score_key": list(best_key),
         "top10": leaderboard[:10],
     }
