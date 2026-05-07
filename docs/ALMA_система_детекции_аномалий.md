@@ -532,16 +532,16 @@ Run:                                    1      2      3      4
 |---|---|---|---|
 | 1062 | train | ✅ Detected | 26.0 ч |
 | 129л | train | ✅ Detected | 31.5 ч |
-| 1395 | **test** | ✅ Detected | 6.8 ч |
-| 495 | train | ✅ Detected | 13.2 ч |
+| 1395 | **test** | ✅ Detected | около 0 ч |
+| 495 | train | ✅ Detected | 10.0 ч |
 | 5144г | train | ✅ Detected | 4.7 ч |
 | 610 | train | ✅ Detected | около 0 ч |
-| 691 | train | ✅ Detected | 0.2 ч |
+| 691 | train | ✅ Detected | 38.0 ч |
 | 792 | train | ✅ Detected | 4.9 ч |
 | 902 | **test** | ✅ Detected | 1.7 ч |
 
 ```
-📊 Полная оценка по интервалам: 19/21 (90.5%)  |  FAR: 0.0666/день  |  P90 delay ratio: 13.9%
+📊 Полная оценка по интервалам: 19/21 (90.5%)  |  FAR: 0.0593/день  |  P90 delay ratio: 18.5%
 📊 Первый интервал каждой скважины в основном отчёте: 18/18 detected
 ```
 
@@ -559,11 +559,18 @@ Run:                                    1      2      3      4
 gate = strict
 min_run_points = 3
 cooldown_hours = 72
-rearm_window_minutes = 60
+rearm_window_minutes = 240
 ema_alpha = 0.12
 pressure_trend_weight = 0.0025
 bypass_cooldown_after_clear = false
 ```
+
+Для финального quality-retune притока используется `pritok_seeded_quality_guard`.
+Он выбирает среди заранее проверенных safe-конфигураций вариант с меньшим
+числом повторных стартов и FAR при сохранении `19/21` full-evaluation hit-rate.
+Фактический эффект последнего прогона: starts `119 -> 95`, FAR
+`0.0666 -> 0.0593`, duplicate starts `57 -> 37`; цена - рост P90 delay ratio до
+`0.185`, что остается внутри эксплуатационного лимита для текущего режима.
 
 #### Солеотложение — PaAno Shared + Salt Deposition Conformal/KS
 
@@ -659,7 +666,7 @@ multivariate residual, а основной production-кандидат для с
 │   Аномалия      │    Детектор     │ Hit Rate  │ FAR/день │ P90 Delay │
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
 │ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
-│ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.067  │   13.9%   │
+│ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.059  │   18.5%   │
 │ Соли            │ PaAno+Salt KS   │  8/9  89% │   0.014  │    6.7%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```

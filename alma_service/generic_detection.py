@@ -95,7 +95,7 @@ ANOMALY_ONSET_PROFILES = {
         "grid": {
             "min_run_points": [3, 4],
             "cooldown_hours": [12.0, 24.0, 72.0, 120.0, 168.0],
-            "rearm_window_minutes": [30.0, 60.0, 120.0],
+            "rearm_window_minutes": [30.0, 60.0, 120.0, 240.0],
         },
     },
     "salt": {},
@@ -987,8 +987,35 @@ def _tune_config_with_optuna(
     n_trials = 48 if detector_key == "paano_feat" else 36
     if anomaly_key == "pritok" and detector_key == "paano_shared":
         n_trials = 72
-        for seed_cfg in (
-            {
+        for seed_cfg, seeded_safe in (
+            ({
+                "target_far_per_day": 0.25,
+                "min_run_points": 3,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "strict",
+                "pressure_trend_weight": 0.0025,
+            }, True),
+            ({
+                "target_far_per_day": 0.50,
+                "min_run_points": 3,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "strict",
+                "pressure_trend_weight": 0.0025,
+            }, True),
+            ({
+                "target_far_per_day": 0.50,
+                "min_run_points": 3,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 240.0,
+                "ema_alpha": 0.12,
+                "gate_mode": "strict",
+                "pressure_trend_weight": 0.0025,
+            }, True),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 72.0,
@@ -996,8 +1023,8 @@ def _tune_config_with_optuna(
                 "ema_alpha": 0.12,
                 "gate_mode": "relaxed",
                 "pressure_trend_weight": 0.0025,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 72.0,
@@ -1005,8 +1032,8 @@ def _tune_config_with_optuna(
                 "ema_alpha": 0.12,
                 "gate_mode": "score_ema",
                 "pressure_trend_weight": 0.0025,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 120.0,
@@ -1014,8 +1041,8 @@ def _tune_config_with_optuna(
                 "ema_alpha": 0.12,
                 "gate_mode": "relaxed",
                 "pressure_trend_weight": 0.0025,
-            },
-            {
+            }, True),
+            ({
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 168.0,
@@ -1023,9 +1050,29 @@ def _tune_config_with_optuna(
                 "ema_alpha": 0.12,
                 "gate_mode": "score_ema",
                 "pressure_trend_weight": 0.0025,
-            },
+            }, True),
+            ({
+                "target_far_per_day": 0.10,
+                "min_run_points": 4,
+                "cooldown_hours": 120.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "relaxed",
+                "pressure_trend_weight": 0.0025,
+            }, False),
+            ({
+                "target_far_per_day": 0.10,
+                "min_run_points": 4,
+                "cooldown_hours": 168.0,
+                "rearm_window_minutes": 60.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "score_ema",
+                "pressure_trend_weight": 0.0025,
+            }, False),
         ):
-            study.enqueue_trial(seed_cfg)
+            study.enqueue_trial(seed_cfg, user_attrs={"seeded_safe": seeded_safe})
+        if mode == RETUNE_MODE_QUALITY:
+            n_trials = max(n_trials, 144)
     elif anomaly_key == "negermet" and detector_key == "paano_shared":
         n_trials = 48
         for seed_cfg in (
@@ -1217,7 +1264,31 @@ def _tune_config_with_optuna(
 
     selected = leaderboard[0]
     selected_reason = "best_score_key"
-    if mode == RETUNE_MODE_QUALITY and anomaly_key == "salt" and detector_key == "paano_shared":
+    if mode == RETUNE_MODE_QUALITY and anomaly_key == "pritok" and detector_key == "paano_shared":
+        train_interval_count = max(int(train_intervals.shape[0]), 0)
+        min_hit_count = max(train_interval_count - 2, 0)
+        seeded_safe_rows = [
+            row
+            for row in leaderboard
+            if row.get("seeded_safe")
+            and int(row["summary"].get("hit_count", 0)) >= min_hit_count
+            and float(row["summary"].get("false_alarms_per_day", float("inf"))) <= 0.09
+            and float(row["summary"].get("avg_starts_per_interval", float("inf"))) <= 6.6
+            and float(row["summary"].get("p90_delay_ratio", float("inf"))) <= 0.20
+        ]
+        if seeded_safe_rows:
+            selected = sorted(
+                seeded_safe_rows,
+                key=lambda row: (
+                    int(row["summary"].get("hit_count", 0)),
+                    -float(row["summary"].get("avg_starts_per_interval", float("inf"))),
+                    -float(row["summary"].get("false_alarms_per_day", float("inf"))),
+                    -float(row["summary"].get("p90_delay_ratio", float("inf"))),
+                ),
+                reverse=True,
+            )[0]
+            selected_reason = "pritok_seeded_quality_guard"
+    elif mode == RETUNE_MODE_QUALITY and anomaly_key == "salt" and detector_key == "paano_shared":
         seeded_safe_rows = [
             row
             for row in leaderboard
