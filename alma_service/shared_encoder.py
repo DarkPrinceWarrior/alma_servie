@@ -45,6 +45,7 @@ from alma_service.generic_detectors import (
     _ensure_2d_float32,
     _maybe_compile_module,
 )
+from alma_service.paths import MODELS_DIR, ensure_parent
 
 
 @dataclass
@@ -63,6 +64,77 @@ class SharedEncoderState:
     anomaly_key: str
     train_wells: list[str]
     detail: dict[str, Any]
+
+
+def shared_encoder_path(anomaly_key: str) -> Path:
+    return MODELS_DIR / f"{anomaly_key}_paano_shared_encoder.pt"
+
+
+def _state_dict_model(model: nn.Module) -> nn.Module:
+    return getattr(model, "_orig_mod", model)
+
+
+def save_shared_encoder_state(state: SharedEncoderState, path: str | Path | None = None) -> Path:
+    output_path = ensure_parent(Path(path) if path is not None else shared_encoder_path(state.anomaly_key))
+    payload = {
+        "anomaly_key": state.anomaly_key,
+        "patch_short": int(state.patch_short),
+        "patch_long": int(state.patch_long),
+        "shared_channels": list(state.shared_channels),
+        "train_wells": list(state.train_wells),
+        "detail": dict(state.detail),
+        "train_mean_short": np.asarray(state.train_mean_short, dtype=np.float32),
+        "train_std_short": np.asarray(state.train_std_short, dtype=np.float32),
+        "train_mean_long": np.asarray(state.train_mean_long, dtype=np.float32),
+        "train_std_long": np.asarray(state.train_std_long, dtype=np.float32),
+        "model_short_state_dict": _state_dict_model(state.model_short).state_dict(),
+        "model_long_state_dict": _state_dict_model(state.model_long).state_dict(),
+    }
+    torch.save(payload, output_path)
+    return output_path
+
+
+def load_shared_encoder_state(
+    anomaly_key: str,
+    path: str | Path | None = None,
+    *,
+    device: torch.device,
+    compile_model: bool = True,
+    verbose: bool = False,
+) -> SharedEncoderState:
+    input_path = Path(path) if path is not None else shared_encoder_path(anomaly_key)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Shared encoder artifact not found: {input_path}")
+    payload = torch.load(input_path, map_location=device, weights_only=False)
+    stored_anomaly = str(payload["anomaly_key"])
+    if stored_anomaly != anomaly_key:
+        raise ValueError(f"Shared encoder artifact is for {stored_anomaly}, requested {anomaly_key}")
+
+    shared_channels = [str(channel) for channel in payload["shared_channels"]]
+    model_short = PatchEncoder(in_channels=len(shared_channels), use_revin=True).to(device)
+    model_long = PatchEncoder(in_channels=len(shared_channels), use_revin=True).to(device)
+    model_short.load_state_dict(payload["model_short_state_dict"])
+    model_long.load_state_dict(payload["model_long_state_dict"])
+    model_short.eval()
+    model_long.eval()
+    if compile_model:
+        model_short = _maybe_compile_module(model_short, label=f"SharedEncoder_load_patch{payload['patch_short']}", verbose=verbose)
+        model_long = _maybe_compile_module(model_long, label=f"SharedEncoder_load_patch{payload['patch_long']}", verbose=verbose)
+
+    return SharedEncoderState(
+        model_short=model_short,
+        model_long=model_long,
+        train_mean_short=np.asarray(payload["train_mean_short"], dtype=np.float32),
+        train_std_short=np.asarray(payload["train_std_short"], dtype=np.float32),
+        train_mean_long=np.asarray(payload["train_mean_long"], dtype=np.float32),
+        train_std_long=np.asarray(payload["train_std_long"], dtype=np.float32),
+        shared_channels=shared_channels,
+        patch_short=int(payload["patch_short"]),
+        patch_long=int(payload["patch_long"]),
+        anomaly_key=stored_anomaly,
+        train_wells=[str(well_id) for well_id in payload["train_wells"]],
+        detail=dict(payload.get("detail", {})),
+    )
 
 
 def _set_seed(seed: int = SEED) -> None:

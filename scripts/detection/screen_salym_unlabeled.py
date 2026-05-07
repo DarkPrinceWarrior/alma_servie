@@ -25,11 +25,8 @@ from alma_service.generic_detection import (
     _build_local_runs,
     _default_onset_config,
     _detect_starts_for_run,
-    _prepare_all_wells,
     _resolve_torch_device,
     _runtime_config,
-    load_anomaly_data,
-    load_intervals,
 )
 from alma_service.generic_detectors import set_seed
 from alma_service.paano_defaults import (
@@ -41,6 +38,7 @@ from alma_service.paano_defaults import (
 )
 from alma_service.paths import ARTIFACTS_DIR, SALYM_PREPARED_DIR, ensure_dir
 from alma_service.salym_raw_pipeline import SELECTED_PARAM_MAP
+from alma_service.shared_encoder import load_shared_encoder_state
 from alma_service.tabular_io import write_table
 
 
@@ -70,7 +68,7 @@ def _years_cover_all(value: Any) -> bool:
     return {"2015", "2016", "2017", "2018"}.issubset(values)
 
 
-def _eligible_salym_wells(root: Path, *, limit: int | None = None) -> list[str]:
+def _eligible_salym_wells(root: Path, *, limit: int | None = None, require_all_years: bool = False) -> list[str]:
     coverage_path = root / "qc" / "well_parameter_coverage.parquet"
     if not coverage_path.exists():
         raise FileNotFoundError(f"Salym coverage file not found: {coverage_path}")
@@ -83,11 +81,10 @@ def _eligible_salym_wells(root: Path, *, limit: int | None = None) -> list[str]:
         valid_params=("has_valid", "sum"),
         all_year_params=("all_years", "sum"),
     )
-    eligible = grouped[
-        (grouped["params"] == len(SELECTED_PARAM_MAP))
-        & (grouped["valid_params"] == len(SELECTED_PARAM_MAP))
-        & (grouped["all_year_params"] == len(SELECTED_PARAM_MAP))
-    ]
+    mask = (grouped["params"] == len(SELECTED_PARAM_MAP)) & (grouped["valid_params"] == len(SELECTED_PARAM_MAP))
+    if require_all_years:
+        mask &= grouped["all_year_params"] == len(SELECTED_PARAM_MAP)
+    eligible = grouped[mask]
     wells = sorted(str(well_id) for well_id in eligible.index)
     return wells[:limit] if limit is not None else wells
 
@@ -169,32 +166,14 @@ def _load_detector_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
 def _build_shared_state(anomaly_key: str, detector_key: str, device: Any, verbose: bool) -> Any:
     if detector_key != "paano_shared":
         return None
-    spec = get_detection_spec(anomaly_key)
-    train_df = load_anomaly_data(spec)
-    intervals = load_intervals(spec, required=True)
-    intervals = (
-        intervals.sort_values(["well_id", "start_date", "interval_idx"])
-        .groupby("well_id", as_index=False)
-        .first()
-    )
-    prepared = _prepare_all_wells(
-        spec,
-        train_df,
-        intervals,
-        verbose=verbose,
-        zone_aware=True,
-    )
-    from alma_service.shared_encoder import train_shared_encoder
-
-    runtime_cfg = _runtime_config(anomaly_key)
-    return train_shared_encoder(
-        prepared_wells=prepared,
-        patch_short=int(runtime_cfg.get("paano_patch_short")),
-        patch_long=int(runtime_cfg.get("paano_patch_long")),
-        anomaly_key=anomaly_key,
-        device=device,
-        verbose=verbose,
-    )
+    try:
+        return load_shared_encoder_state(anomaly_key, device=device, verbose=verbose)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"{exc}. Build frozen encoders first: "
+            f"CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/build_shared_encoders.py "
+            f"--anomalies {anomaly_key}"
+        ) from exc
 
 
 def _screen_one_anomaly(
@@ -395,6 +374,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--salym-root", default=str(SALYM_PREPARED_DIR))
     parser.add_argument("--output-dir", default=str(ARTIFACTS_DIR / "results" / "salym_screening"))
     parser.add_argument("--limit-wells", type=int, default=None)
+    parser.add_argument("--require-all-years", action="store_true", help="Require every parameter to have rows in 2015-2018.")
     parser.add_argument("--freq", default=None, help="Override resample frequency for all anomalies.")
     parser.add_argument("--checkpoint-every", type=int, default=10)
     parser.add_argument("--quiet", action="store_true")
@@ -408,10 +388,10 @@ def main() -> None:
     anomalies = _parse_anomalies(args.anomalies)
     salym_root = Path(args.salym_root)
     output_dir = ensure_dir(Path(args.output_dir))
-    wells = _eligible_salym_wells(salym_root, limit=args.limit_wells)
+    wells = _eligible_salym_wells(salym_root, limit=args.limit_wells, require_all_years=args.require_all_years)
     print(f"Selected Salym wells: {len(wells)}")
     (output_dir / "salym_screening_wells.json").write_text(
-        json.dumps({"wells": wells}, ensure_ascii=False, indent=2),
+        json.dumps({"wells": wells, "require_all_years": bool(args.require_all_years)}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
 
