@@ -609,7 +609,7 @@ uv run python scripts/evaluation/tune_saved_onset.py \
 | 408 | train | ✅ Detected | ~2.8 ч |
 
 ```
-📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.0141/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
+📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.0127/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
 ```
 
 Фактический серверный GPU-прогон 2026-05-07 после добавления
@@ -631,8 +631,8 @@ retune elapsed = 15.4s
 ```text
 target_far_per_day = 0.1
 min_run_points = 4
-cooldown_hours = 72
-rearm_window_minutes = 720
+cooldown_hours = 96
+rearm_window_minutes = 960
 ema_alpha = 0.04
 gate_mode = relaxed
 bypass_cooldown_after_clear = false
@@ -675,7 +675,7 @@ branch сохраняет и rank, и robust excess.
 
 | Детектор | Hit-rate | FAR/day | Starts/interval | Median delay | P90 delay ratio |
 |---|---:|---:|---:|---:|---:|
-| `paano_shared + conformal/KS salt` | 8/8 summary, 8/9 evaluation | 0.0141 | 2.67 evaluation | 0.03 ч | 0.0667 |
+| `paano_shared + conformal/KS salt` | 8/8 summary, 8/9 evaluation | 0.0127 | 2.33 evaluation | 0.03 ч | 0.0667 |
 | `ensemble` benchmark | 8/8 summary | 0.0976 | 19.125 | 3.19 ч | 0.5869 |
 
 Поэтому `ensemble` остается только benchmark-детектором и источником идеи
@@ -690,7 +690,7 @@ multivariate residual, а основной production-кандидат для с
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
 │ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
 │ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.059  │   18.5%   │
-│ Соли            │ PaAno+Salt KS   │  8/9  89% │   0.014  │    6.7%   │
+│ Соли            │ PaAno+Salt KS   │  8/9  89% │   0.013  │    6.7%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```
 
