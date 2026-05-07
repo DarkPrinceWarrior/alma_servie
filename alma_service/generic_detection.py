@@ -696,6 +696,113 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     )
 
 
+def _per_well_tuning_summaries(
+    train_intervals: pd.DataFrame,
+    pred_df: pd.DataFrame,
+) -> dict[str, dict[str, Any]]:
+    per_well: dict[str, dict[str, Any]] = {}
+    for well_id in sorted(train_intervals["well_id"].astype(str).str.strip().str.lower().unique()):
+        well_intervals = train_intervals[train_intervals["well_id"].astype(str).str.strip().str.lower() == well_id]
+        well_predictions = pred_df[pred_df["well_id"].astype(str).str.strip().str.lower() == well_id]
+        if well_intervals.empty:
+            continue
+        per_well[well_id], _ = evaluate_predictions(
+            well_intervals,
+            well_predictions,
+            scores=None,
+            prestart_hours=PRESTART_TOLERANCE_HOURS,
+        )
+    return per_well
+
+
+def _well_balance_stats(per_well_summaries: dict[str, dict[str, Any]]) -> dict[str, float]:
+    if not per_well_summaries:
+        return {
+            "well_count": 0.0,
+            "full_hit_well_count": 0.0,
+            "full_hit_well_rate": 0.0,
+            "worst_hit_rate": 0.0,
+            "median_hit_rate": 0.0,
+            "worst_p90_delay_ratio": 1e9,
+            "median_p90_delay_ratio": 1e9,
+            "worst_false_alarms_per_day": 1e9,
+            "worst_avg_starts_per_interval": 1e9,
+        }
+
+    hit_rates: list[float] = []
+    p90_ratios: list[float] = []
+    fars: list[float] = []
+    starts: list[float] = []
+    full_hit_count = 0
+    for summary in per_well_summaries.values():
+        interval_count = int(summary.get("interval_count", 0))
+        hit_count = int(summary.get("hit_count", 0))
+        if interval_count > 0 and hit_count >= interval_count:
+            full_hit_count += 1
+        hit_rates.append(float(hit_count / interval_count) if interval_count else 0.0)
+        p90_ratios.append(_safe_metric(summary.get("p90_delay_ratio"), large=1e9))
+        fars.append(_safe_metric(summary.get("false_alarms_per_day"), large=1e9))
+        starts.append(_safe_metric(summary.get("avg_starts_per_interval"), large=1e9))
+
+    well_count = len(per_well_summaries)
+    return {
+        "well_count": float(well_count),
+        "full_hit_well_count": float(full_hit_count),
+        "full_hit_well_rate": float(full_hit_count / well_count) if well_count else 0.0,
+        "worst_hit_rate": float(min(hit_rates)) if hit_rates else 0.0,
+        "median_hit_rate": float(np.median(hit_rates)) if hit_rates else 0.0,
+        "worst_p90_delay_ratio": float(max(p90_ratios)) if p90_ratios else 1e9,
+        "median_p90_delay_ratio": float(np.median(p90_ratios)) if p90_ratios else 1e9,
+        "worst_false_alarms_per_day": float(max(fars)) if fars else 1e9,
+        "worst_avg_starts_per_interval": float(max(starts)) if starts else 1e9,
+    }
+
+
+def _robust_tuning_score_key(
+    anomaly_key: str,
+    detector_key: str,
+    summary: dict[str, Any],
+    per_well_summaries: dict[str, dict[str, Any]],
+) -> tuple[float, ...]:
+    base_key = _operational_score_key(anomaly_key, detector_key, summary)
+    stats = _well_balance_stats(per_well_summaries)
+    if stats["well_count"] <= 1:
+        return base_key
+    return (
+        base_key[0],
+        stats["full_hit_well_count"],
+        stats["full_hit_well_rate"],
+        stats["worst_hit_rate"],
+        stats["median_hit_rate"],
+        -stats["worst_p90_delay_ratio"],
+        -stats["median_p90_delay_ratio"],
+        -stats["worst_false_alarms_per_day"],
+        -stats["worst_avg_starts_per_interval"],
+        *base_key[1:],
+    )
+
+
+def _robust_optuna_objective_value(
+    anomaly_key: str,
+    detector_key: str,
+    summary: dict[str, Any],
+    per_well_summaries: dict[str, dict[str, Any]],
+) -> float:
+    value = _optuna_objective_value(anomaly_key, detector_key, summary)
+    stats = _well_balance_stats(per_well_summaries)
+    if stats["well_count"] <= 1:
+        return value
+    return (
+        value
+        + stats["full_hit_well_count"] * 10_000_000.0
+        + stats["worst_hit_rate"] * 1_000_000.0
+        + stats["median_hit_rate"] * 100_000.0
+        - stats["worst_p90_delay_ratio"] * 10_000.0
+        - stats["worst_avg_starts_per_interval"] * 100.0
+        - stats["worst_false_alarms_per_day"] * 100.0
+    )
+
+
 def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
     grid = (
         SALT_SHARED_ONSET_TUNE_GRID
@@ -906,11 +1013,25 @@ def _tune_config_with_optuna(
             scores=None,
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
-        score_key = _operational_score_key(anomaly_key, detector_key, summary)
+        per_well_summaries = _per_well_tuning_summaries(train_intervals, pred_df)
+        score_key = _robust_tuning_score_key(
+            anomaly_key,
+            detector_key,
+            summary,
+            per_well_summaries,
+        )
+        well_balance = _well_balance_stats(per_well_summaries)
         trial.set_user_attr("config", cfg)
         trial.set_user_attr("summary", summary)
+        trial.set_user_attr("per_well_summaries", per_well_summaries)
+        trial.set_user_attr("well_balance", well_balance)
         trial.set_user_attr("score_key", list(score_key))
-        return _optuna_objective_value(anomaly_key, detector_key, summary)
+        return _robust_optuna_objective_value(
+            anomaly_key,
+            detector_key,
+            summary,
+            per_well_summaries,
+        )
 
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
 
@@ -920,6 +1041,8 @@ def _tune_config_with_optuna(
             continue
         cfg = trial.user_attrs.get("config")
         summary = trial.user_attrs.get("summary")
+        per_well_summaries = trial.user_attrs.get("per_well_summaries")
+        well_balance = trial.user_attrs.get("well_balance")
         score_key = trial.user_attrs.get("score_key")
         if not cfg or not summary or score_key is None:
             continue
@@ -929,6 +1052,8 @@ def _tune_config_with_optuna(
                 "objective": float(trial.value) if trial.value is not None else None,
                 "config": cfg,
                 "summary": summary,
+                "per_well_summaries": per_well_summaries or {},
+                "well_balance": well_balance or {},
             }
         )
 
@@ -949,11 +1074,15 @@ def _tune_config_with_optuna(
         for idx, row in enumerate(tuning_summary["top10"][:5], 1):
             summary = row["summary"]
             cfg = row["config"]
+            well_balance = row.get("well_balance", {})
             print(
                 f"    {idx}. hit={summary['hit_count']}/{summary['interval_count']}, "
                 f"p90_delay_ratio={summary['p90_delay_ratio']:.3f}, "
                 f"FAR/day={summary['false_alarms_per_day']:.3f}, "
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
+                f"wells={well_balance.get('full_hit_well_count', 0):.0f}/"
+                f"{well_balance.get('well_count', 0):.0f}, "
+                f"worst_p90={well_balance.get('worst_p90_delay_ratio', float('nan')):.3f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
                 f"rearm={cfg['rearm_window_minutes']:.0f}m, "
                 f"ema={cfg['ema_alpha']:.2f}, "
@@ -1011,8 +1140,17 @@ def _tune_config_with_grid(
             scores=None,
             prestart_hours=PRESTART_TOLERANCE_HOURS,
         )
-        key = _operational_score_key(anomaly_key, detector_key, summary)
-        leaderboard.append({"score_key": list(key), "config": cfg, "summary": summary})
+        per_well_summaries = _per_well_tuning_summaries(train_intervals, pred_df)
+        key = _robust_tuning_score_key(anomaly_key, detector_key, summary, per_well_summaries)
+        leaderboard.append(
+            {
+                "score_key": list(key),
+                "config": cfg,
+                "summary": summary,
+                "per_well_summaries": per_well_summaries,
+                "well_balance": _well_balance_stats(per_well_summaries),
+            }
+        )
         if best_key is None or key > best_key:
             best_cfg = cfg.copy()
             best_key = key
@@ -1029,11 +1167,15 @@ def _tune_config_with_grid(
         for idx, row in enumerate(tuning_summary["top10"][:5], 1):
             summary = row["summary"]
             cfg = row["config"]
+            well_balance = row.get("well_balance", {})
             print(
                 f"    {idx}. hit={summary['hit_count']}/{summary['interval_count']}, "
                 f"p90_delay_ratio={summary['p90_delay_ratio']:.3f}, "
                 f"FAR/day={summary['false_alarms_per_day']:.3f}, "
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
+                f"wells={well_balance.get('full_hit_well_count', 0):.0f}/"
+                f"{well_balance.get('well_count', 0):.0f}, "
+                f"worst_p90={well_balance.get('worst_p90_delay_ratio', float('nan')):.3f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
                 f"rearm={cfg['rearm_window_minutes']:.0f}m, "
                 f"ema={cfg['ema_alpha']:.2f}, "

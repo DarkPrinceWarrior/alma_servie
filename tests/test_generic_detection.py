@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from alma_service.generic_detection import _operational_score_key
+from alma_service.generic_detection import _operational_score_key, _robust_tuning_score_key
 
 
 class GenericDetectionObjectiveTests(unittest.TestCase):
@@ -88,6 +88,51 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         self.assertGreater(
             _operational_score_key("salt", "pca_spe", on_time),
             _operational_score_key("salt", "pca_spe", too_late),
+        )
+
+    def test_robust_tuning_score_key_penalizes_single_well_failure(self) -> None:
+        aggregate = {
+            "hit_count": 6,
+            "interval_count": 6,
+            "p90_delay_ratio": 0.05,
+            "false_alarms_per_day": 0.02,
+            "avg_starts_per_interval": 3.0,
+            "p90_abs_delay_hours": 3.0,
+            "median_abs_delay_hours": 1.0,
+        }
+        balanced_wells = {
+            "w1": {
+                "hit_count": 1,
+                "interval_count": 1,
+                "hit_rate": 1.0,
+                "p90_delay_ratio": 0.05,
+                "false_alarms_per_day": 0.02,
+                "avg_starts_per_interval": 3.0,
+            },
+            "w2": {
+                "hit_count": 1,
+                "interval_count": 1,
+                "hit_rate": 1.0,
+                "p90_delay_ratio": 0.06,
+                "false_alarms_per_day": 0.02,
+                "avg_starts_per_interval": 3.0,
+            },
+        }
+        failed_well = {
+            "w1": balanced_wells["w1"],
+            "w2": {
+                "hit_count": 0,
+                "interval_count": 1,
+                "hit_rate": 0.0,
+                "p90_delay_ratio": 1.0,
+                "false_alarms_per_day": 0.02,
+                "avg_starts_per_interval": 3.0,
+            },
+        }
+
+        self.assertGreater(
+            _robust_tuning_score_key("salt", "paano_shared", aggregate, balanced_wells),
+            _robust_tuning_score_key("salt", "paano_shared", aggregate, failed_well),
         )
 
 
