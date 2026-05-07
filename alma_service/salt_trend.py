@@ -31,6 +31,8 @@ def _zero_output(n: int, reason: str) -> SaltTrendOutput:
         "salt_multivariate_residual_score": zero.copy(),
         "salt_feature_residual_score": zero.copy(),
         "salt_distribution_shift_score": zero.copy(),
+        "salt_distribution_shift_tail_score": zero.copy(),
+        "salt_distribution_shift_excess_score": zero.copy(),
         "salt_distribution_shift_raw_score": zero.copy(),
         "salt_distribution_shift_horizon": zero.copy(),
     }
@@ -107,14 +109,14 @@ def _distribution_shift_score(
     values: np.ndarray,
     reference_mask: np.ndarray,
     horizons: list[int],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     x = _filled_signal(np.asarray(values, dtype=np.float32))
     ref_mask = np.asarray(reference_mask, dtype=bool)
     n = len(x)
     ref = x[ref_mask & np.isfinite(x)]
     if len(ref) < 32:
         zero = np.zeros(n, dtype=np.float32)
-        return zero.copy(), zero.copy(), zero.copy()
+        return zero.copy(), zero.copy(), zero.copy(), zero.copy(), zero.copy()
 
     ref_sorted = np.sort(ref.astype(np.float32))
     best_raw = np.zeros(n, dtype=np.float32)
@@ -136,8 +138,16 @@ def _distribution_shift_score(
         best_raw[better] = raw[better]
         best_horizon[better] = float(window)
 
-    calibrated = _conformal_tail_score(best_raw, best_raw[ref_mask])
-    return calibrated.astype(np.float32), best_raw.astype(np.float32), best_horizon.astype(np.float32)
+    tail = _conformal_tail_score(best_raw, best_raw[ref_mask])
+    excess = _robust_excess_score(best_raw, best_raw[ref_mask])
+    calibrated = tail + excess
+    return (
+        calibrated.astype(np.float32),
+        tail.astype(np.float32),
+        excess.astype(np.float32),
+        best_raw.astype(np.float32),
+        best_horizon.astype(np.float32),
+    )
 
 
 def _rolling_median(values: np.ndarray, window: int) -> np.ndarray:
@@ -410,7 +420,7 @@ def build_salt_deposition_branch(prepared: PreparedWellData) -> SaltTrendOutput:
     )
     feature_score, feature_components = _feature_residual_score(prepared, reference_mask)
     residual_signal = np.maximum(feature_score, multivariate_score).astype(np.float32)
-    shift_score, shift_raw, shift_horizon = _distribution_shift_score(
+    shift_score, shift_tail, shift_excess, shift_raw, shift_horizon = _distribution_shift_score(
         residual_signal,
         reference_mask,
         horizons,
@@ -461,6 +471,8 @@ def build_salt_deposition_branch(prepared: PreparedWellData) -> SaltTrendOutput:
         "salt_feature_residual_score": feature_score.astype(np.float32),
         "salt_feature_residual_tail_score": feature_tail.astype(np.float32),
         "salt_distribution_shift_score": shift_score.astype(np.float32),
+        "salt_distribution_shift_tail_score": shift_tail.astype(np.float32),
+        "salt_distribution_shift_excess_score": shift_excess.astype(np.float32),
         "salt_distribution_shift_raw_score": shift_raw.astype(np.float32),
         "salt_distribution_shift_horizon": shift_horizon.astype(np.float32),
     }
@@ -500,10 +512,10 @@ def fuse_model_with_salt_trend(
         feature_tail = _conformal_tail_score(feature, feature[ref_mask])
     distribution_shift = salt_output.components.get("salt_distribution_shift_score")
     if distribution_shift is None:
-        shift_tail = np.zeros(len(model), dtype=np.float32)
+        shift_fusion = np.zeros(len(model), dtype=np.float32)
     else:
-        shift_tail = np.asarray(distribution_shift, dtype=np.float32)
-    salt_tail = np.maximum.reduce([drift_tail, feature_tail, shift_tail])
+        shift_fusion = np.asarray(distribution_shift, dtype=np.float32)
+    salt_tail = np.maximum.reduce([drift_tail, feature_tail, shift_fusion])
     fusion_score = salt_output.components.get("salt_deposition_fusion_score")
     if fusion_score is None:
         calibrated_fusion = salt_tail
@@ -517,7 +529,7 @@ def fuse_model_with_salt_trend(
         **salt_output.components,
         "salt_deposition_drift_tail_score": drift_tail.astype(np.float32),
         "salt_feature_residual_tail_score": feature_tail.astype(np.float32),
-        "salt_distribution_shift_tail_score": shift_tail.astype(np.float32),
+        "salt_distribution_shift_fusion_score": shift_fusion.astype(np.float32),
         "salt_deposition_tail_score": salt_tail.astype(np.float32),
         "salt_deposition_calibrated_fusion_score": calibrated_fusion.astype(np.float32),
         "salt_deposition_dominates": salt_dominates.astype(np.float32),
