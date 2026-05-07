@@ -566,13 +566,35 @@ bypass_cooldown_after_clear = false
 | 408 | train | ✅ Detected | ~2.8 ч |
 
 ```
-📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.158/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
+📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.0156/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
 ```
 
-Текущий tradeoff по соли: раннее обнаружение резко улучшилось, включая blind-test
-`3244г`, но число стартов выше, чем у старого `ensemble`. Поэтому `ensemble`
-сохраняется как benchmark, а `paano_shared + salt_deposition` является основной
-унифицированной архитектурой для дальнейшей доводки FAR/starts.
+Фактический GPU-прогон 2026-05-07 после расширения train-only tuning
+`rearm/cooldown/bypass_cooldown_after_clear` выбрал конфигурацию:
+
+```text
+target_far_per_day = 0.5
+min_run_points = 4
+cooldown_hours = 24
+rearm_window_minutes = 720
+ema_alpha = 0.04
+gate_mode = relaxed
+bypass_cooldown_after_clear = false
+fusion_weight_short = 0.6
+salt_trend_weight = 0.02
+```
+
+Итоговый результат для `salt/paano_shared` стал лучше старого `ensemble` сразу по
+трём эксплуатационным метрикам:
+
+| Детектор | Hit-rate | FAR/day | Starts/interval | Median delay | P90 delay ratio |
+|---|---:|---:|---:|---:|---:|
+| `paano_shared + salt_deposition` | 8/8 summary, 8/9 evaluation | 0.0156 | 3.25 summary, 2.89 evaluation | 0.03 ч | 0.0667 |
+| `ensemble` benchmark | 8/8 summary | 0.0976 | 19.125 | 3.19 ч | 0.5869 |
+
+Поэтому `ensemble` остается только benchmark-детектором и источником идеи
+multivariate residual, а основной production-кандидат для соли теперь
+`paano_shared + salt_deposition`.
 
 ### 8.3 Сводная таблица
 
@@ -582,7 +604,7 @@ bypass_cooldown_after_clear = false
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
 │ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
 │ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.067  │   13.9%   │
-│ Соли            │ PaAno+Salt      │  8/9  89% │   0.158  │    6.7%   │
+│ Соли            │ PaAno+Salt      │  8/9  89% │   0.016  │    6.7%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```
 
@@ -757,6 +779,6 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 
 ---
 
-> **Документ обновлён:** Апрель 2026
-> **Версия системы:** ALMA v2.1 (Shared Encoder + Ensemble + Pressure Trend для притока)
+> **Документ обновлён:** 7 мая 2026
+> **Версия системы:** ALMA v2.2 (Shared Encoder + physical branches: Pressure Trend для притока, Salt Deposition для соли)
 > **Технологический стек:** Python, PyTorch, scikit-learn, matplotlib
