@@ -27,15 +27,15 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
             _operational_score_key("pritok", "pca_spe", spamy),
         )
 
-    def test_operational_score_key_strongly_prefers_lower_start_count(self) -> None:
-        noisy = {
+    def test_salt_operational_score_key_prefers_early_onset_with_feasible_noise(self) -> None:
+        earlier = {
             "hit_count": 8,
             "p90_delay_ratio": 0.02,
             "false_alarms_per_day": 0.20,
-            "avg_starts_per_interval": 42.0,
+            "avg_starts_per_interval": 9.0,
             "p90_abs_delay_hours": 2.0,
         }
-        calmer = {
+        cleaner_but_later = {
             "hit_count": 8,
             "p90_delay_ratio": 0.08,
             "false_alarms_per_day": 0.24,
@@ -44,7 +44,28 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         }
 
         self.assertGreater(
-            _operational_score_key("salt", "pca_spe", calmer),
+            _operational_score_key("salt", "pca_spe", earlier),
+            _operational_score_key("salt", "pca_spe", cleaner_but_later),
+        )
+
+    def test_salt_operational_score_key_rejects_extreme_repeated_starts(self) -> None:
+        noisy = {
+            "hit_count": 8,
+            "p90_delay_ratio": 0.02,
+            "false_alarms_per_day": 0.20,
+            "avg_starts_per_interval": 42.0,
+            "p90_abs_delay_hours": 2.0,
+        }
+        controlled = {
+            "hit_count": 8,
+            "p90_delay_ratio": 0.02,
+            "false_alarms_per_day": 0.24,
+            "avg_starts_per_interval": 7.0,
+            "p90_abs_delay_hours": 2.0,
+        }
+
+        self.assertGreater(
+            _operational_score_key("salt", "pca_spe", controlled),
             _operational_score_key("salt", "pca_spe", noisy),
         )
 
