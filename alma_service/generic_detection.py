@@ -120,6 +120,10 @@ PHYSICAL_BRANCH_WEIGHT_GRIDS = {
     "salt": [0.0, 0.00025, 0.0005, 0.001, 0.0025, 0.005, 0.01, 0.02],
 }
 SALT_TREND_WEIGHT_GRID = PHYSICAL_BRANCH_WEIGHT_GRIDS["salt"]
+RETUNE_MODE_FAST = "fast"
+RETUNE_MODE_QUALITY = "quality"
+RETUNE_MODE_GRID = "grid"
+RETUNE_MODES = {RETUNE_MODE_FAST, RETUNE_MODE_QUALITY, RETUNE_MODE_GRID}
 ANOMALY_RUNTIME_CONFIG = {
     "negermet": {
         "prepare_patch_size": PATCH_SIZES["negermet"][1],
@@ -775,7 +779,36 @@ def _detect_starts_for_config(
     return predicted
 
 
-def _tuning_n_jobs(anomaly_key: str, detector_key: str) -> int:
+def _retune_mode() -> str:
+    mode = os.environ.get("ALMA_RETUNE_MODE", RETUNE_MODE_FAST).strip().lower()
+    if mode not in RETUNE_MODES:
+        return RETUNE_MODE_FAST
+    return mode
+
+
+def _optuna_seed() -> int:
+    raw_value = os.environ.get("ALMA_OPTUNA_SEED", "2027").strip()
+    try:
+        return int(raw_value)
+    except ValueError:
+        return 2027
+
+
+def _optuna_trial_count(default_trials: int, mode: str) -> int:
+    env_name = "ALMA_OPTUNA_QUALITY_TRIALS" if mode == RETUNE_MODE_QUALITY else "ALMA_OPTUNA_N_TRIALS"
+    raw_value = os.environ.get(env_name, "").strip()
+    if not raw_value:
+        return default_trials
+    try:
+        n_trials = int(raw_value)
+    except ValueError:
+        return default_trials
+    return max(n_trials, 1)
+
+
+def _tuning_n_jobs(anomaly_key: str, detector_key: str, mode: str) -> int:
+    if mode == RETUNE_MODE_QUALITY:
+        return 1
     raw_value = os.environ.get("ALMA_OPTUNA_N_JOBS", "1").strip()
     try:
         n_jobs = int(raw_value)
@@ -941,7 +974,12 @@ def _tune_config_with_optuna(
         return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
 
     optuna.logging.set_verbosity(optuna.logging.WARNING)
-    sampler = optuna.samplers.TPESampler(seed=2027)
+    mode = _retune_mode()
+    seed = _optuna_seed()
+    sampler_kwargs: dict[str, Any] = {"seed": seed}
+    if mode == RETUNE_MODE_QUALITY:
+        sampler_kwargs.update({"multivariate": True, "group": True, "n_startup_trials": 0})
+    sampler = optuna.samplers.TPESampler(**sampler_kwargs)
     study = optuna.create_study(direction="maximize", sampler=sampler)
     per_well_intervals = _build_per_well_tuning_intervals(train_intervals)
     starts_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], list[pd.Timestamp]] = {}
@@ -1024,6 +1062,36 @@ def _tune_config_with_optuna(
         n_trials = 96
         for seed_cfg in (
             {
+                "target_far_per_day": 0.10,
+                "min_run_points": 4,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 720.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.01,
+            },
+            {
+                "target_far_per_day": 0.50,
+                "min_run_points": 4,
+                "cooldown_hours": 24.0,
+                "rearm_window_minutes": 720.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.02,
+            },
+            {
+                "target_far_per_day": 0.50,
+                "min_run_points": 4,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 720.0,
+                "ema_alpha": 0.08,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.02,
+            },
+            {
                 "target_far_per_day": 0.25,
                 "min_run_points": 4,
                 "cooldown_hours": 8.0,
@@ -1075,6 +1143,10 @@ def _tune_config_with_optuna(
             },
         ):
             study.enqueue_trial(seed_cfg)
+        if mode == RETUNE_MODE_QUALITY:
+            n_trials = max(n_trials, 192)
+
+    n_trials = _optuna_trial_count(n_trials, mode)
 
     def objective(trial: Any) -> float:
         nonlocal objective_calls
@@ -1108,9 +1180,10 @@ def _tune_config_with_optuna(
             per_well_summaries,
         )
 
-    n_jobs = _tuning_n_jobs(anomaly_key, detector_key)
+    n_jobs = _tuning_n_jobs(anomaly_key, detector_key, mode)
+    backend = f"optuna_tpe_{mode}"
     if verbose:
-        print(f"  Auto-tune backend: optuna_tpe, trials={n_trials}, n_jobs={n_jobs}")
+        print(f"  Auto-tune backend: {backend}, trials={n_trials}, n_jobs={n_jobs}, seed={seed}")
     tuning_start = time.monotonic()
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
     tuning_seconds = time.monotonic() - tuning_start
@@ -1144,9 +1217,12 @@ def _tune_config_with_optuna(
     best_cfg = dict(leaderboard[0]["config"])
     best_key = tuple(leaderboard[0]["score_key"])
     tuning_summary = {
-        "backend": "optuna_tpe",
+        "backend": backend,
+        "mode": mode,
         "n_trials": n_trials,
         "n_jobs": n_jobs,
+        "sampler_seed": seed,
+        "sampler_kwargs": sampler_kwargs,
         "elapsed_seconds": float(tuning_seconds),
         "objective_calls": int(objective_calls),
         "starts_cache_entries": int(len(starts_cache)),
@@ -1309,6 +1385,9 @@ def _tune_config(
     train_intervals: pd.DataFrame,
     verbose: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    mode = _retune_mode()
+    if mode == RETUNE_MODE_GRID:
+        return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     if optuna is None:
         return _tune_config_with_grid(anomaly_key, detector_key, train_runs, train_intervals, verbose)
     return _tune_config_with_optuna(anomaly_key, detector_key, train_runs, train_intervals, verbose)
