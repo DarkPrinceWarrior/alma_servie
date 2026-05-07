@@ -7,7 +7,6 @@ import pandas as pd
 
 from alma_service.engineered_features import PreparedWellData
 from alma_service.anomaly_physics import SALT_PHYSICAL_SPEC
-from alma_service.pressure_trend import empirical_tail_score
 
 EPS = 1e-6
 
@@ -26,10 +25,14 @@ def _zero_output(n: int, reason: str) -> SaltTrendOutput:
     components = {
         "salt_deposition_score": zero.copy(),
         "salt_deposition_fusion_score": zero.copy(),
+        "salt_deposition_raw_fusion_score": zero.copy(),
         "salt_group_agreement": zero.copy(),
         "salt_drift_horizon": zero.copy(),
         "salt_multivariate_residual_score": zero.copy(),
         "salt_feature_residual_score": zero.copy(),
+        "salt_distribution_shift_score": zero.copy(),
+        "salt_distribution_shift_raw_score": zero.copy(),
+        "salt_distribution_shift_horizon": zero.copy(),
     }
     for group in GROUP_COLUMNS:
         components[f"salt_{group}_drift"] = zero.copy()
@@ -68,6 +71,73 @@ def _robust_excess_score(values: np.ndarray, reference_values: np.ndarray) -> np
     finite = np.isfinite(x)
     out[finite] = np.maximum(0.0, (x[finite] - med) / scale).astype(np.float32)
     return out
+
+
+def _conformal_tail_score(values: np.ndarray, reference_values: np.ndarray) -> np.ndarray:
+    x = np.asarray(values, dtype=np.float32)
+    ref = np.asarray(reference_values, dtype=np.float32)
+    ref = ref[np.isfinite(ref)]
+    out = np.zeros(len(x), dtype=np.float32)
+    if len(ref) < 8:
+        return out
+    ref_sorted = np.sort(ref)
+    finite = np.isfinite(x)
+    ranks = np.searchsorted(ref_sorted, x[finite], side="right").astype(np.float32)
+    out[finite] = (100.0 * ranks / (len(ref_sorted) + 1.0)).astype(np.float32)
+    return np.clip(out, 0.0, 100.0)
+
+
+def _two_sample_ks_scaled(window_values: np.ndarray, reference_sorted: np.ndarray) -> float:
+    sample = np.asarray(window_values, dtype=np.float32)
+    sample = sample[np.isfinite(sample)]
+    if len(sample) < 8 or len(reference_sorted) < 8:
+        return 0.0
+    sample_sorted = np.sort(sample)
+    grid = np.union1d(sample_sorted, reference_sorted)
+    if len(grid) == 0:
+        return 0.0
+    sample_cdf = np.searchsorted(sample_sorted, grid, side="right") / float(len(sample_sorted))
+    ref_cdf = np.searchsorted(reference_sorted, grid, side="right") / float(len(reference_sorted))
+    ks = float(np.max(np.abs(sample_cdf - ref_cdf)))
+    scale = np.sqrt((len(sample_sorted) * len(reference_sorted)) / float(len(sample_sorted) + len(reference_sorted)))
+    return float(ks * scale)
+
+
+def _distribution_shift_score(
+    values: np.ndarray,
+    reference_mask: np.ndarray,
+    horizons: list[int],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    x = _filled_signal(np.asarray(values, dtype=np.float32))
+    ref_mask = np.asarray(reference_mask, dtype=bool)
+    n = len(x)
+    ref = x[ref_mask & np.isfinite(x)]
+    if len(ref) < 32:
+        zero = np.zeros(n, dtype=np.float32)
+        return zero.copy(), zero.copy(), zero.copy()
+
+    ref_sorted = np.sort(ref.astype(np.float32))
+    best_raw = np.zeros(n, dtype=np.float32)
+    best_horizon = np.zeros(n, dtype=np.float32)
+    min_ref_window = max(8, int(np.floor(np.sqrt(float(len(ref))))))
+    for horizon in horizons:
+        window = max(int(horizon), min_ref_window)
+        if window < 8 or window > n:
+            continue
+        raw = np.zeros(n, dtype=np.float32)
+        min_periods = max(8, int(np.ceil(window * 0.5)))
+        for idx in range(window - 1, n):
+            current = x[idx - window + 1 : idx + 1]
+            current = current[np.isfinite(current)]
+            if len(current) < min_periods:
+                continue
+            raw[idx] = _two_sample_ks_scaled(current, ref_sorted)
+        better = raw > best_raw
+        best_raw[better] = raw[better]
+        best_horizon[better] = float(window)
+
+    calibrated = _conformal_tail_score(best_raw, best_raw[ref_mask])
+    return calibrated.astype(np.float32), best_raw.astype(np.float32), best_horizon.astype(np.float32)
 
 
 def _rolling_median(values: np.ndarray, window: int) -> np.ndarray:
@@ -339,6 +409,12 @@ def build_salt_deposition_branch(prepared: PreparedWellData) -> SaltTrendOutput:
         reference_mask,
     )
     feature_score, feature_components = _feature_residual_score(prepared, reference_mask)
+    residual_signal = np.maximum(feature_score, multivariate_score).astype(np.float32)
+    shift_score, shift_raw, shift_horizon = _distribution_shift_score(
+        residual_signal,
+        reference_mask,
+        horizons,
+    )
     active_scores.append(multivariate_score.astype(np.float32))
     score_matrix = np.vstack(active_scores)
     sorted_scores = np.sort(score_matrix, axis=0)
@@ -361,20 +437,32 @@ def build_salt_deposition_branch(prepared: PreparedWellData) -> SaltTrendOutput:
     deposition_score = np.maximum(deposition_score, multivariate_score)
     deposition_score = np.maximum(deposition_score, feature_score)
     deposition_score = np.nan_to_num(deposition_score, nan=0.0, posinf=0.0, neginf=0.0)
-    # Raw grouped drift may be extremely large on wells with unstable reference
-    # segments. Keep it as diagnostics, but use the PCA/SPE residual as the
-    # train-tuned fusion signal because it is already robust-calibrated.
-    fusion_score = np.maximum(feature_score, 0.0)
+    # Raw grouped drift and PCA/SPE residuals are not comparable across wells.
+    # The train-tuned fusion branch therefore receives only reference-calibrated
+    # 0..100 tail scores.
+    feature_tail = _conformal_tail_score(feature_score, feature_score[reference_mask])
+    multivariate_tail = _conformal_tail_score(multivariate_score, multivariate_score[reference_mask])
+    drift_tail = _conformal_tail_score(deposition_score, deposition_score[reference_mask])
+    fusion_score = np.maximum.reduce([feature_tail, multivariate_tail, shift_score])
     fusion_score = np.nan_to_num(fusion_score, nan=0.0, posinf=0.0, neginf=0.0)
+    raw_fusion_score = np.maximum(feature_score, 0.0)
+    raw_fusion_score = np.nan_to_num(raw_fusion_score, nan=0.0, posinf=0.0, neginf=0.0)
     drift_horizon = np.nanmax(np.vstack(group_horizons), axis=0) if group_horizons else np.zeros(n)
 
     components = {
         "salt_deposition_score": deposition_score.astype(np.float32),
         "salt_deposition_fusion_score": fusion_score.astype(np.float32),
+        "salt_deposition_raw_fusion_score": raw_fusion_score.astype(np.float32),
+        "salt_deposition_conformal_tail_score": drift_tail.astype(np.float32),
         "salt_group_agreement": agreement_norm.astype(np.float32),
         "salt_drift_horizon": drift_horizon.astype(np.float32),
         "salt_multivariate_residual_score": multivariate_score.astype(np.float32),
+        "salt_multivariate_residual_tail_score": multivariate_tail.astype(np.float32),
         "salt_feature_residual_score": feature_score.astype(np.float32),
+        "salt_feature_residual_tail_score": feature_tail.astype(np.float32),
+        "salt_distribution_shift_score": shift_score.astype(np.float32),
+        "salt_distribution_shift_raw_score": shift_raw.astype(np.float32),
+        "salt_distribution_shift_horizon": shift_horizon.astype(np.float32),
     }
     for group in GROUP_COLUMNS:
         components[f"salt_{group}_drift"] = group_scores[group].astype(np.float32)
@@ -389,7 +477,8 @@ def build_salt_deposition_branch(prepared: PreparedWellData) -> SaltTrendOutput:
         "multivariate_components": int(multivariate_components),
         "feature_residual_components": int(feature_components),
         "score_scale": "robust_reference_grouped_drift_plus_multivariate_and_feature_residual",
-        "fusion_score": "positive_feature_residual_only",
+        "distribution_shift": "moving_window_ks_on_residual_signal",
+        "fusion_score": "conformal_tail_max_of_feature_multivariate_and_distribution_shift",
     }
     return SaltTrendOutput(score=deposition_score.astype(np.float32), components=components, detail=detail)
 
@@ -401,15 +490,20 @@ def fuse_model_with_salt_trend(
 ) -> tuple[np.ndarray, dict[str, np.ndarray], dict[str, object]]:
     model = np.asarray(model_score, dtype=np.float32)
     ref_mask = np.asarray(reference_mask, dtype=bool)
-    model_tail = empirical_tail_score(model, model[ref_mask])
-    drift_tail = empirical_tail_score(salt_output.score, salt_output.score[ref_mask])
+    model_tail = _conformal_tail_score(model, model[ref_mask])
+    drift_tail = _conformal_tail_score(salt_output.score, salt_output.score[ref_mask])
     feature_score = salt_output.components.get("salt_feature_residual_score")
     if feature_score is None:
         feature_tail = np.zeros(len(model), dtype=np.float32)
     else:
         feature = np.asarray(feature_score, dtype=np.float32)
-        feature_tail = empirical_tail_score(feature, feature[ref_mask])
-    salt_tail = np.maximum(drift_tail, feature_tail)
+        feature_tail = _conformal_tail_score(feature, feature[ref_mask])
+    distribution_shift = salt_output.components.get("salt_distribution_shift_score")
+    if distribution_shift is None:
+        shift_tail = np.zeros(len(model), dtype=np.float32)
+    else:
+        shift_tail = np.asarray(distribution_shift, dtype=np.float32)
+    salt_tail = np.maximum.reduce([drift_tail, feature_tail, shift_tail])
     fusion_score = salt_output.components.get("salt_deposition_fusion_score")
     if fusion_score is None:
         calibrated_fusion = salt_tail
@@ -423,13 +517,15 @@ def fuse_model_with_salt_trend(
         **salt_output.components,
         "salt_deposition_drift_tail_score": drift_tail.astype(np.float32),
         "salt_feature_residual_tail_score": feature_tail.astype(np.float32),
+        "salt_distribution_shift_tail_score": shift_tail.astype(np.float32),
         "salt_deposition_tail_score": salt_tail.astype(np.float32),
         "salt_deposition_calibrated_fusion_score": calibrated_fusion.astype(np.float32),
         "salt_deposition_dominates": salt_dominates.astype(np.float32),
     }
     detail = {
         "fusion": "paano_plus_tuned_salt_deposition_residual",
-        "score_scale": "paano_score_with_train_tuned_calibrated_salt_residual_boost",
+        "score_scale": "paano_score_with_train_tuned_conformal_salt_tail_boost",
+        "tail_calibration": "per_well_reference_conformal_rank",
         "salt_trend": salt_output.detail,
     }
     return fused, components, detail

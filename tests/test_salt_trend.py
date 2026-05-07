@@ -97,6 +97,11 @@ def test_salt_trend_scores_sustained_multigroup_drift() -> None:
     assert float(np.nanmedian(drift_score)) > float(np.nanquantile(ref_score, 0.95))
     assert float(np.nanmax(drift_score)) > 1.0
     assert float(np.nanmedian(out.components["salt_group_agreement"][430:])) > 0.0
+    assert "salt_distribution_shift_score" in out.components
+    assert "salt_deposition_conformal_tail_score" in out.components
+    shift_ref = out.components["salt_distribution_shift_score"][prepared.reference_mask]
+    shift_drift = out.components["salt_distribution_shift_score"][430:]
+    assert float(np.nanmedian(shift_drift)) > float(np.nanquantile(shift_ref, 0.95))
 
 
 def test_salt_trend_fusion_keeps_model_score_by_default() -> None:
@@ -125,4 +130,6 @@ def test_salt_trend_fusion_keeps_model_score_by_default() -> None:
     assert "salt_deposition_score" in components
     assert "salt_deposition_tail_score" in components
     assert "salt_deposition_calibrated_fusion_score" in components
+    assert "salt_distribution_shift_tail_score" in components
+    assert detail["tail_calibration"] == "per_well_reference_conformal_rank"
     assert float(fused[-1]) == float(model[-1])
