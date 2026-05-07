@@ -1244,6 +1244,8 @@ def _tune_config_with_optuna(
         "starts_cache_entries": int(len(starts_cache)),
         "selected_reason": selected_reason,
         "selected_seeded_safe": bool(selected.get("seeded_safe", False)),
+        "selected_config": best_cfg,
+        "selected_score_key": list(best_key),
         "best_score_key": list(best_key),
         "top10": leaderboard[:10],
     }
