@@ -102,10 +102,11 @@ ANOMALY_ONSET_PROFILES = {
 SALT_SHARED_ONSET_TUNE_GRID = {
     "target_far_per_day": [0.10, 0.25, 0.50],
     "min_run_points": [3, 4, 6],
-    "cooldown_hours": [8.0, 12.0, 24.0],
-    "rearm_window_minutes": [120.0],
+    "cooldown_hours": [8.0, 12.0, 24.0, 48.0, 72.0],
+    "rearm_window_minutes": [120.0, 240.0, 480.0, 720.0],
     "ema_alpha": [0.04, 0.08, 0.12],
     "gate_mode": ["relaxed"],
+    "bypass_cooldown_after_clear": [True, False],
 }
 
 PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
@@ -619,36 +620,46 @@ def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, An
         else _onset_tune_grid(anomaly_key)
     )
     default_cfg = _default_onset_config(anomaly_key, detector_key)
+    bypass_grid = grid.get(
+        "bypass_cooldown_after_clear",
+        [bool(default_cfg.get("bypass_cooldown_after_clear", True))],
+    )
     for target_far_per_day in grid["target_far_per_day"]:
         for min_run_points in grid["min_run_points"]:
             for cooldown_hours in grid["cooldown_hours"]:
                 for rearm_window_minutes in grid["rearm_window_minutes"]:
                     for ema_alpha in grid["ema_alpha"]:
                         for gate_mode in grid["gate_mode"]:
-                            for fusion_weight_short in weight_grid:
-                                for pressure_trend_weight in pressure_weight_grid:
-                                    for negermet_signature_weight in negermet_signature_weight_grid:
-                                        for salt_trend_weight in salt_trend_weight_grid:
-                                            cfg = default_cfg.copy()
-                                            cfg.update(
-                                                {
-                                                    "target_far_per_day": float(target_far_per_day),
-                                                    "min_run_points": int(min_run_points),
-                                                    "cooldown_hours": float(cooldown_hours),
-                                                    "rearm_window_minutes": float(rearm_window_minutes),
-                                                    "ema_alpha": float(ema_alpha),
-                                                    "gate_mode": str(gate_mode),
-                                                }
-                                            )
-                                            if fusion_weight_short is not None:
-                                                cfg["fusion_weight_short"] = float(fusion_weight_short)
-                                            if pressure_trend_weight is not None:
-                                                cfg["pressure_trend_weight"] = float(pressure_trend_weight)
-                                            if negermet_signature_weight is not None:
-                                                cfg["negermet_signature_weight"] = float(negermet_signature_weight)
-                                            if salt_trend_weight is not None:
-                                                cfg["salt_trend_weight"] = float(salt_trend_weight)
-                                            candidates.append(cfg)
+                            for bypass_cooldown_after_clear in bypass_grid:
+                                for fusion_weight_short in weight_grid:
+                                    for pressure_trend_weight in pressure_weight_grid:
+                                        for negermet_signature_weight in negermet_signature_weight_grid:
+                                            for salt_trend_weight in salt_trend_weight_grid:
+                                                cfg = default_cfg.copy()
+                                                cfg.update(
+                                                    {
+                                                        "target_far_per_day": float(target_far_per_day),
+                                                        "min_run_points": int(min_run_points),
+                                                        "cooldown_hours": float(cooldown_hours),
+                                                        "rearm_window_minutes": float(rearm_window_minutes),
+                                                        "ema_alpha": float(ema_alpha),
+                                                        "gate_mode": str(gate_mode),
+                                                        "bypass_cooldown_after_clear": bool(
+                                                            bypass_cooldown_after_clear
+                                                        ),
+                                                    }
+                                                )
+                                                if fusion_weight_short is not None:
+                                                    cfg["fusion_weight_short"] = float(fusion_weight_short)
+                                                if pressure_trend_weight is not None:
+                                                    cfg["pressure_trend_weight"] = float(pressure_trend_weight)
+                                                if negermet_signature_weight is not None:
+                                                    cfg["negermet_signature_weight"] = float(
+                                                        negermet_signature_weight
+                                                    )
+                                                if salt_trend_weight is not None:
+                                                    cfg["salt_trend_weight"] = float(salt_trend_weight)
+                                                candidates.append(cfg)
     return candidates
 
 
@@ -686,7 +697,11 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
 
 
 def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
-    grid = _onset_tune_grid(anomaly_key)
+    grid = (
+        SALT_SHARED_ONSET_TUNE_GRID
+        if anomaly_key == "salt" and detector_key == "paano_shared"
+        else _onset_tune_grid(anomaly_key)
+    )
     cfg = _default_onset_config(anomaly_key, detector_key)
     cfg.update(
         {
@@ -706,6 +721,13 @@ def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> d
             "gate_mode": str(trial.suggest_categorical("gate_mode", grid["gate_mode"])),
         }
     )
+    if "bypass_cooldown_after_clear" in grid:
+        cfg["bypass_cooldown_after_clear"] = bool(
+            trial.suggest_categorical(
+                "bypass_cooldown_after_clear",
+                grid["bypass_cooldown_after_clear"],
+            )
+        )
     if detector_key == "paano_feat":
         cfg["fusion_weight_short"] = float(
             trial.suggest_categorical("fusion_weight_short", PAANO_WEIGHT_GRID)
@@ -816,43 +838,57 @@ def _tune_config_with_optuna(
         ):
             study.enqueue_trial(seed_cfg)
     elif anomaly_key == "salt" and detector_key == "paano_shared":
-        n_trials = 72
+        n_trials = 96
         for seed_cfg in (
             {
                 "target_far_per_day": 0.25,
-                "min_run_points": 6,
-                "cooldown_hours": 8.0,
-                "rearm_window_minutes": 120.0,
-                "ema_alpha": 0.04,
-                "gate_mode": "relaxed",
-                "salt_trend_weight": 0.001,
-            },
-            {
-                "target_far_per_day": 0.50,
-                "min_run_points": 6,
-                "cooldown_hours": 12.0,
-                "rearm_window_minutes": 120.0,
-                "ema_alpha": 0.04,
-                "gate_mode": "relaxed",
-                "salt_trend_weight": 0.0025,
-            },
-            {
-                "target_far_per_day": 0.50,
                 "min_run_points": 4,
-                "cooldown_hours": 12.0,
-                "rearm_window_minutes": 60.0,
-                "ema_alpha": 0.08,
-                "gate_mode": "score_ema",
-                "salt_trend_weight": 0.005,
+                "cooldown_hours": 8.0,
+                "rearm_window_minutes": 480.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": True,
+                "salt_trend_weight": 0.01,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 8.0,
+                "rearm_window_minutes": 720.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": True,
+                "salt_trend_weight": 0.01,
+            },
+            {
+                "target_far_per_day": 0.25,
+                "min_run_points": 4,
+                "cooldown_hours": 24.0,
+                "rearm_window_minutes": 240.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.01,
             },
             {
                 "target_far_per_day": 0.10,
-                "min_run_points": 6,
-                "cooldown_hours": 24.0,
-                "rearm_window_minutes": 120.0,
-                "ema_alpha": 0.12,
+                "min_run_points": 4,
+                "cooldown_hours": 48.0,
+                "rearm_window_minutes": 240.0,
+                "ema_alpha": 0.04,
                 "gate_mode": "relaxed",
-                "salt_trend_weight": 0.0,
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.01,
+            },
+            {
+                "target_far_per_day": 0.10,
+                "min_run_points": 4,
+                "cooldown_hours": 72.0,
+                "rearm_window_minutes": 720.0,
+                "ema_alpha": 0.04,
+                "gate_mode": "relaxed",
+                "bypass_cooldown_after_clear": False,
+                "salt_trend_weight": 0.01,
             },
         ):
             study.enqueue_trial(seed_cfg)
@@ -920,7 +956,8 @@ def _tune_config_with_optuna(
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
                 f"rearm={cfg['rearm_window_minutes']:.0f}m, "
-                f"ema={cfg['ema_alpha']:.2f}"
+                f"ema={cfg['ema_alpha']:.2f}, "
+                f"bypass={int(bool(cfg.get('bypass_cooldown_after_clear', True)))}"
                 + (
                     f", w={cfg['fusion_weight_short']:.2f}"
                     if "fusion_weight_short" in cfg
@@ -999,7 +1036,8 @@ def _tune_config_with_grid(
                 f"starts/interval={summary['avg_starts_per_interval']:.2f}, "
                 f"gate={cfg['gate_mode']}, run={cfg['min_run_points']}, cd={cfg['cooldown_hours']:.0f}, "
                 f"rearm={cfg['rearm_window_minutes']:.0f}m, "
-                f"ema={cfg['ema_alpha']:.2f}"
+                f"ema={cfg['ema_alpha']:.2f}, "
+                f"bypass={int(bool(cfg.get('bypass_cooldown_after_clear', True)))}"
                 + (
                     f", w={cfg['fusion_weight_short']:.2f}"
                     if "fusion_weight_short" in cfg
