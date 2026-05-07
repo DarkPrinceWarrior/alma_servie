@@ -352,11 +352,17 @@ Score_final = Score_PaAnoShared + tuned_weight × Score_PhysicalBranch
 
 - **Приток**: `pressure_trend` по давлению на приеме насоса.
 - **Негермет**: `negermet_signature` как pressure-step/load-response диагностика.
-- **Соли**: `salt_deposition` как многоканальный grouped drift + PCA/SPE residual.
+- **Соли**: `salt_deposition` как многоканальный grouped drift + PCA/SPE residual + KS shift.
 
 Для соли `ensemble` остается benchmark-детектором, но сильная часть ансамбля
 перенесена внутрь `paano_shared`: PCA/SPE residual теперь работает как
 `salt_deposition_calibrated_fusion_score`, а не как отдельный production-путь.
+
+Для негермета `negermet_signature` уже подключен к `paano_shared` как
+диагностическая pressure-step/load-response ветка. Ее вклад в итоговый score
+задается `negermet_signature_weight` и подбирается train-only; если ветка не
+улучшает метрики, tuning может оставить вес `0`, сохранив поведение чистого
+PaAno Shared.
 
 ### 5.5 Сравнение алгоритмов
 
@@ -512,7 +518,7 @@ Run:                                    1      2      3      4
 |---|---|---|---|
 | 1123л | train | ✅ Detected | около 0 ч |
 | 172г | train | ✅ Detected | около 0 ч |
-| 3509г | **test** | ✅ Detected | около 0 ч |
+| 3509г | **test** | ✅ Detected | около 1 ч |
 | 524 | train | ✅ Detected | около 0 ч |
 | 5271г | train | ✅ Detected | около 0 ч |
 
@@ -526,6 +532,7 @@ Run:                                    1      2      3      4
 |---|---|---|---|
 | 1062 | train | ✅ Detected | 26.0 ч |
 | 129л | train | ✅ Detected | 31.5 ч |
+| 1395 | **test** | ✅ Detected | 6.8 ч |
 | 495 | train | ✅ Detected | 13.2 ч |
 | 5144г | train | ✅ Detected | 4.7 ч |
 | 610 | train | ✅ Detected | около 0 ч |
@@ -538,7 +545,13 @@ Run:                                    1      2      3      4
 📊 Первый интервал каждой скважины в основном отчёте: 18/18 detected
 ```
 
-После добавления новых скважин притока в датасете стало 21 размеченных интервала. Основной HTML-отчёт строится по первому интервалу каждой скважины, потому что детекционный пайплайн обрезает ряд по концу первой аномалии для blind-сценария. Полная метрика `evaluate_onset_metrics.py` дополнительно учитывает вторые интервалы; в последнем прогоне не пойманы вторые интервалы `602` и `691`.
+После добавления новых скважин притока в датасете стало 21 размеченных
+интервала. Скважины `902` и `1395` находятся в test split, поэтому последняя
+оценка дает `train = 16/18`, `test = 3/3`, `all = 19/21`. Основной HTML-отчёт
+строится по первому интервалу каждой скважины, потому что детекционный пайплайн
+обрезает ряд по концу первой аномалии для blind-сценария. Полная метрика
+`evaluate_onset_metrics.py` дополнительно учитывает вторые интервалы; в
+последнем прогоне не пойманы вторые интервалы `602` и `691`.
 
 Финальная auto-tune конфигурация для притока:
 
@@ -552,7 +565,7 @@ pressure_trend_weight = 0.0025
 bypass_cooldown_after_clear = false
 ```
 
-#### Солеотложение — PaAno Shared + Salt Deposition Residual
+#### Солеотложение — PaAno Shared + Salt Deposition Conformal/KS
 
 | Скважина | Сплит | Статус | Задержка |
 |---|---|---|---|
@@ -566,35 +579,78 @@ bypass_cooldown_after_clear = false
 | 408 | train | ✅ Detected | ~2.8 ч |
 
 ```
-📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.0156/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
+📊 Hit Rate: 8/9 (88.9%)  |  FAR: 0.0141/день  |  Median delay: 0.03 ч  |  P90 delay ratio: 6.7%
 ```
 
-Фактический GPU-прогон 2026-05-07 после расширения train-only tuning
-`rearm/cooldown/bypass_cooldown_after_clear` выбрал конфигурацию:
+Фактический серверный GPU-прогон 2026-05-07 после добавления
+conformal/tail calibration, KS distribution-shift branch и deterministic
+quality-mode retune:
 
 ```text
-target_far_per_day = 0.5
+Device: cuda (NVIDIA A100-SXM4-40GB, 39.5 GB)
+Auto-tune backend: optuna_tpe_quality
+trials = 192
+n_jobs = 1
+seed = 2027
+selected_reason = seeded_safe_quality_guard
+retune elapsed = 15.4s
+```
+
+Финальная выбранная конфигурация:
+
+```text
+target_far_per_day = 0.1
 min_run_points = 4
-cooldown_hours = 24
+cooldown_hours = 72
 rearm_window_minutes = 720
 ema_alpha = 0.04
 gate_mode = relaxed
 bypass_cooldown_after_clear = false
 fusion_weight_short = 0.6
-salt_trend_weight = 0.02
+salt_trend_weight = 0.01
 ```
 
-Итоговый результат для `salt/paano_shared` стал лучше старого `ensemble` сразу по
-трём эксплуатационным метрикам:
+Архитектура salt-ветки:
+
+```text
+PaAno Shared score
+  + train-tuned salt_deposition_calibrated_fusion_score
+
+salt_deposition_calibrated_fusion_score =
+  max(
+    conformal_tail(feature_residual),
+    conformal_tail(multivariate_residual),
+    conformal_tail(KS_distribution_shift) + robust_tail_excess(KS_distribution_shift)
+  )
+```
+
+Компоненты в score parquet и отчёте:
+
+- `paano_score`, `paano_tail_score`;
+- `salt_deposition_score` — raw diagnostic grouped drift;
+- `salt_feature_residual_tail_score`;
+- `salt_multivariate_residual_tail_score`;
+- `salt_distribution_shift_score`;
+- `salt_distribution_shift_tail_score`;
+- `salt_distribution_shift_excess_score`;
+- `salt_deposition_calibrated_fusion_score`.
+
+Почему нужен `tail_excess`: bounded conformal rank честно калибрует score
+относительно reference, но насыщается около верхней reference-границы. Для соли
+это может потерять силу экстремального drift за пределами reference. Поэтому KS
+branch сохраняет и rank, и robust excess.
+
+Итоговый результат для `salt/paano_shared` стал лучше старого `ensemble` по
+эксплуатационным метрикам FAR, starts и задержке:
 
 | Детектор | Hit-rate | FAR/day | Starts/interval | Median delay | P90 delay ratio |
 |---|---:|---:|---:|---:|---:|
-| `paano_shared + salt_deposition` | 8/8 summary, 8/9 evaluation | 0.0156 | 3.25 summary, 2.89 evaluation | 0.03 ч | 0.0667 |
+| `paano_shared + conformal/KS salt` | 8/8 summary, 8/9 evaluation | 0.0141 | 2.67 evaluation | 0.03 ч | 0.0667 |
 | `ensemble` benchmark | 8/8 summary | 0.0976 | 19.125 | 3.19 ч | 0.5869 |
 
 Поэтому `ensemble` остается только benchmark-детектором и источником идеи
 multivariate residual, а основной production-кандидат для соли теперь
-`paano_shared + salt_deposition`.
+`paano_shared + conformal/KS salt branch`.
 
 ### 8.3 Сводная таблица
 
@@ -604,7 +660,7 @@ multivariate residual, а основной production-кандидат для с
 ├─────────────────┼─────────────────┼───────────┼──────────┼───────────┤
 │ Негерметичность │ PaAno Shared    │  5/5 100% │   0.250  │    5.4%   │
 │ Приток          │ PaAno+Pressure  │ 19/21 90% │   0.067  │   13.9%   │
-│ Соли            │ PaAno+Salt      │  8/9  89% │   0.016  │    6.7%   │
+│ Соли            │ PaAno+Salt KS   │  8/9  89% │   0.014  │    6.7%   │
 └─────────────────┴─────────────────┴───────────┴──────────┴───────────┘
 ```
 
@@ -633,6 +689,10 @@ xychart-beta
 3. 📊 **Самый значимый канал** — канал, который больше всего «помог» обнаружить аномалию
 
 Для притока score-панель дополнительно показывает компоненты `paano_tail_score` и `pressure_trend_score`. Это позволяет отличить нейросетевой сигнал PaAno от физического сигнала по тренду давления.
+
+Для соли score-панель дополнительно показывает `Salt deposition trend` и
+`Salt KS shift`, чтобы отделять общий многоканальный drift от распределительного
+сдвига residual-сигнала.
 
 На графиках отмечены:
 - 🟩 Зелёная линия — фактическое начало аномалии
@@ -705,6 +765,24 @@ python scripts/detection/detect_salt.py \
 ```
 
 Флаг `--retune` означает: заново подобрать пороги (рекомендуется при обновлении данных).
+
+Для финального quality-прогона соли на сервере используется deterministic
+quality-mode:
+
+```bash
+ALMA_RETUNE_MODE=quality \
+ALMA_OPTUNA_QUALITY_TRIALS=192 \
+ALMA_OPTUNA_SEED=2027 \
+CUDA_VISIBLE_DEVICES=1 \
+uv run python scripts/detection/detect_salt.py \
+    --detector paano_shared \
+    --source db/salt_anomaly_database_15min.parquet \
+    --retune
+```
+
+`quality` отличается от fast-mode тем, что использует `n_jobs=1`, фиксированный
+seed и `seeded_safe_quality_guard`. Параллельный TPE (`ALMA_OPTUNA_N_JOBS>1`)
+оставлен для быстрых итераций, но не как финальный production-подбор.
 
 ### 10.3 Генерация отчётов
 
