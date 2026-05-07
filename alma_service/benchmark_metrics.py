@@ -89,6 +89,45 @@ def select_interval_detection(
     return min(inside) if inside else pd.NaT
 
 
+def _median_step(timestamps: pd.Series) -> pd.Timedelta | None:
+    values = pd.to_datetime(timestamps, errors="coerce").dropna().sort_values()
+    if len(values) < 2:
+        return None
+    deltas = values.diff().dropna()
+    if deltas.empty:
+        return None
+    seconds = float(deltas.dt.total_seconds().median())
+    if not np.isfinite(seconds) or seconds <= 0:
+        return None
+    return pd.Timedelta(seconds=seconds)
+
+
+def _false_alarm_episode_gap(
+    score_timestamps: pd.Series,
+    predicted_timestamps: pd.Series,
+    prestart_hours: float,
+) -> pd.Timedelta:
+    step = _median_step(score_timestamps)
+    if step is None:
+        step = _median_step(predicted_timestamps)
+    if step is None:
+        return pd.Timedelta(hours=float(prestart_hours))
+    return max(pd.Timedelta(hours=float(prestart_hours)), step * 6)
+
+
+def _count_time_episodes(times: list[pd.Timestamp], max_gap: pd.Timedelta) -> int:
+    if not times:
+        return 0
+    ordered = sorted(pd.Timestamp(ts) for ts in times)
+    episodes = 1
+    previous = ordered[0]
+    for ts in ordered[1:]:
+        if ts - previous > max_gap:
+            episodes += 1
+        previous = ts
+    return episodes
+
+
 def _safe_metric(value: Any, large: float = 1e9) -> float:
     try:
         numeric = float(value)
@@ -118,6 +157,9 @@ def evaluate_predictions(
     scores_df = scores if scores is not None else pd.DataFrame(columns=["well_id", "timestamp"])
     interval_rows: list[dict[str, Any]] = []
     false_alarms = 0
+    false_alarm_episodes = 0
+    duplicate_starts_inside_interval = 0
+    alerts_inside_intervals = 0
     observed_days_total = 0.0
     start_count = int(len(predictions))
 
@@ -147,14 +189,32 @@ def evaluate_predictions(
             observed_days_total += (obs_end - obs_start).total_seconds() / 86400.0
 
         predicted_times = [pd.Timestamp(ts) for ts in wp["detected_time"].tolist()]
+        false_alarm_times: list[pd.Timestamp] = []
         for ts in predicted_times:
             if not _is_inside_any(ts, wi, prestart_hours=prestart_hours):
                 false_alarms += 1
+                false_alarm_times.append(ts)
+        false_alarm_episodes += _count_time_episodes(
+            false_alarm_times,
+            _false_alarm_episode_gap(
+                score_timestamps=ws["timestamp"] if "timestamp" in ws.columns else pd.Series(dtype="datetime64[ns]"),
+                predicted_timestamps=wp["detected_time"]
+                if "detected_time" in wp.columns
+                else pd.Series(dtype="datetime64[ns]"),
+                prestart_hours=prestart_hours,
+            ),
+        )
 
         for _, row in wi.iterrows():
             start_dt = row["start_date"]
             end_dt = row["end_date"]
-            first_hit = select_interval_detection(predicted_times, start_dt, end_dt, prestart_hours)
+            pre_tol = pd.Timedelta(hours=float(prestart_hours))
+            interval_starts = [ts for ts in predicted_times if start_dt - pre_tol <= ts <= end_dt]
+            interval_start_count = len(interval_starts)
+            interval_duplicates = max(interval_start_count - 1, 0)
+            alerts_inside_intervals += interval_start_count
+            duplicate_starts_inside_interval += interval_duplicates
+            first_hit = min(interval_starts) if interval_starts else pd.NaT
             delay_h = (
                 float((first_hit - start_dt).total_seconds() / 3600.0) if pd.notna(first_hit) else np.nan
             )
@@ -177,6 +237,11 @@ def evaluate_predictions(
                     "delay_hours": delay_h,
                     "abs_delay_hours": abs(delay_h) if np.isfinite(delay_h) else np.nan,
                     "delay_ratio": delay_ratio,
+                    "first_alert_delay_hours": delay_h,
+                    "first_alert_abs_delay_hours": abs(delay_h) if np.isfinite(delay_h) else np.nan,
+                    "first_alert_delay_ratio": delay_ratio,
+                    "alert_count_inside_interval": int(interval_start_count),
+                    "duplicate_starts_inside_interval": int(interval_duplicates),
                     "interval_hours": interval_hours,
                 }
             )
@@ -190,11 +255,26 @@ def evaluate_predictions(
             "start_count": start_count,
             "false_alarms": int(false_alarms),
             "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,
+            "false_alarm_episodes": int(false_alarm_episodes),
+            "episode_false_alarms": int(false_alarm_episodes),
+            "episode_far": float(false_alarm_episodes / observed_days_total) if observed_days_total > 0 else np.nan,
+            "first_alert_far": float(false_alarm_episodes / observed_days_total)
+            if observed_days_total > 0
+            else np.nan,
             "observed_days_total": float(observed_days_total),
             "avg_starts_per_interval": 0.0,
+            "alerts_inside_intervals": int(alerts_inside_intervals),
+            "alerts_per_detected_interval": 0.0,
+            "duplicate_starts_inside_interval": int(duplicate_starts_inside_interval),
+            "duplicate_starts_per_detected_interval": 0.0,
+            "suppressed_rearms_count": int(
+                max(start_count - false_alarm_episodes, 0)
+            ),
             "delay_mae_hours": np.nan,
             "median_abs_delay_hours": np.nan,
             "p90_abs_delay_hours": np.nan,
+            "first_alert_delay_median_hours": np.nan,
+            "first_alert_delay_p90_hours": np.nan,
             "median_delay_ratio": np.nan,
             "p90_delay_ratio": np.nan,
         }
@@ -212,11 +292,28 @@ def evaluate_predictions(
         "start_count": start_count,
         "false_alarms": int(false_alarms),
         "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,
+        "false_alarm_episodes": int(false_alarm_episodes),
+        "episode_false_alarms": int(false_alarm_episodes),
+        "episode_far": float(false_alarm_episodes / observed_days_total) if observed_days_total > 0 else np.nan,
+        "first_alert_far": float(false_alarm_episodes / observed_days_total)
+        if observed_days_total > 0
+        else np.nan,
         "observed_days_total": float(observed_days_total),
         "avg_starts_per_interval": float(start_count / interval_count) if interval_count else 0.0,
+        "alerts_inside_intervals": int(alerts_inside_intervals),
+        "alerts_per_detected_interval": float(alerts_inside_intervals / hit_count) if hit_count else 0.0,
+        "duplicate_starts_inside_interval": int(duplicate_starts_inside_interval),
+        "duplicate_starts_per_detected_interval": float(duplicate_starts_inside_interval / hit_count)
+        if hit_count
+        else 0.0,
+        "suppressed_rearms_count": int(
+            max(start_count - hit_count - false_alarm_episodes, 0)
+        ),
         "delay_mae_hours": float(np.mean(abs_delays)) if len(abs_delays) else np.nan,
         "median_abs_delay_hours": float(np.median(abs_delays)) if len(abs_delays) else np.nan,
         "p90_abs_delay_hours": float(np.quantile(abs_delays, 0.90)) if len(abs_delays) else np.nan,
+        "first_alert_delay_median_hours": float(np.median(abs_delays)) if len(abs_delays) else np.nan,
+        "first_alert_delay_p90_hours": float(np.quantile(abs_delays, 0.90)) if len(abs_delays) else np.nan,
         "median_delay_ratio": float(np.median(delay_ratios)) if len(delay_ratios) else np.nan,
         "p90_delay_ratio": float(np.quantile(delay_ratios, 0.90)) if len(delay_ratios) else np.nan,
     }

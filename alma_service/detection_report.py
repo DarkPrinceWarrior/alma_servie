@@ -548,6 +548,9 @@ def generate_report(
                 <span><b>Доля найденных:</b> {_format_float(100.0 * float(split_payload.get('hit_rate', 0.0)), 1, '%')}</span>
                 <span><b>P90 задержка:</b> {_format_float(split_payload.get('p90_abs_delay_hours'), 1, ' ч')}</span>
                 <span><b>Ложные срабатывания в сутки:</b> {_format_float(split_payload.get('false_alarms_per_day'), 3)}</span>
+                <span><b>Episode FAR:</b> {_format_float(split_payload.get('episode_far'), 3)}</span>
+                <span><b>Повторы внутри интервалов:</b> {escape(str(split_payload.get('duplicate_starts_inside_interval', 0)))}</span>
+                <span><b>Алертов на найденный интервал:</b> {_format_float(split_payload.get('alerts_per_detected_interval'), 2)}</span>
               </div>
             </section>
             """
