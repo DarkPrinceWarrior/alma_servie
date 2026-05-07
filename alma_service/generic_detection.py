@@ -1556,6 +1556,9 @@ def _build_score_rows(
                 "timestamp": ts,
                 "split": run.prepared.split,
                 "score": float(score[idx]),
+                "reference_mask": bool(run.prepared.reference_mask[idx]),
+                "stability_mask": bool(run.prepared.stability_mask[idx]),
+                "onset_allowed_mask": bool(run.prepared.onset_allowed_mask[idx]),
             }
             for name, values in components.items():
                 if len(values) != len(score):

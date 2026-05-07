@@ -572,6 +572,29 @@ bypass_cooldown_after_clear = false
 `0.0666 -> 0.0593`, duplicate starts `57 -> 37`; цена - рост P90 delay ratio до
 `0.185`, что остается внутри эксплуатационного лимита для текущего режима.
 
+Для быстрых итераций без переобучения используется offline onset tuner поверх
+уже сохраненного `*_scores.parquet`. Начиная с версии после 2026-05-07 score
+parquet содержит `reference_mask`, `stability_mask` и `onset_allowed_mask`, что
+позволяет воспроизводить state-machine detection без повторного PaAno scoring:
+
+```bash
+uv run python scripts/evaluation/tune_saved_onset.py \
+    --anomaly pritok \
+    --detector paano_shared \
+    --target-far-per-day 0.5 \
+    --min-run-points 3 \
+    --cooldown-hours 72 \
+    --rearm-window-minutes 60,120,240,480 \
+    --ema-alpha 0.12 \
+    --gate-mode strict \
+    --pressure-trend-weight 0.0025 \
+    --bypass-cooldown-after-clear false \
+    --top-k 5
+```
+
+На серверном `pritok_paano_shared_scores.parquet` такая проверка занимает около
+6 секунд на 4 конфигурации вместо повторного обучения PaAno.
+
 #### Солеотложение — PaAno Shared + Salt Deposition Conformal/KS
 
 | Скважина | Сплит | Статус | Задержка |
