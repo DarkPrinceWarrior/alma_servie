@@ -16,6 +16,12 @@ from torch import nn
 
 SEED = 2027
 
+PAANO_BATCH_SIZE = 256
+PAANO_LR = 1e-3
+PAANO_NUM_ITERS = 200
+PAANO_TOP_K = 5
+PAANO_MEMORY_BANK_RATIO = 0.10
+
 ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
 
 try:  # pragma: no branch - simple runtime guard

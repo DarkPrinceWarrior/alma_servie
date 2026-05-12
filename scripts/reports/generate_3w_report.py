@@ -105,32 +105,38 @@ def plot_one_instance(
                    line=dict(color="#2ca02c", width=1, dash="dot"), opacity=0.55),
         row=1, col=1,
     )
+    score_max = float(scores_sub["score"].max()) if len(scores_sub) else 1.0
     if interval_row is not None:
         start = pd.Timestamp(interval_row["start_date"])
-        fig.add_vline(
-            x=start, line=dict(color="red", width=2, dash="dash"),
-            annotation_text="undesirable_start", annotation_position="top right",
+        fig.add_trace(
+            go.Scatter(x=[start, start], y=[0, score_max], mode="lines",
+                       line=dict(color="red", width=2, dash="dash"),
+                       name="undesirable_start", showlegend=True),
             row=1, col=1,
         )
         if pd.notna(interval_row.get("transient_start_ts")):
-            fig.add_vline(
-                x=pd.Timestamp(interval_row["transient_start_ts"]),
-                line=dict(color="orange", width=1, dash="dot"),
-                annotation_text="transient", annotation_position="bottom right",
+            ts_t = pd.Timestamp(interval_row["transient_start_ts"])
+            fig.add_trace(
+                go.Scatter(x=[ts_t, ts_t], y=[0, score_max], mode="lines",
+                           line=dict(color="orange", width=1, dash="dot"),
+                           name="transient", showlegend=True),
                 row=1, col=1,
             )
         if pd.notna(interval_row.get("event_start_ts")):
-            fig.add_vline(
-                x=pd.Timestamp(interval_row["event_start_ts"]),
-                line=dict(color="purple", width=1, dash="dot"),
-                annotation_text="event", annotation_position="bottom right",
+            ts_e = pd.Timestamp(interval_row["event_start_ts"])
+            fig.add_trace(
+                go.Scatter(x=[ts_e, ts_e], y=[0, score_max], mode="lines",
+                           line=dict(color="purple", width=1, dash="dot"),
+                           name="event", showlegend=True),
                 row=1, col=1,
             )
-    for _, st in starts_sub.iterrows():
-        fig.add_vline(
-            x=pd.Timestamp(st["detected_time"]),
-            line=dict(color="green", width=1, dash="solid"),
-            annotation_text="detected", annotation_position="top left",
+    for i_st, st in starts_sub.iterrows():
+        ts_d = pd.Timestamp(st["detected_time"])
+        fig.add_trace(
+            go.Scatter(x=[ts_d, ts_d], y=[0, score_max], mode="lines",
+                       line=dict(color="green", width=1),
+                       name="detected" if i_st == starts_sub.index[0] else "detected_repeat",
+                       showlegend=(i_st == starts_sub.index[0])),
             row=1, col=1,
         )
     fig.add_trace(

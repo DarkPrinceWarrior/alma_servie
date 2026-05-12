@@ -162,21 +162,30 @@ def score_wells(
             continue
         well_matrix = well.feature_matrix[:, col_indices]
         ref_matrix = well_matrix[well.reference_mask]
-        if len(ref_matrix) < state.patch_long + 2:
-            ref_matrix = well_matrix[: max(state.patch_long * 4, 256)]
+        min_ref_required = max(state.patch_long * 8, 512)
+        if len(ref_matrix) < min_ref_required:
+            ref_matrix = well_matrix[: max(min_ref_required, len(well_matrix) // 2)]
             if len(ref_matrix) < state.patch_long + 2:
                 print(f"[score] {iid} too short for ref ({len(ref_matrix)})", flush=True)
                 continue
-        score_short = _score_well_single_scale(
-            state.model_short, well_matrix, ref_matrix,
-            state.train_mean_short, state.train_std_short,
-            state.patch_short, device, verbose=False,
-        )
-        score_long = _score_well_single_scale(
-            state.model_long, well_matrix, ref_matrix,
-            state.train_mean_long, state.train_std_long,
-            state.patch_long, device, verbose=False,
-        )
+        try:
+            score_short = _score_well_single_scale(
+                state.model_short, well_matrix, ref_matrix,
+                state.train_mean_short, state.train_std_short,
+                state.patch_short, device, verbose=False,
+            )
+        except Exception as exc:
+            print(f"[score] {iid} short failed: {exc}", flush=True)
+            continue
+        try:
+            score_long = _score_well_single_scale(
+                state.model_long, well_matrix, ref_matrix,
+                state.train_mean_long, state.train_std_long,
+                state.patch_long, device, verbose=False,
+            )
+        except Exception as exc:
+            print(f"[score] {iid} long failed (using short only): {exc}", flush=True)
+            score_long = score_short
         fused = fuse_scores(score_short, score_long, weight_short)
         df = pd.DataFrame(
             {
