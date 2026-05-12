@@ -295,17 +295,46 @@ def _feature_residual_score(
     if int(reference_mask.sum()) < 32 or prepared.feature_matrix.shape[1] < 2:
         return np.zeros(len(reference_mask), dtype=np.float32), 0
 
-    from alma_service.generic_detectors import PCASPEDetector
-
-    detector = PCASPEDetector()
+    matrix = np.asarray(prepared.feature_matrix, dtype=np.float32)
+    matrix = np.nan_to_num(matrix, nan=0.0, posinf=0.0, neginf=0.0)
+    ref = matrix[reference_mask]
+    if ref.shape[0] < 32 or ref.shape[1] < 2:
+        return np.zeros(len(reference_mask), dtype=np.float32), 0
     try:
-        detector.fit_reference(prepared.feature_matrix[reference_mask])
-        output = detector.score_stream(prepared.feature_matrix)
+        center = np.mean(ref, axis=0, keepdims=True).astype(np.float32)
+        scale = np.std(ref, axis=0, keepdims=True).astype(np.float32)
+        scale = np.where(scale < EPS, 1.0, scale)
+        ref_norm = (ref - center) / scale
+        all_norm = (matrix - center) / scale
+        _, singular, vt = np.linalg.svd(ref_norm, full_matrices=False)
     except (RuntimeError, ValueError, np.linalg.LinAlgError):
         return np.zeros(len(reference_mask), dtype=np.float32), 0
+    if len(singular) == 0 or not np.isfinite(singular).any():
+        return np.zeros(len(reference_mask), dtype=np.float32), 0
 
-    n_components = int(output.detail.get("n_components", 0))
-    score = np.nan_to_num(output.primary, nan=0.0, posinf=0.0, neginf=0.0)
+    variance = np.square(singular)
+    total_variance = float(np.sum(variance))
+    if total_variance <= EPS:
+        return np.zeros(len(reference_mask), dtype=np.float32), 0
+    explained = np.cumsum(variance) / total_variance
+    max_components = max(1, min(24, ref_norm.shape[1] - 1, ref_norm.shape[0] - 1))
+    n_components = int(np.searchsorted(explained, 0.95) + 1)
+    n_components = max(1, min(max_components, n_components))
+
+    components = vt[:n_components]
+    projected = all_norm @ components.T
+    reconstructed = projected @ components
+    residual = all_norm - reconstructed
+    spe = np.sum(np.square(residual), axis=1).astype(np.float32)
+    score_scale = np.maximum(
+        np.square(singular[:n_components]) / max(float(ref_norm.shape[0] - 1), 1.0),
+        EPS,
+    )
+    t2 = np.sum(np.square(projected) / score_scale, axis=1).astype(np.float32)
+    spe_score = _robust_excess_score(spe, spe[reference_mask])
+    t2_score = _robust_excess_score(t2, t2[reference_mask])
+    score = np.maximum(spe_score, t2_score)
+    score = np.nan_to_num(score, nan=0.0, posinf=0.0, neginf=0.0)
     return score.astype(np.float32), n_components
 
 

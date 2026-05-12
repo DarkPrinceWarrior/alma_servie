@@ -3,11 +3,7 @@
 
 export type AnomalyType = "negermet" | "pritok" | "salt";
 export type SplitType = "train" | "test";
-export type DetectorType =
-  | "pca_spe"
-  | "paano_feat"
-  | "paano_shared"
-  | "ensemble";
+export type DetectorType = "paano_shared";
 export type RunStatus =
   | "pending"
   | "running"

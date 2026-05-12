@@ -38,7 +38,7 @@ numba, optuna и т.п.) в бэк **не тащим** — `pyproject.toml` ко
 - **Лёгкие модули** (`alma_service.paths`, `alma_service.dataset_config`)
   импортируем напрямую в бэке через `from alma_service.paths import PROJECT_ROOT`.
 - **Тяжёлые модули** (`alma_service.generic_detection`,
-  `alma_service.paano_pipeline`, `alma_service.onset_detection` и
+  `alma_service.onset_detection` и
   вызывающие их `scripts/detection/*.py`, `scripts/datasets/*.py`,
   `scripts/reports/*.py`) — **не импортируем** в api-контейнер.
   Они запускаются через `asyncio.create_subprocess_exec` в отдельном

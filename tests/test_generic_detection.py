@@ -23,8 +23,8 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         }
 
         self.assertGreater(
-            _operational_score_key("pritok", "pca_spe", calmer),
-            _operational_score_key("pritok", "pca_spe", spamy),
+            _operational_score_key("pritok", "paano_shared", calmer),
+            _operational_score_key("pritok", "paano_shared", spamy),
         )
 
     def test_salt_operational_score_key_prefers_early_onset_with_feasible_noise(self) -> None:
@@ -44,8 +44,8 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         }
 
         self.assertGreater(
-            _operational_score_key("salt", "pca_spe", earlier),
-            _operational_score_key("salt", "pca_spe", cleaner_but_later),
+            _operational_score_key("salt", "paano_shared", earlier),
+            _operational_score_key("salt", "paano_shared", cleaner_but_later),
         )
 
     def test_salt_operational_score_key_rejects_extreme_repeated_starts(self) -> None:
@@ -65,8 +65,8 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         }
 
         self.assertGreater(
-            _operational_score_key("salt", "pca_spe", controlled),
-            _operational_score_key("salt", "pca_spe", noisy),
+            _operational_score_key("salt", "paano_shared", controlled),
+            _operational_score_key("salt", "paano_shared", noisy),
         )
 
     def test_operational_score_key_penalizes_extreme_delay_before_small_far_gain(self) -> None:
@@ -86,8 +86,8 @@ class GenericDetectionObjectiveTests(unittest.TestCase):
         }
 
         self.assertGreater(
-            _operational_score_key("salt", "pca_spe", on_time),
-            _operational_score_key("salt", "pca_spe", too_late),
+            _operational_score_key("salt", "paano_shared", on_time),
+            _operational_score_key("salt", "paano_shared", too_late),
         )
 
     def test_robust_tuning_score_key_penalizes_single_well_failure(self) -> None:

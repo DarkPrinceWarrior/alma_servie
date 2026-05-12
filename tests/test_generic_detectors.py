@@ -1,26 +1,28 @@
 from __future__ import annotations
 
+import numpy as np
 import unittest
 
-import numpy as np
-import torch
-
-from alma_service.generic_detectors import DetectorScoreOutput, PCASPEDetector
+from alma_service.generic_detectors import DetectorScoreOutput, _ensure_2d_float32
 
 
 class GenericDetectorTests(unittest.TestCase):
-    def test_pca_spe_scores_anomalous_tail_higher(self) -> None:
-        rng = np.random.default_rng(7)
-        ref = rng.normal(0.0, 0.2, size=(80, 4)).astype(np.float32)
-        normal = rng.normal(0.0, 0.2, size=(20, 4)).astype(np.float32)
-        anomaly = rng.normal(2.5, 0.2, size=(10, 4)).astype(np.float32)
-        series = np.vstack([ref, normal, anomaly]).astype(np.float32)
+    def test_score_output_keeps_primary_and_components(self) -> None:
+        primary = np.array([0.0, 1.0, 2.0], dtype=np.float32)
+        output = DetectorScoreOutput(
+            primary=primary,
+            components={"paano_score": primary.copy()},
+            detail={"detector": "paano_shared"},
+        )
 
-        detector = PCASPEDetector()
-        detector.fit_reference(ref)
-        output = detector.score_stream(series)
+        self.assertEqual(output.detail["detector"], "paano_shared")
+        self.assertTrue(np.array_equal(output.primary, output.components["paano_score"]))
 
-        self.assertGreater(float(output.primary[-1]), float(np.median(output.primary[:80])))
+    def test_ensure_2d_float32_replaces_non_finite_values(self) -> None:
+        arr = _ensure_2d_float32(np.array([[1.0, np.nan], [np.inf, -np.inf]]))
+
+        self.assertEqual(arr.dtype, np.float32)
+        self.assertTrue(np.isfinite(arr).all())
 
 
 if __name__ == "__main__":

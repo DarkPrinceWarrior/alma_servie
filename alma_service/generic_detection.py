@@ -27,10 +27,8 @@ from alma_service.benchmark_metrics import (
 from alma_service.detection_artifacts import (
     DEFAULT_DETECTOR,
     DETECTOR_KEYS,
-    LOCAL_DETECTOR_KEYS,
     benchmark_summary_path,
     config_path,
-    legacy_summary_path,
     load_json,
     normalize_detector_key,
     predicted_starts_path,
@@ -43,8 +41,6 @@ from alma_service.detection_artifacts import (
 from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
 from alma_service.generic_detectors import (
     DetectorScoreOutput,
-    PaAnoFeatureDetector,
-    PCASPEDetector,
     SharedPaAnoDetector,
     set_seed,
 )
@@ -111,7 +107,6 @@ SALT_SHARED_ONSET_TUNE_GRID = {
     "bypass_cooldown_after_clear": [True, False],
 }
 
-PAANO_WEIGHT_GRID = [0.40, 0.60, 0.75]
 PRESSURE_TREND_WEIGHT_GRID = [0.0, 0.0025, 0.005]
 NEGERMET_SIGNATURE_WEIGHT_GRID = [0.0, 0.0025, 0.005]
 PHYSICAL_BRANCH_WEIGHT_GRIDS = {
@@ -150,13 +145,7 @@ ANOMALY_RUNTIME_CONFIG = {
         "max_p90_delay_ratio": 0.20,
     },
 }
-LOCAL_DEFAULT_PRIORITY = {
-    "pca_spe": 4,
-    "paano_feat": 3,
-    "paano_shared": 5,
-    "ensemble": 6,
-}
-CUDA_REQUIRED_DETECTORS = {"paano_feat", "paano_shared", "ensemble"}
+CUDA_REQUIRED_DETECTORS = {"paano_shared"}
 
 
 def _resolve_torch_device(detector_key: str, verbose: bool = True) -> torch.device:
@@ -191,7 +180,7 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     cfg = BASE_ONSET_CONFIG.copy()
     profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
     cfg.update(profile.get("defaults", {}))
-    if detector_key in ("paano_feat", "paano_shared", "ensemble"):
+    if detector_key == "paano_shared":
         cfg["fusion_weight_short"] = 0.60
     return cfg
 
@@ -231,7 +220,7 @@ def _operational_score_key(anomaly_key: str, detector_key: str, summary: dict[st
     far_over = max(far - max_far, 0.0)
     starts_over = max(starts - max_starts, 0.0)
     delay_over = max(p90_ratio - max_delay_ratio, 0.0)
-    priority = LOCAL_DEFAULT_PRIORITY.get(detector_key, 0)
+    priority = 1 if detector_key == DEFAULT_DETECTOR else 0
     if anomaly_key == "salt":
         return (
             hit_count,
@@ -313,20 +302,6 @@ def load_intervals(spec: DetectionSpec, required: bool = True) -> pd.DataFrame:
     return load_intervals_df(src)
 
 
-def _build_detector(anomaly_key: str, detector_key: str, device: torch.device, verbose: bool = False):
-    runtime_cfg = _runtime_config(anomaly_key)
-    if detector_key == "paano_feat":
-        return PaAnoFeatureDetector(
-            device=device,
-            patch_short=int(runtime_cfg["paano_patch_short"]),
-            patch_long=int(runtime_cfg["paano_patch_long"]),
-            verbose=verbose,
-        )
-    if detector_key == "pca_spe":
-        return PCASPEDetector()
-    raise ValueError(f"Unsupported local detector: {detector_key}")
-
-
 def _prepare_all_wells(
     spec: DetectionSpec,
     df: pd.DataFrame,
@@ -384,6 +359,19 @@ def _prepare_all_wells(
     return prepared_runs
 
 
+def _merge_physical_output(
+    base: DetectorScoreOutput,
+    fused: np.ndarray,
+    components: dict[str, np.ndarray],
+    detail: dict[str, Any],
+) -> DetectorScoreOutput:
+    return DetectorScoreOutput(
+        primary=np.asarray(fused, dtype=np.float32),
+        components={**base.components, **components},
+        detail={**base.detail, **detail},
+    )
+
+
 def _build_local_runs(
     anomaly_key: str,
     detector_key: str,
@@ -392,182 +380,90 @@ def _build_local_runs(
     verbose: bool,
     shared_state: Any = None,
 ) -> dict[str, PreparedDetectorRun]:
+    if detector_key != "paano_shared":
+        raise ValueError(f"Unsupported production detector: {detector_key}")
+    if shared_state is None:
+        raise ValueError("paano_shared requires a trained or loaded shared encoder state.")
+
+    from alma_service.shared_encoder import select_shared_columns
+
     out: dict[str, PreparedDetectorRun] = {}
     for well_id, prepared in prepared_runs.items():
-        if detector_key == "ensemble" and shared_state is not None:
-            # --- Ensemble: PaAno Shared + PCA/SPE score fusion ---
-            from alma_service.shared_encoder import select_shared_columns
-
-            # 1. PaAno Shared score
-            X_proj = select_shared_columns(
-                prepared.feature_columns,
-                prepared.feature_matrix,
-                shared_state.shared_channels,
+        X_proj = select_shared_columns(
+            prepared.feature_columns,
+            prepared.feature_matrix,
+            shared_state.shared_channels,
+        )
+        detector = SharedPaAnoDetector(
+            shared_state=shared_state,
+            device=device,
+            verbose=verbose,
+        )
+        detector.fit_reference(X_proj[prepared.reference_mask], mask_ref=prepared.reference_mask)
+        score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
+        if anomaly_key == "pritok":
+            from alma_service.pressure_trend import (
+                build_pressure_trend_branch,
+                fuse_model_with_pressure_trend,
             )
-            paano_det = SharedPaAnoDetector(
-                shared_state=shared_state, device=device, verbose=verbose,
+
+            pressure_output = build_pressure_trend_branch(prepared)
+            fused, fusion_components, fusion_detail = fuse_model_with_pressure_trend(
+                model_score=score_output.primary,
+                pressure_output=pressure_output,
+                reference_mask=prepared.reference_mask,
             )
-            paano_det.fit_reference(X_proj[prepared.reference_mask])
-            paano_out = paano_det.score_stream(X_proj)
-
-            # 2. PCA/SPE score
-            pca_det = PCASPEDetector()
-            X_ref = prepared.feature_matrix[prepared.reference_mask]
-            pca_det.fit_reference(X_ref)
-            pca_out = pca_det.score_stream(prepared.feature_matrix)
-
-            # 3. Fuse: normalize both to z-scores, weighted average
-            alpha = 0.6  # PaAno weight
-            paano_z = paano_out.primary
-            pca_z = pca_out.primary
-            fused = alpha * paano_z + (1.0 - alpha) * pca_z
-
-            score_output = DetectorScoreOutput(
-                primary=fused.astype(np.float32),
-                components={
-                    "paano_score": paano_out.primary.astype(np.float32),
-                    "pca_score": pca_out.primary.astype(np.float32),
-                },
-                detail={"ensemble_alpha": alpha},
+            score_output = _merge_physical_output(score_output, fused, fusion_components, fusion_detail)
+        elif anomaly_key == "negermet":
+            from alma_service.negermet_signature import (
+                build_negermet_signature_branch,
+                fuse_model_with_negermet_signature,
             )
-            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
 
-        elif detector_key == "paano_shared" and shared_state is not None:
-            from alma_service.shared_encoder import select_shared_columns
-            # Project well features to shared channel set
-            X_proj = select_shared_columns(
-                prepared.feature_columns,
-                prepared.feature_matrix,
-                shared_state.shared_channels,
+            signature_output = build_negermet_signature_branch(prepared)
+            fused, fusion_components, fusion_detail = fuse_model_with_negermet_signature(
+                model_score=score_output.primary,
+                signature_output=signature_output,
+                reference_mask=prepared.reference_mask,
             )
-            detector = SharedPaAnoDetector(
-                shared_state=shared_state,
-                device=device,
-                verbose=verbose,
+            score_output = _merge_physical_output(score_output, fused, fusion_components, fusion_detail)
+        elif anomaly_key == "salt":
+            from alma_service.salt_trend import (
+                build_salt_deposition_branch,
+                fuse_model_with_salt_trend,
             )
-            X_ref_proj = X_proj[prepared.reference_mask]
-            detector.fit_reference(X_ref_proj, mask_ref=prepared.reference_mask)
-            score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
-            if anomaly_key == "pritok":
-                from alma_service.pressure_trend import (
-                    build_pressure_trend_branch,
-                    fuse_model_with_pressure_trend,
-                )
 
-                pressure_output = build_pressure_trend_branch(prepared)
-                fused, fusion_components, fusion_detail = fuse_model_with_pressure_trend(
-                    model_score=score_output.primary,
-                    pressure_output=pressure_output,
-                    reference_mask=prepared.reference_mask,
-                )
-                score_output = DetectorScoreOutput(
-                    primary=fused.astype(np.float32),
-                    components={
-                        **score_output.components,
-                        **fusion_components,
-                    },
-                    detail={
-                        **score_output.detail,
-                        **fusion_detail,
-                    },
-                )
-            elif anomaly_key == "negermet":
-                from alma_service.negermet_signature import (
-                    build_negermet_signature_branch,
-                    fuse_model_with_negermet_signature,
-                )
-
-                signature_output = build_negermet_signature_branch(prepared)
-                fused, fusion_components, fusion_detail = fuse_model_with_negermet_signature(
-                    model_score=score_output.primary,
-                    signature_output=signature_output,
-                    reference_mask=prepared.reference_mask,
-                )
-                score_output = DetectorScoreOutput(
-                    primary=fused.astype(np.float32),
-                    components={
-                        **score_output.components,
-                        **fusion_components,
-                    },
-                    detail={
-                        **score_output.detail,
-                        **fusion_detail,
-                    },
-                )
-            elif anomaly_key == "salt":
-                from alma_service.salt_trend import (
-                    build_salt_deposition_branch,
-                    fuse_model_with_salt_trend,
-                )
-
-                salt_output = build_salt_deposition_branch(prepared)
-                fused, fusion_components, fusion_detail = fuse_model_with_salt_trend(
-                    model_score=score_output.primary,
-                    salt_output=salt_output,
-                    reference_mask=prepared.reference_mask,
-                )
-                score_output = DetectorScoreOutput(
-                    primary=fused.astype(np.float32),
-                    components={
-                        **score_output.components,
-                        **fusion_components,
-                    },
-                    detail={
-                        **score_output.detail,
-                        **fusion_detail,
-                    },
-                )
-            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
-        else:
-            detector = _build_detector(anomaly_key, detector_key, device=device, verbose=verbose)
-            X_ref = prepared.feature_matrix[prepared.reference_mask]
-            detector.fit_reference(X_ref, mask_ref=prepared.reference_mask)
-            score_output = detector.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
-            out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
+            salt_output = build_salt_deposition_branch(prepared)
+            fused, fusion_components, fusion_detail = fuse_model_with_salt_trend(
+                model_score=score_output.primary,
+                salt_output=salt_output,
+                reference_mask=prepared.reference_mask,
+            )
+            score_output = _merge_physical_output(score_output, fused, fusion_components, fusion_detail)
+        out[well_id] = PreparedDetectorRun(prepared=prepared, score_output=score_output)
     return out
 
 
 def _score_for_config(run: PreparedDetectorRun, detector_key: str, cfg: dict[str, Any]) -> np.ndarray:
-    if detector_key == "paano_shared":
-        pressure_score = run.score_output.components.get("pressure_trend_score")
-        model_score = run.score_output.components.get("paano_score")
-        if pressure_score is not None and model_score is not None:
-            pressure_weight = float(cfg.get("pressure_trend_weight", 0.0))
-            if pressure_weight <= 0.0:
-                return np.asarray(model_score, dtype=np.float32)
-            return (
-                np.asarray(model_score, dtype=np.float32)
-                + pressure_weight * np.asarray(pressure_score, dtype=np.float32)
-            ).astype(np.float32)
-        signature_score = run.score_output.components.get("negermet_signature_score")
-        if signature_score is not None and model_score is not None:
-            signature_weight = float(cfg.get("negermet_signature_weight", 0.0))
-            if signature_weight <= 0.0:
-                return np.asarray(model_score, dtype=np.float32)
-            return (
-                np.asarray(model_score, dtype=np.float32)
-                + signature_weight * np.asarray(signature_score, dtype=np.float32)
-            ).astype(np.float32)
-        salt_score = run.score_output.components.get("salt_deposition_calibrated_fusion_score")
-        if salt_score is not None and model_score is not None:
-            salt_weight = float(cfg.get("salt_trend_weight", 0.0))
-            if salt_weight <= 0.0:
-                return np.asarray(model_score, dtype=np.float32)
-            return (
-                np.asarray(model_score, dtype=np.float32)
-                + salt_weight * np.asarray(salt_score, dtype=np.float32)
-            ).astype(np.float32)
+    if detector_key != "paano_shared":
+        raise ValueError(f"Unsupported production detector: {detector_key}")
+
+    model_score = run.score_output.components.get("paano_score")
+    if model_score is None:
         return run.score_output.primary.astype(np.float32)
 
-    if detector_key != "paano_feat":
-        return run.score_output.primary.astype(np.float32)
-
-    short_score = run.score_output.components.get("paano_short")
-    long_score = run.score_output.components.get("paano_long")
-    if short_score is None or long_score is None:
-        return run.score_output.primary.astype(np.float32)
-    weight = float(cfg.get("fusion_weight_short", 0.60))
-    return (weight * short_score + (1.0 - weight) * long_score).astype(np.float32)
+    physical_components = (
+        ("pressure_trend_weight", "pressure_trend_score"),
+        ("negermet_signature_weight", "negermet_signature_score"),
+        ("salt_trend_weight", "salt_deposition_calibrated_fusion_score"),
+    )
+    score = np.asarray(model_score, dtype=np.float32).copy()
+    for weight_key, component_key in physical_components:
+        component = run.score_output.components.get(component_key)
+        weight = float(cfg.get(weight_key, 0.0))
+        if component is not None and weight > 0.0:
+            score = score + weight * np.asarray(component, dtype=np.float32)
+    return score.astype(np.float32)
 
 
 def _detect_starts_for_run(
@@ -603,26 +499,28 @@ def _detect_starts_for_run(
 
 
 def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, Any]]:
+    if detector_key != "paano_shared":
+        raise ValueError(f"Unsupported production detector: {detector_key}")
+
     candidates: list[dict[str, Any]] = []
-    weight_grid = PAANO_WEIGHT_GRID if detector_key == "paano_feat" else [None]
     pressure_weight_grid = (
         PRESSURE_TREND_WEIGHT_GRID
-        if anomaly_key == "pritok" and detector_key == "paano_shared"
+        if anomaly_key == "pritok"
         else [None]
     )
     negermet_signature_weight_grid = (
         NEGERMET_SIGNATURE_WEIGHT_GRID
-        if anomaly_key == "negermet" and detector_key == "paano_shared"
+        if anomaly_key == "negermet"
         else [None]
     )
     salt_trend_weight_grid = (
         SALT_TREND_WEIGHT_GRID
-        if anomaly_key == "salt" and detector_key == "paano_shared"
+        if anomaly_key == "salt"
         else [None]
     )
     grid = (
         {key: list(values) for key, values in SALT_SHARED_ONSET_TUNE_GRID.items()}
-        if anomaly_key == "salt" and detector_key == "paano_shared"
+        if anomaly_key == "salt"
         else _onset_tune_grid(anomaly_key)
     )
     default_cfg = _default_onset_config(anomaly_key, detector_key)
@@ -637,35 +535,32 @@ def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, An
                     for ema_alpha in grid["ema_alpha"]:
                         for gate_mode in grid["gate_mode"]:
                             for bypass_cooldown_after_clear in bypass_grid:
-                                for fusion_weight_short in weight_grid:
-                                    for pressure_trend_weight in pressure_weight_grid:
-                                        for negermet_signature_weight in negermet_signature_weight_grid:
-                                            for salt_trend_weight in salt_trend_weight_grid:
-                                                cfg = default_cfg.copy()
-                                                cfg.update(
-                                                    {
-                                                        "target_far_per_day": float(target_far_per_day),
-                                                        "min_run_points": int(min_run_points),
-                                                        "cooldown_hours": float(cooldown_hours),
-                                                        "rearm_window_minutes": float(rearm_window_minutes),
-                                                        "ema_alpha": float(ema_alpha),
-                                                        "gate_mode": str(gate_mode),
-                                                        "bypass_cooldown_after_clear": bool(
-                                                            bypass_cooldown_after_clear
-                                                        ),
-                                                    }
+                                for pressure_trend_weight in pressure_weight_grid:
+                                    for negermet_signature_weight in negermet_signature_weight_grid:
+                                        for salt_trend_weight in salt_trend_weight_grid:
+                                            cfg = default_cfg.copy()
+                                            cfg.update(
+                                                {
+                                                    "target_far_per_day": float(target_far_per_day),
+                                                    "min_run_points": int(min_run_points),
+                                                    "cooldown_hours": float(cooldown_hours),
+                                                    "rearm_window_minutes": float(rearm_window_minutes),
+                                                    "ema_alpha": float(ema_alpha),
+                                                    "gate_mode": str(gate_mode),
+                                                    "bypass_cooldown_after_clear": bool(
+                                                        bypass_cooldown_after_clear
+                                                    ),
+                                                }
+                                            )
+                                            if pressure_trend_weight is not None:
+                                                cfg["pressure_trend_weight"] = float(pressure_trend_weight)
+                                            if negermet_signature_weight is not None:
+                                                cfg["negermet_signature_weight"] = float(
+                                                    negermet_signature_weight
                                                 )
-                                                if fusion_weight_short is not None:
-                                                    cfg["fusion_weight_short"] = float(fusion_weight_short)
-                                                if pressure_trend_weight is not None:
-                                                    cfg["pressure_trend_weight"] = float(pressure_trend_weight)
-                                                if negermet_signature_weight is not None:
-                                                    cfg["negermet_signature_weight"] = float(
-                                                        negermet_signature_weight
-                                                    )
-                                                if salt_trend_weight is not None:
-                                                    cfg["salt_trend_weight"] = float(salt_trend_weight)
-                                                candidates.append(cfg)
+                                            if salt_trend_weight is not None:
+                                                cfg["salt_trend_weight"] = float(salt_trend_weight)
+                                            candidates.append(cfg)
     return candidates
 
 
@@ -685,7 +580,6 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
     far_over = max(far - max_far, 0.0)
     starts_over = max(starts - max_starts, 0.0)
     delay_over = max(p90_ratio - max_delay_ratio, 0.0)
-    priority = float(LOCAL_DEFAULT_PRIORITY.get(detector_key, 0))
     return (
         hits * 1_000_000_000.0
         + feasible_delay * 10_000_000.0
@@ -698,7 +592,6 @@ def _optuna_objective_value(anomaly_key: str, detector_key: str, summary: dict[s
         - starts * 100.0
         - p90_abs_delay
         - far * 100.0
-        + priority * 1e-3
     )
 
 
@@ -816,7 +709,7 @@ def _tuning_n_jobs(anomaly_key: str, detector_key: str, mode: str) -> int:
         n_jobs = 1
     if n_jobs < 1:
         return 1
-    if anomaly_key == "salt" and detector_key == "paano_shared":
+    if anomaly_key == "salt":
         return min(n_jobs, 16)
     return min(n_jobs, 8)
 
@@ -910,9 +803,12 @@ def _robust_optuna_objective_value(
 
 
 def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
+    if detector_key != "paano_shared":
+        raise ValueError(f"Unsupported production detector: {detector_key}")
+
     grid = (
         SALT_SHARED_ONSET_TUNE_GRID
-        if anomaly_key == "salt" and detector_key == "paano_shared"
+        if anomaly_key == "salt"
         else _onset_tune_grid(anomaly_key)
     )
     cfg = _default_onset_config(anomaly_key, detector_key)
@@ -941,22 +837,18 @@ def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> d
                 grid["bypass_cooldown_after_clear"],
             )
         )
-    if detector_key == "paano_feat":
-        cfg["fusion_weight_short"] = float(
-            trial.suggest_categorical("fusion_weight_short", PAANO_WEIGHT_GRID)
-        )
-    if anomaly_key == "pritok" and detector_key == "paano_shared":
+    if anomaly_key == "pritok":
         cfg["pressure_trend_weight"] = float(
             trial.suggest_categorical("pressure_trend_weight", PRESSURE_TREND_WEIGHT_GRID)
         )
-    if anomaly_key == "negermet" and detector_key == "paano_shared":
+    if anomaly_key == "negermet":
         cfg["negermet_signature_weight"] = float(
             trial.suggest_categorical(
                 "negermet_signature_weight",
                 NEGERMET_SIGNATURE_WEIGHT_GRID,
             )
         )
-    if anomaly_key == "salt" and detector_key == "paano_shared":
+    if anomaly_key == "salt":
         cfg["salt_trend_weight"] = float(
             trial.suggest_categorical("salt_trend_weight", SALT_TREND_WEIGHT_GRID)
         )
@@ -984,8 +876,8 @@ def _tune_config_with_optuna(
     per_well_intervals = _build_per_well_tuning_intervals(train_intervals)
     starts_cache: dict[tuple[str, tuple[tuple[str, Any], ...]], list[pd.Timestamp]] = {}
     objective_calls = 0
-    n_trials = 48 if detector_key == "paano_feat" else 36
-    if anomaly_key == "pritok" and detector_key == "paano_shared":
+    n_trials = 36
+    if anomaly_key == "pritok":
         n_trials = 72
         for seed_cfg, seeded_safe in (
             ({
@@ -1073,7 +965,7 @@ def _tune_config_with_optuna(
             study.enqueue_trial(seed_cfg, user_attrs={"seeded_safe": seeded_safe})
         if mode == RETUNE_MODE_QUALITY:
             n_trials = max(n_trials, 144)
-    elif anomaly_key == "negermet" and detector_key == "paano_shared":
+    elif anomaly_key == "negermet":
         n_trials = 48
         for seed_cfg in (
             {
@@ -1105,7 +997,7 @@ def _tune_config_with_optuna(
             },
         ):
             study.enqueue_trial(seed_cfg)
-    elif anomaly_key == "salt" and detector_key == "paano_shared":
+    elif anomaly_key == "salt":
         n_trials = 96
         for seed_cfg, seeded_safe in (
             ({
@@ -1264,7 +1156,7 @@ def _tune_config_with_optuna(
 
     selected = leaderboard[0]
     selected_reason = "best_score_key"
-    if mode == RETUNE_MODE_QUALITY and anomaly_key == "pritok" and detector_key == "paano_shared":
+    if mode == RETUNE_MODE_QUALITY and anomaly_key == "pritok":
         train_interval_count = max(int(train_intervals.shape[0]), 0)
         min_hit_count = max(train_interval_count - 2, 0)
         seeded_safe_rows = [
@@ -1288,7 +1180,7 @@ def _tune_config_with_optuna(
                 reverse=True,
             )[0]
             selected_reason = "pritok_seeded_quality_guard"
-    elif mode == RETUNE_MODE_QUALITY and anomaly_key == "salt" and detector_key == "paano_shared":
+    elif mode == RETUNE_MODE_QUALITY and anomaly_key == "salt":
         seeded_safe_rows = [
             row
             for row in leaderboard
@@ -1376,8 +1268,6 @@ def _tune_config_with_grid(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     if not train_runs:
         cfg = _default_onset_config(anomaly_key, detector_key)
-        if detector_key == "paano_feat":
-            cfg["fusion_weight_short"] = 0.60
         return cfg, {"message": "No train runs available"}
 
     best_cfg: dict[str, Any] | None = None
@@ -1541,14 +1431,7 @@ def _build_score_rows(
             "n_predicted_starts": len(starts),
         }
         components = dict(run.score_output.components)
-        if detector_key == "paano_feat":
-            components["score"] = score
-            short_score = components.get("paano_short")
-            long_score = components.get("paano_long")
-            if short_score is not None and long_score is not None:
-                components["paano_fused"] = score
-        else:
-            components["score"] = score
+        components["score"] = score
 
         for idx, ts in enumerate(run.prepared.timestamps):
             row = {
@@ -1598,32 +1481,10 @@ def _summary_for_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _choose_default_detector(
     anomaly_key: str,
     detector_summaries: dict[str, dict[str, Any]],
-    legacy_payload: dict[str, Any],
 ) -> str:
-    candidates: list[tuple[tuple[float, ...], str]] = []
-    for detector_key, payload in detector_summaries.items():
-        if detector_key not in LOCAL_DETECTOR_KEYS:
-            continue
-        summary = _summary_for_payload(payload.get("splits", {}).get("all", payload))
-        candidates.append((_operational_score_key(anomaly_key, detector_key, summary), detector_key))
-
-    if not candidates:
-        if "paano_feat" in detector_summaries:
-            return "paano_feat"
-        available = sorted(detector_summaries)
-        return available[0] if available else DEFAULT_DETECTOR
-
-    candidates.sort(reverse=True)
-    selected = candidates[0][1]
-
-    if legacy_payload:
-        legacy_summary = _summary_for_payload(legacy_payload)
-        selected_summary = _summary_for_payload(detector_summaries[selected].get("splits", {}).get("all", detector_summaries[selected]))
-        legacy_key = _operational_score_key(anomaly_key, "paano_feat", legacy_summary)
-        selected_key = _operational_score_key(anomaly_key, selected, selected_summary)
-        if legacy_key > selected_key and "paano_feat" in detector_summaries:
-            return "paano_feat"
-    return selected
+    if DEFAULT_DETECTOR in detector_summaries:
+        return DEFAULT_DETECTOR
+    return sorted(detector_summaries)[0] if detector_summaries else DEFAULT_DETECTOR
 
 
 def _update_benchmark_summary(spec: DetectionSpec) -> dict[str, Any]:
@@ -1632,15 +1493,12 @@ def _update_benchmark_summary(spec: DetectionSpec) -> dict[str, Any]:
         path = summary_path(spec, detector_key)
         if path.exists():
             detector_payloads[detector_key] = load_json(path)
-    legacy_payload = load_json(legacy_summary_path(spec))
-    selected = _choose_default_detector(spec.anomaly_key, detector_payloads, legacy_payload)
+    selected = _choose_default_detector(spec.anomaly_key, detector_payloads)
     payload = {
         "anomaly": spec.anomaly_key,
         "selected_default_detector": selected,
         "detectors": detector_payloads,
     }
-    if legacy_payload:
-        payload["legacy_paano"] = legacy_payload
     out_path = ensure_parent(benchmark_summary_path(spec))
     out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -1689,33 +1547,24 @@ def run_detection(
 
     prepared_runs = _prepare_all_wells(
         spec, df, intervals, verbose=verbose,
-        zone_aware=(detector_key in ("paano_shared", "ensemble")),
+        zone_aware=True,
     )
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
 
-    # Train shared encoder for paano_shared detector
-    shared_state = None
-    if detector_key in ("paano_shared", "ensemble"):
-        from alma_service.shared_encoder import train_shared_encoder
-        runtime_cfg = _runtime_config(anomaly_key)
-        try:
-            shared_state = train_shared_encoder(
-                prepared_wells=prepared_runs,
-                patch_short=int(runtime_cfg.get("paano_patch_short", SHORT_PATCH)),
-                patch_long=int(runtime_cfg.get("paano_patch_long", LONG_PATCH)),
-                anomaly_key=anomaly_key,
-                device=device,
-                verbose=verbose,
-            )
-            if verbose:
-                print(
-                    f"  Shared encoder trained: {shared_state.detail}"
-                )
-        except ValueError as exc:
-            print(f"  WARNING: Cannot train shared encoder: {exc}")
-            print(f"  Falling back to paano_feat detector")
-            detector_key = "paano_feat"
+    from alma_service.shared_encoder import train_shared_encoder
+
+    runtime_cfg = _runtime_config(anomaly_key)
+    shared_state = train_shared_encoder(
+        prepared_wells=prepared_runs,
+        patch_short=int(runtime_cfg.get("paano_patch_short", SHORT_PATCH)),
+        patch_long=int(runtime_cfg.get("paano_patch_long", LONG_PATCH)),
+        anomaly_key=anomaly_key,
+        device=device,
+        verbose=verbose,
+    )
+    if verbose:
+        print(f"  Shared encoder trained: {shared_state.detail}")
 
     detector_runs = _build_local_runs(
         spec.anomaly_key, detector_key, prepared_runs,
@@ -1828,19 +1677,22 @@ def run_single_well(
         print("No usable data after engineered preprocessing.")
         return
 
-    if detector_key == "paano_shared":
-        print("  Note: paano_shared requires all train wells; falling back to paano_feat for single-well mode.")
-        detector_key = "paano_feat"
     device = _resolve_torch_device(detector_key, verbose=True)
-    detector_obj = _build_detector(spec.anomaly_key, detector_key, device=device, verbose=True)
-    detector_obj.fit_reference(prepared.feature_matrix[prepared.reference_mask], mask_ref=prepared.reference_mask)
-    score_output = detector_obj.score_stream(prepared.feature_matrix, mask_all=prepared.stability_mask)
-    run = PreparedDetectorRun(prepared=prepared, score_output=score_output)
+    from alma_service.shared_encoder import load_shared_encoder_state
+
+    shared_state = load_shared_encoder_state(spec.anomaly_key, device=device, verbose=True)
+    detector_runs = _build_local_runs(
+        spec.anomaly_key,
+        detector_key,
+        {well_id: prepared},
+        device=device,
+        verbose=True,
+        shared_state=shared_state,
+    )
+    run = detector_runs[well_id]
 
     cfg_payload = load_json(config_path(spec, detector_key))
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
-    if detector_key == "paano_feat" and "fusion_weight_short" not in cfg:
-        cfg["fusion_weight_short"] = 0.60
 
     score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
     print(f"Prepared detail: {json.dumps(run.prepared.detail, ensure_ascii=False, indent=2)}")

@@ -158,8 +158,8 @@ flowchart TB
     subgraph DETECT["🧠 Детекция"]
         PAANO["PaAno Shared<br/>Encoder<br/>(нейросеть)"]
         PTR["Pressure Trend<br/>(физическая ветка<br/>для притока)"]
-        PCA["PCA/SPE<br/>(линейный)"]
-        ENS["Ensemble<br/>(PaAno + PCA)"]
+        SALT["Salt Deposition<br/>(многоканальный<br/>drift/residual)"]
+        NEG["Negermet Signature<br/>(pressure-step<br/>load-response)"]
     end
 
     subgraph OUTPUT["📊 Результат"]
@@ -316,9 +316,11 @@ score = paano_score + pressure_trend_weight × pressure_trend_score
 
 В HTML-отчёте по притоку score-график показывает общий score и дополнительные линии `paano_tail_score` / `pressure_trend_score`, чтобы было видно, какая часть сигнала пришла от PaAno, а какая — от давления.
 
-### 5.3 PCA/SPE (линейный базовый)
+### 5.3 PCA/SPE-подобный residual внутри salt branch
 
-**PCA** (Principal Component Analysis) — классический статистический метод.
+Отдельного production-детектора PCA/SPE больше нет. Его сильная часть
+используется внутри `salt_deposition`: многомерная ошибка восстановления
+показывает, что группа каналов перестала согласованно вести себя как reference.
 
 #### Принцип работы (простым языком):
 
@@ -335,7 +337,8 @@ PCA находит эти оси → проецирует данные → во�
 - **T² (Hotelling)** — насколько данные отклонились вдоль главных осей
 - **SPE** — ошибка восстановления (residual) — насколько данные «не ложатся» в модель нормы
 
-Score = T²_z + SPE_z (нормализованные z-оценки)
+В production это не отдельный detector key, а компонент
+`salt_deposition_calibrated_fusion_score`.
 
 ### 5.4 Physical Branches внутри PaAno Shared
 
@@ -354,9 +357,9 @@ Score_final = Score_PaAnoShared + tuned_weight × Score_PhysicalBranch
 - **Негермет**: `negermet_signature` как pressure-step/load-response диагностика.
 - **Соли**: `salt_deposition` как многоканальный grouped drift + PCA/SPE residual + KS shift.
 
-Для соли `ensemble` остается benchmark-детектором, но сильная часть ансамбля
-перенесена внутрь `paano_shared`: PCA/SPE residual теперь работает как
-`salt_deposition_calibrated_fusion_score`, а не как отдельный production-путь.
+Для соли сильная часть старого ансамбля перенесена внутрь `paano_shared`:
+PCA/SPE-подобный residual теперь работает как
+`salt_deposition_calibrated_fusion_score`, а не как отдельный detector key.
 
 Для негермета `negermet_signature` уже подключен к `paano_shared` как
 диагностическая pressure-step/load-response ветка. Ее вклад в итоговый score
@@ -670,16 +673,14 @@ salt_deposition_calibrated_fusion_score =
 это может потерять силу экстремального drift за пределами reference. Поэтому KS
 branch сохраняет и rank, и robust excess.
 
-Итоговый результат для `salt/paano_shared` стал лучше старого `ensemble` по
-эксплуатационным метрикам FAR, starts и задержке:
+Итоговый результат для `salt/paano_shared` после переноса residual/KS-логики
+внутрь единого пайплайна:
 
 | Детектор | Hit-rate | FAR/day | Starts/interval | Median delay | P90 delay ratio |
 |---|---:|---:|---:|---:|---:|
 | `paano_shared + conformal/KS salt` | 8/8 summary, 8/9 evaluation | 0.0127 | 2.33 evaluation | 0.03 ч | 0.0667 |
-| `ensemble` benchmark | 8/8 summary | 0.0976 | 19.125 | 3.19 ч | 0.5869 |
 
-Поэтому `ensemble` остается только benchmark-детектором и источником идеи
-multivariate residual, а основной production-кандидат для соли теперь
+Основной production-кандидат для соли теперь
 `paano_shared + conformal/KS salt branch`.
 
 ### 8.3 Сводная таблица
@@ -840,13 +841,11 @@ python scripts/reports/generate_feature_importance_report.py \
     --source db/salt_anomaly_database_15min.parquet
 ```
 
-### 10.4 Использование конкретного детектора
+### 10.4 Production-детектор
 
 ```bash
-# Можно явно указать алгоритм:
-python scripts/detection/detect_salt.py --detector pca_spe --retune
+# Публичный detector key один:
 python scripts/detection/detect_salt.py --detector paano_shared --retune
-python scripts/detection/detect_salt.py --detector ensemble --retune  # benchmark
 ```
 
 ### 10.5 Оценка качества
@@ -879,7 +878,6 @@ python scripts/evaluation/evaluate_onset_metrics.py \
 | **EMA** | Exponential Moving Average — экспоненциальное сглаживание |
 | **PCA** | Principal Component Analysis — метод главных компонент |
 | **SPE** | Squared Prediction Error — ошибка реконструкции данных |
-| **Ensemble** | Комбинация нескольких алгоритмов для улучшения результата |
 | **Pressure Trend** | Физическая ветка для притока, оценивающая устойчивый тренд давления на приёме насоса |
 | **Cooldown** | Минимальная пауза между повторными стартами, чтобы одна длинная аномалия не дробилась на много алертов |
 | **Rearm window** | Окно повторной готовности детектора после завершения предыдущего превышения |

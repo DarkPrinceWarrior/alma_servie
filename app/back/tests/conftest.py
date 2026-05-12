@@ -22,9 +22,9 @@ def data_root(tmp_path: Path) -> Iterator[Path]:
     for anomaly in ("negermet", "pritok", "salt"):
         write_intervals_parquet(tmp_path, anomaly)
 
-    write_scores_parquet(tmp_path, "negermet", "pca_spe")
-    write_predicted_starts(tmp_path, "negermet", "pca_spe")
-    write_html_report(tmp_path, "negermet", "pca_spe")
+    write_scores_parquet(tmp_path, "negermet", "paano_shared")
+    write_predicted_starts(tmp_path, "negermet", "paano_shared")
+    write_html_report(tmp_path, "negermet", "paano_shared")
 
     app.dependency_overrides[get_data_root] = lambda: tmp_path
     _read_parquet_cached.cache_clear()

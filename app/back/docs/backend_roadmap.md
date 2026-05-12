@@ -162,7 +162,7 @@ GET /api/wells?anomaly=negermet
 
 **DoD**:
 - [ ] миграция `uv run alembic upgrade head` применяется;
-- [ ] `POST /api/detections {"anomaly":"negermet","detector":"pca_spe"}` запускает реальную детекцию на test-скважине (или на mock);
+- [ ] `POST /api/detections {"anomaly":"negermet","detector":"paano_shared"}` запускает реальную детекцию на test-скважине (или на mock);
 - [ ] `GET /api/detections/{id}` показывает переход `pending → running → succeeded`;
 - [ ] single-flight 409 покрыт тестом;
 - [ ] коммит `feat(app/back): detection runs with background subprocess + status API`.
@@ -186,7 +186,7 @@ GET /api/wells?anomaly=negermet
 4. Тесты на миниатюрных fixture-parquet.
 
 **DoD**:
-- [ ] `curl /api/reports/negermet/pca_spe/html > report.html` — открывается в браузере;
+- [ ] `curl /api/reports/negermet/paano_shared/html > report.html` — открывается в браузере;
 - [ ] scores endpoint возвращает корректный JSON с downsampling;
 - [ ] коммит `feat(app/back): reports and scores API`.
 
@@ -379,7 +379,7 @@ api читает, worker пишет. Если worker падает в серед�
 - **worker** — compute-контейнер, крутит subprocess пайплайна.
 - **research** — всё, что в корне репо: `alma_service/`, `scripts/`, `paano/`, `data/`, experiment-ветки.
 - **Anomaly classes**: `negermet` (негерметичность), `pritok` (приток), `salt` (солеотложение).
-- **Detectors**: `pca_spe`, `paano_feat`, `paano_shared`, `ensemble`.
+- **Detector**: `paano_shared`.
 - **DoD** — Definition of Done, чек-лист готовности этапа.
 
 ---

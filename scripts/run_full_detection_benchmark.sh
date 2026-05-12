@@ -13,9 +13,7 @@ LOG_FILE="$LOG_DIR/full_detection_benchmark_${RUN_TS}.log"
 mkdir -p "$LOG_DIR"
 
 ANOMALIES=(negermet pritok salt)
-NEGERMET_DETECTORS=(${NEGERMET_DETECTORS:-paano_feat pca_spe})
-PRITOK_DETECTORS=(${PRITOK_DETECTORS:-paano_feat pca_spe})
-SALT_DETECTORS=(${SALT_DETECTORS:-paano_feat pca_spe})
+DETECTOR="${DETECTOR:-paano_shared}"
 
 run_cmd() {
   echo
@@ -27,38 +25,28 @@ selected_detector() {
   local anomaly="$1"
   local summary="artifacts/results/${anomaly}_benchmark_summary.json"
   if [[ ! -f "$summary" ]]; then
-    echo "paano_feat"
+    echo "$DETECTOR"
     return
   fi
   "$PYTHON_BIN" - <<'PY' "$summary"
 import json, sys
 payload = json.load(open(sys.argv[1], encoding="utf-8"))
-print(payload.get("selected_default_detector", "paano_feat"))
+print(payload.get("selected_default_detector", "paano_shared"))
 PY
-}
-
-detectors_for_anomaly() {
-  local anomaly="$1"
-  case "$anomaly" in
-    negermet) printf '%s\n' "${NEGERMET_DETECTORS[@]}" ;;
-    pritok) printf '%s\n' "${PRITOK_DETECTORS[@]}" ;;
-    salt) printf '%s\n' "${SALT_DETECTORS[@]}" ;;
-    *) return 1 ;;
-  esac
 }
 
 echo "Log file: $LOG_FILE"
 echo "Python: $PYTHON_BIN"
+echo "Detector: $DETECTOR"
 echo "Retune flag: $RETUNE_FLAG"
 echo | tee -a "$LOG_FILE"
 echo "Log file: $LOG_FILE" | tee -a "$LOG_FILE"
 echo "Python: $PYTHON_BIN" | tee -a "$LOG_FILE"
+echo "Detector: $DETECTOR" | tee -a "$LOG_FILE"
 echo "Retune flag: $RETUNE_FLAG" | tee -a "$LOG_FILE"
 
 for anomaly in "${ANOMALIES[@]}"; do
-  while IFS= read -r detector; do
-    run_cmd "$PYTHON_BIN" "scripts/detection/detect_${anomaly}.py" --detector "$detector" "$RETUNE_FLAG"
-  done < <(detectors_for_anomaly "$anomaly")
+  run_cmd "$PYTHON_BIN" "scripts/detection/detect_${anomaly}.py" --detector "$DETECTOR" "$RETUNE_FLAG"
 
   detector="$(selected_detector "$anomaly")"
   run_cmd "$PYTHON_BIN" "scripts/reports/generate_${anomaly}_paano_report.py" --detector "$detector"

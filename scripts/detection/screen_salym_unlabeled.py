@@ -157,15 +157,10 @@ def _load_detector_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     spec = get_detection_spec(anomaly_key)
     payload = load_json(config_path(spec, detector_key))
     stored = payload.get("config", payload) if payload else {}
-    cfg = {**_default_onset_config(anomaly_key, detector_key), **stored}
-    if detector_key == "paano_feat" and "fusion_weight_short" not in cfg:
-        cfg["fusion_weight_short"] = 0.60
-    return cfg
+    return {**_default_onset_config(anomaly_key, detector_key), **stored}
 
 
 def _build_shared_state(anomaly_key: str, detector_key: str, device: Any, verbose: bool) -> Any:
-    if detector_key != "paano_shared":
-        return None
     try:
         return load_shared_encoder_state(anomaly_key, device=device, verbose=verbose)
     except FileNotFoundError as exc:

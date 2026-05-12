@@ -107,25 +107,25 @@ bash scripts/run_full_dataset_build.sh
 Run detection:
 
 ```bash
-python scripts/detection/detect_negermet.py --detector pca_spe
-python scripts/detection/detect_pritok.py --detector pca_spe
-python scripts/detection/detect_salt.py --detector pca_spe
+python scripts/detection/detect_negermet.py --detector paano_shared
+python scripts/detection/detect_pritok.py --detector paano_shared
+python scripts/detection/detect_salt.py --detector paano_shared
 bash scripts/run_full_detection_benchmark.sh
 ```
 
 Generate reports:
 
 ```bash
-python scripts/reports/generate_negermet_paano_report.py --detector pca_spe
-python scripts/reports/generate_pritok_paano_report.py --detector pca_spe
-python scripts/reports/generate_salt_paano_report.py --detector pca_spe
+python scripts/reports/generate_negermet_paano_report.py --detector paano_shared
+python scripts/reports/generate_pritok_paano_report.py --detector paano_shared
+python scripts/reports/generate_salt_paano_report.py --detector paano_shared
 ```
 
 Evaluate onset quality:
 
 ```bash
 python scripts/evaluation/evaluate_onset_metrics.py \
-  --anomaly salt --detector pca_spe --name salt_pca_spe
+  --anomaly salt --detector paano_shared --name salt_paano_shared
 ```
 
 For root research changes, no global lint/format/test runner is configured in
@@ -201,7 +201,7 @@ ssh a100 'tmux new -d -s benchmark \
 
 # Single detector run
 ssh a100 'cd /root/projects/alma_servie && \
-    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector pca_spe'
+    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector paano_shared'
 
 # Recreate server uv environment
 ssh a100 'cd /root/projects/alma_servie && \

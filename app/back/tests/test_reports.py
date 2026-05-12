@@ -18,17 +18,17 @@ def test_downsample_stride() -> None:
 
 async def test_get_html_ok(data_root) -> None:
     async with await _client() as c:
-        r = await c.get("/api/reports/negermet/pca_spe/html")
+        r = await c.get("/api/reports/negermet/paano_shared/html")
 
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
-    assert "Report negermet/pca_spe" in r.text
+    assert "Report negermet/paano_shared" in r.text
     assert r.headers.get("content-security-policy") == "frame-ancestors *"
 
 
 async def test_get_html_404(data_root) -> None:
     async with await _client() as c:
-        r = await c.get("/api/reports/pritok/pca_spe/html")
+        r = await c.get("/api/reports/pritok/paano_shared/html")
 
     assert r.status_code == 404
 
@@ -36,7 +36,7 @@ async def test_get_html_404(data_root) -> None:
 async def test_get_scores_downsamples(data_root) -> None:
     async with await _client() as c:
         r = await c.get(
-            "/api/reports/negermet/pca_spe/scores",
+            "/api/reports/negermet/paano_shared/scores",
             params={"limit": 500},
         )
 
@@ -50,7 +50,7 @@ async def test_get_scores_downsamples(data_root) -> None:
 async def test_get_scores_filter_well(data_root) -> None:
     async with await _client() as c:
         r = await c.get(
-            "/api/reports/negermet/pca_spe/scores",
+            "/api/reports/negermet/paano_shared/scores",
             params={"well_id": "W-200", "limit": 5000},
         )
 
@@ -63,7 +63,7 @@ async def test_get_scores_filter_well(data_root) -> None:
 
 async def test_get_predicted_starts(data_root) -> None:
     async with await _client() as c:
-        r = await c.get("/api/reports/negermet/pca_spe/starts")
+        r = await c.get("/api/reports/negermet/paano_shared/starts")
 
     assert r.status_code == 200
     body = r.json()
@@ -74,7 +74,7 @@ async def test_get_predicted_starts(data_root) -> None:
 async def test_predicted_starts_split_filter(data_root) -> None:
     async with await _client() as c:
         r = await c.get(
-            "/api/reports/negermet/pca_spe/starts",
+            "/api/reports/negermet/paano_shared/starts",
             params={"split": "test"},
         )
 
@@ -86,6 +86,6 @@ async def test_predicted_starts_split_filter(data_root) -> None:
 
 async def test_scores_404_when_missing(data_root) -> None:
     async with await _client() as c:
-        r = await c.get("/api/reports/salt/pca_spe/scores")
+        r = await c.get("/api/reports/salt/paano_shared/scores")
 
     assert r.status_code == 404

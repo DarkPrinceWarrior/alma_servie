@@ -7,19 +7,8 @@ from typing import Any
 from alma_service.anomaly_specs import DetectionSpec
 from alma_service.paths import DB_DIR, MODELS_DIR, REPORTS_DIR, RESULTS_DIR
 
-DETECTOR_KEYS = (
-    "paano_feat",
-    "paano_shared",
-    "pca_spe",
-    "ensemble",
-)
-LOCAL_DETECTOR_KEYS = (
-    "paano_feat",
-    "paano_shared",
-    "pca_spe",
-    "ensemble",
-)
-DEFAULT_DETECTOR = "paano_feat"
+DETECTOR_KEYS = ("paano_shared",)
+DEFAULT_DETECTOR = "paano_shared"
 ANOMALY_DEFAULT_DETECTOR = {
     "negermet": "paano_shared",
     "pritok": "paano_shared",
@@ -79,10 +68,6 @@ def model_path(spec: DetectionSpec, detector: str) -> Path:
 
 def benchmark_summary_path(spec: DetectionSpec) -> Path:
     return RESULTS_DIR / f"{spec.dataset.output_prefix}_benchmark_summary.json"
-
-
-def legacy_summary_path(spec: DetectionSpec) -> Path:
-    return spec.results_path.with_suffix(".summary.json")
 
 
 def load_json(path: Path) -> dict[str, Any]:

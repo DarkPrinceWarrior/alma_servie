@@ -52,10 +52,7 @@ FREQ_COL = "Выходная частота"
 META_COLUMNS = {"well_id", "timestamp", "split", "interval_idx", "anomaly_type"}
 
 DETECTOR_LABELS = {
-    "pca_spe": "PCA/SPE",
-    "paano_feat": "PaAno + признаки",
     "paano_shared": "PaAno Shared Encoder",
-    "ensemble": "Ensemble (PaAno + PCA)",
 }
 
 DISPLAY_NAMES = {

@@ -135,8 +135,8 @@ truth), без импорта research-конфигов.
 `detection_runs` в Postgres.
 
 - `POST /api/detections` `{anomaly, detector}` → 201 с `DetectionRunRead`.
-  `anomaly ∈ {negermet, pritok, salt}`, `detector ∈ {pca_spe, paano_feat,
-  paano_shared, ensemble}`. Single-flight: если уже есть активный
+  `anomaly ∈ {negermet, pritok, salt}`, `detector = paano_shared`.
+  Single-flight: если уже есть активный
   прогон `(anomaly, detector)` в статусе `pending|running` — 409 с `run_id`.
 - `GET /api/detections?anomaly=&detector=&status=&limit=&offset=` — листинг.
 - `GET /api/detections/{run_id}` — карточка прогона со `stdout_tail`,

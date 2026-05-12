@@ -36,15 +36,10 @@ bash scripts/run_full_dataset_build.sh
 
 ### Run detection
 ```bash
-# Unified stack (preferred): detectors = pca_spe | paano_feat
-python scripts/detection/detect_negermet.py --detector pca_spe
-python scripts/detection/detect_pritok.py --detector pca_spe
-python scripts/detection/detect_salt.py --detector pca_spe
-
-# Legacy PaAno baseline:
-python scripts/detection/detect_negermet_paano.py
-python scripts/detection/detect_pritok_paano.py
-python scripts/detection/detect_salt_paano.py
+# Production stack: only paano_shared
+python scripts/detection/detect_negermet.py --detector paano_shared
+python scripts/detection/detect_pritok.py --detector paano_shared
+python scripts/detection/detect_salt.py --detector paano_shared
 
 # Full benchmark:
 bash scripts/run_full_detection_benchmark.sh
@@ -52,16 +47,16 @@ bash scripts/run_full_detection_benchmark.sh
 
 ### Generate reports
 ```bash
-python scripts/reports/generate_negermet_paano_report.py [--detector pca_spe]
-python scripts/reports/generate_pritok_paano_report.py [--detector pca_spe]
-python scripts/reports/generate_salt_paano_report.py [--detector pca_spe]
+python scripts/reports/generate_negermet_paano_report.py [--detector paano_shared]
+python scripts/reports/generate_pritok_paano_report.py [--detector paano_shared]
+python scripts/reports/generate_salt_paano_report.py [--detector paano_shared]
 ```
 By default, report reads detector from `artifacts/results/*_benchmark_summary.json`.
 
 ### Evaluate onset quality
 ```bash
 python scripts/evaluation/evaluate_onset_metrics.py \
-  --anomaly salt --detector pca_spe --name salt_pca_spe
+  --anomaly salt --detector paano_shared --name salt_paano_shared
 ```
 
 No linting, formatting, or test runner is configured. After changes, run the affected script directly to check for import/runtime errors.
@@ -118,7 +113,7 @@ ssh a100 'tmux new -d -s benchmark \
 
 # одиночный detector run на серваке
 ssh a100 'cd /root/projects/alma_servie && \
-    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector pca_spe'
+    CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector paano_shared'
 
 # пересоздание серверного uv-окружения
 ssh a100 'cd /root/projects/alma_servie && \
@@ -164,15 +159,15 @@ The shared library that all scripts import from. Key modules:
 - `paths.py` — all canonical paths; `PROJECT_ROOT` resolved from file location so scripts work from any cwd
 - `dataset_config.py` — well lists, train/test split, parameter renames (single source of truth for data config)
 - `generic_detection.py` — `run_detection()` unified entry point; onset config, tune grids, runtime config per anomaly type
-- `paano_pipeline.py` — `run_detection()` legacy PaAno entry point
 - `onset_detection.py` — `detect_causal_onsets()`, numba-JIT compiled CUSUM + EMA; calibrated via `CausalThresholds`
 
-### Detector interface (`BaseDetector`)
-All detectors implement:
-- `fit_reference(X_ref, mask_ref)` — train on reference (train-split) data
-- `score_stream(X_all, mask_all)` → anomaly scores
-
-Concrete implementations: `PaAnoFeatureDetector`, `PCASPEDetector`, `SharedPaAnoDetector`.
+### Production detector
+The public detector key is `paano_shared`.
+`SharedPaAnoDetector` scores each well with a frozen/shared PaAno encoder and a local memory bank.
+Anomaly-specific physics is fused inside this same detector:
+- `pritok`: pressure trend branch
+- `salt`: grouped multichannel deposition/residual branch
+- `negermet`: pressure-step/load-response signature branch
 
 ### Staged blind pipeline (all three anomaly types)
 1. Causal preprocessing
@@ -183,7 +178,7 @@ Concrete implementations: `PaAnoFeatureDetector`, `PCASPEDetector`, `SharedPaAno
 `salt` uses the same pipeline but adds soft-sensor derived features.
 
 ### `paano/` submodule
-The PaAno neural library (ICLR 2026 paper). Used via `PaAnoFeatureDetector` and the legacy scripts. Entry points: `paano/main.py`, `paano/train.py`, `paano/model.py`.
+The PaAno neural library (ICLR 2026 paper). The repository uses it through `SharedPaAnoDetector` and `alma_service/shared_encoder.py`. Entry points: `paano/main.py`, `paano/train.py`, `paano/model.py`.
 
 ## Conventions
 

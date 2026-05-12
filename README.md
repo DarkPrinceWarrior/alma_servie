@@ -7,8 +7,8 @@
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
 - `scripts/datasets/` — сборка Parquet-датасетов и интервалов из исходных Excel-файлов.
-- `scripts/detection/` — unified detector stack (`paano_feat`, `pca_spe`) и legacy PaAno-обёртки.
-- `scripts/reports/` — HTML-отчёты по результатам blind-детекции и legacy feature-importance отчёты.
+- `scripts/detection/` — единый production-стек `paano_shared`.
+- `scripts/reports/` — HTML-отчёты по результатам blind-детекции и отчёты важности признаков.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
 - `data/reference/` — общие справочные Excel-файлы.
@@ -58,26 +58,17 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 
 ### 2. Запуск детекции
 
-Новый основной CLI:
+Единственный production CLI:
 
 ```bash
-python scripts/detection/detect_negermet.py --detector pca_spe
-python scripts/detection/detect_pritok.py --detector pca_spe
-python scripts/detection/detect_salt.py --detector pca_spe
+python scripts/detection/detect_negermet.py --detector paano_shared
+python scripts/detection/detect_pritok.py --detector paano_shared
+python scripts/detection/detect_salt.py --detector paano_shared
 ```
 
-Доступные детекторы:
-
-- `paano_feat` — engineered-features версия локального PaAno
-- `pca_spe` — PCA + Hotelling T²/SPE
-
-Legacy baseline сохранён отдельно:
-
-```bash
-python scripts/detection/detect_negermet_paano.py
-python scripts/detection/detect_pritok_paano.py
-python scripts/detection/detect_salt_paano.py
-```
+Публичный detector key один: `paano_shared`. Физические ветки для `pritok`,
+`salt` и `negermet` встроены внутрь этого пайплайна и настраиваются через
+train-only tuning.
 
 Результат:
 
@@ -111,7 +102,7 @@ python scripts/reports/generate_salt_paano_report.py
 По умолчанию report читает detector из `*_benchmark_summary.json`. Можно переопределить:
 
 ```bash
-python scripts/reports/generate_negermet_paano_report.py --detector pca_spe
+python scripts/reports/generate_negermet_paano_report.py --detector paano_shared
 ```
 
 ### 4. Оценка качества стартов
@@ -119,11 +110,11 @@ python scripts/reports/generate_negermet_paano_report.py --detector pca_spe
 ```bash
 python scripts/evaluation/evaluate_onset_metrics.py \
   --anomaly salt \
-  --detector pca_spe \
-  --name salt_pca_spe
+  --detector paano_shared \
+  --name salt_paano_shared
 ```
 
-Метрики теперь единые для всех детекторов:
+Метрики единые для всех типов аномалий:
 
 - `hit_count` / `hit_rate`
 - `p90_delay_ratio`
