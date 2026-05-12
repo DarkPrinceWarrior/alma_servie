@@ -65,15 +65,20 @@ def build_prepared_wells(
         timestamps = grp["timestamp"].to_numpy()
         feature_matrix = grp[feature_columns].to_numpy(dtype=np.float32)
         is_normal = grp["is_normal"].to_numpy().astype(bool)
-        if split == "train":
-            reference_mask = is_normal
+        first_non_normal = int(np.argmax(~is_normal)) if (~is_normal).any() else len(is_normal)
+        if not is_normal.any():
+            fallback_len = min(max(len(is_normal) // 4, cfg["paano"]["patch_long"] * 4), len(is_normal))
+            reference_mask = np.zeros(len(is_normal), dtype=bool)
+            reference_mask[:fallback_len] = True
+            reference_end_idx = fallback_len
         else:
             reference_mask = is_normal.copy()
-        first_non_normal = np.argmax(~is_normal) if (~is_normal).any() else len(is_normal)
-        if not (~is_normal).any():
-            reference_end_idx = len(is_normal)
-        else:
-            reference_end_idx = int(first_non_normal)
+            if first_non_normal == 0 and is_normal.any():
+                reference_end_idx = len(is_normal)
+            elif (~is_normal).any():
+                reference_end_idx = first_non_normal
+            else:
+                reference_end_idx = len(is_normal)
         stability_mask = np.ones(len(is_normal), dtype=bool)
         warmup = max(cfg["paano"]["patch_long"], 2)
         onset_allowed_mask = np.zeros(len(is_normal), dtype=bool)
