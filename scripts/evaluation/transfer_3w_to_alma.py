@@ -36,9 +36,11 @@ PAANO_ROOT = PROJECT_ROOT / "paano"
 if str(PAANO_ROOT) not in sys.path:
     sys.path.insert(0, str(PAANO_ROOT))
 
+from alma_service.anomaly_injection import InjectionConfig, inject_pool
 from alma_service.anomaly_specs import get_detection_spec
-from alma_service.generic_detection import _prepare_all_wells, _resolve_torch_device, load_anomaly_data, load_intervals
+from alma_service.generic_detection import _prepare_all_wells, _resolve_torch_device, _runtime_config, load_anomaly_data, load_intervals
 from alma_service.generic_detectors import PAANO_BATCH_SIZE, PAANO_LR, PAANO_NUM_ITERS, SEED, _maybe_compile_module
+from alma_service.paano_defaults import LONG_PATCH, SHORT_PATCH
 from alma_service.shared_encoder import (
     SharedEncoderState,
     _set_seed,
@@ -107,11 +109,20 @@ def fine_tune_single_scale(
     device: torch.device,
     num_iter: int,
     verbose: bool = False,
-) -> tuple[nn.Module, np.ndarray, np.ndarray]:
+    injection_cfg: InjectionConfig | None = None,
+    injection_rng: np.random.Generator | None = None,
+) -> tuple[nn.Module, np.ndarray, np.ndarray, dict | None]:
     train_mean = np.mean(pool, axis=0, keepdims=True).astype(np.float32)
     train_std = np.std(pool, axis=0, keepdims=True).astype(np.float32)
     train_std = np.where(train_std < 1e-8, 1e-8, train_std)
     pool_norm = (pool - train_mean) / train_std
+
+    injection_report: dict | None = None
+    if injection_cfg is not None and injection_cfg.rate > 0:
+        window_len = max(patch_size * 4, 128)
+        pool_norm, injection_report = inject_pool(pool_norm, injection_cfg, rng=injection_rng, window_len=window_len)
+        if verbose:
+            print(f"    Injection patch={patch_size}: {injection_report}", flush=True)
 
     patch_creator = PatchCreator(L=patch_size, s=1, random_seed=SEED)
     train_loader, _, _ = patch_creator.create_dataloaders(
@@ -124,32 +135,58 @@ def fine_tune_single_scale(
         compiled, train_loader, train_patches, device,
         num_iter=num_iter, pretext_step=patch_size, lr=PAANO_LR, see_loss=False,
     )
-    return compiled, train_mean, train_std
+    return compiled, train_mean, train_std, injection_report
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Transfer 3W PaAno encoder weights into an ALMA-shaped encoder, then fine-tune.")
-    parser.add_argument("--source-class", type=int, required=True, help="3W event class whose encoder is reused.")
+    parser.add_argument(
+        "--source-class", required=True,
+        help="3W event class whose encoder is reused. Accepts integer class id "
+             "(e.g. 9) or the literal string 'global' to use the multi-source "
+             "NORMAL encoder at artifacts/3w/checkpoints/3w_global_normal_paano_shared_encoder.pt.",
+    )
     parser.add_argument("--target-anomaly", choices=["negermet", "pritok", "salt"], required=True)
     parser.add_argument("--fine-tune-iters", type=int, default=PAANO_NUM_ITERS)
+    parser.add_argument(
+        "--use-target-patches", action="store_true",
+        help="Fine-tune at the target anomaly's native patch sizes (recommended). "
+             "Otherwise the source 3W patch sizes are reused (legacy behaviour).",
+    )
+    parser.add_argument(
+        "--anomaly-injection-rate", type=float, default=0.0,
+        help="Fraction of windows in the ALMA train pool to perturb with synthetic "
+             "anomalies (spike / scale-shift / pattern-flip / jitter) during fine-tune. "
+             "0.0 disables injection.",
+    )
+    parser.add_argument("--injection-seed", type=int, default=42)
     parser.add_argument("--output-anomaly-key", default=None,
                         help="If provided, save as this anomaly_key in models/ instead of overwriting ALMA production weights.")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
     device = _resolve_torch_device("paano_shared", verbose=True)
-    src_path = PROJECT_ROOT / "artifacts" / "3w" / "checkpoints" / f"3w_class_{args.source_class}_paano_shared_encoder.pt"
+    src_arg = str(args.source_class).strip()
+    if src_arg.lower() == "global":
+        src_key = "3w_global_normal"
+        src_path = PROJECT_ROOT / "artifacts" / "3w" / "checkpoints" / f"{src_key}_paano_shared_encoder.pt"
+        src_label = "global NORMAL"
+    else:
+        cls_id = int(src_arg)
+        src_key = f"3w_class_{cls_id}"
+        src_path = PROJECT_ROOT / "artifacts" / "3w" / "checkpoints" / f"{src_key}_paano_shared_encoder.pt"
+        src_label = f"class {cls_id}"
     if not src_path.exists():
         raise FileNotFoundError(f"3W encoder not found: {src_path}")
     src_state = load_shared_encoder_state(
-        anomaly_key=f"3w_class_{args.source_class}",
+        anomaly_key=src_key,
         path=src_path,
         device=device,
         compile_model=False,
         verbose=args.verbose,
     )
     print(
-        f"[transfer] loaded 3W class {args.source_class} encoder: "
+        f"[transfer] loaded 3W {src_label} encoder: "
         f"channels={len(src_state.shared_channels)} patch_short={src_state.patch_short} patch_long={src_state.patch_long}",
         flush=True,
     )
@@ -168,12 +205,37 @@ def main() -> None:
     print(f"[transfer] transplanted weights short: copied={len(rep_short['copied'])} skipped_shape={len(rep_short['skipped_due_to_shape'])}", flush=True)
     print(f"[transfer] transplanted weights long:  copied={len(rep_long['copied'])} skipped_shape={len(rep_long['skipped_due_to_shape'])}", flush=True)
 
+    if args.use_target_patches:
+        runtime_cfg = _runtime_config(args.target_anomaly)
+        ft_patch_short = int(runtime_cfg.get("paano_patch_short", SHORT_PATCH))
+        ft_patch_long = int(runtime_cfg.get("paano_patch_long", LONG_PATCH))
+        print(
+            f"[transfer] fine-tune at target patches=({ft_patch_short},{ft_patch_long}) "
+            f"(source 3W patches=({src_state.patch_short},{src_state.patch_long}) ignored)",
+            flush=True,
+        )
+    else:
+        ft_patch_short = src_state.patch_short
+        ft_patch_long = src_state.patch_long
+
+    injection_cfg = None
+    inj_rng = None
+    if args.anomaly_injection_rate > 0:
+        injection_cfg = InjectionConfig(rate=float(args.anomaly_injection_rate))
+        inj_rng = np.random.default_rng(int(args.injection_seed))
+        print(
+            f"[transfer] anomaly injection enabled rate={injection_cfg.rate} seed={args.injection_seed}",
+            flush=True,
+        )
+
     _set_seed()
-    model_short, mean_short, std_short = fine_tune_single_scale(
-        pool, src_state.patch_short, new_short, device, args.fine_tune_iters, verbose=args.verbose,
+    model_short, mean_short, std_short, inj_report_short = fine_tune_single_scale(
+        pool, ft_patch_short, new_short, device, args.fine_tune_iters, verbose=args.verbose,
+        injection_cfg=injection_cfg, injection_rng=inj_rng,
     )
-    model_long, mean_long, std_long = fine_tune_single_scale(
-        pool, src_state.patch_long, new_long, device, args.fine_tune_iters, verbose=args.verbose,
+    model_long, mean_long, std_long, inj_report_long = fine_tune_single_scale(
+        pool, ft_patch_long, new_long, device, args.fine_tune_iters, verbose=args.verbose,
+        injection_cfg=injection_cfg, injection_rng=inj_rng,
     )
 
     output_anomaly_key = args.output_anomaly_key or args.target_anomaly
@@ -190,13 +252,14 @@ def main() -> None:
         train_mean_long=mean_long,
         train_std_long=std_long,
         shared_channels=list(shared_channels),
-        patch_short=src_state.patch_short,
-        patch_long=src_state.patch_long,
+        patch_short=ft_patch_short,
+        patch_long=ft_patch_long,
         anomaly_key=output_anomaly_key if args.output_anomaly_key else args.target_anomaly,
         train_wells=train_wells,
         detail={
             "training_mode": "3w_pretrain_alma_finetune",
-            "source_3w_class": int(args.source_class),
+            "source_3w_key": src_key,
+            "source_3w_label": src_label,
             "source_3w_train_wells": src_state.train_wells,
             "fine_tune_iters": int(args.fine_tune_iters),
             "transplant_copied_short": len(rep_short["copied"]),
@@ -206,13 +269,17 @@ def main() -> None:
             "alma_pool_points": int(len(pool)),
             "alma_channels": int(len(shared_channels)),
             "alma_train_wells": train_wells,
+            "anomaly_injection_rate": float(args.anomaly_injection_rate),
+            "anomaly_injection_report_short": inj_report_short,
+            "anomaly_injection_report_long": inj_report_long,
         },
     )
     save_shared_encoder_state(new_state, out_path)
     print(f"[transfer] saved encoder -> {out_path}", flush=True)
 
     summary = {
-        "source_3w_class": int(args.source_class),
+        "source_3w_key": src_key,
+        "source_3w_label": src_label,
         "target_anomaly": args.target_anomaly,
         "output_path": str(out_path),
         "fine_tune_iters": int(args.fine_tune_iters),
@@ -221,8 +288,11 @@ def main() -> None:
         "transplant_skipped_shape_short": rep_short["skipped_due_to_shape"],
         "transplant_copied_long": rep_long["copied"],
         "transplant_skipped_shape_long": rep_long["skipped_due_to_shape"],
+        "anomaly_injection_rate": float(args.anomaly_injection_rate),
+        "anomaly_injection_report_short": inj_report_short,
+        "anomaly_injection_report_long": inj_report_long,
     }
-    summary_path = PROJECT_ROOT / "artifacts" / "3w" / "metrics" / f"transfer_3w_class_{args.source_class}_to_{args.target_anomaly}.json"
+    summary_path = PROJECT_ROOT / "artifacts" / "3w" / "metrics" / f"transfer_{src_key}_to_{args.target_anomaly}.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
     print(f"[transfer] summary -> {summary_path}", flush=True)

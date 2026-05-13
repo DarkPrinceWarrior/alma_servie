@@ -1552,10 +1552,10 @@ def run_detection(
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
 
-    from alma_service.shared_encoder import train_shared_encoder
+    from alma_service.shared_encoder import load_or_train_shared_encoder
 
     runtime_cfg = _runtime_config(anomaly_key)
-    shared_state = train_shared_encoder(
+    shared_state = load_or_train_shared_encoder(
         prepared_wells=prepared_runs,
         patch_short=int(runtime_cfg.get("paano_patch_short", SHORT_PATCH)),
         patch_long=int(runtime_cfg.get("paano_patch_long", LONG_PATCH)),
@@ -1564,7 +1564,7 @@ def run_detection(
         verbose=verbose,
     )
     if verbose:
-        print(f"  Shared encoder trained: {shared_state.detail}")
+        print(f"  Shared encoder ready: {shared_state.detail}")
 
     detector_runs = _build_local_runs(
         spec.anomaly_key, detector_key, prepared_runs,

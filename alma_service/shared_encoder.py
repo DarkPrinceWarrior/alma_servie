@@ -12,6 +12,7 @@ Provides utilities to:
 from __future__ import annotations
 
 import copy
+import os
 import random
 import sys
 import time
@@ -481,6 +482,94 @@ def train_shared_encoder(
             "shared_channels": len(shared_channels),
             "train_wells": train_well_ids,
         },
+    )
+
+
+def _peek_saved_encoder_meta(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as exc:
+        print(f"  Shared encoder cache: failed to peek {path}: {exc}")
+        return None
+    return {
+        "anomaly_key": str(payload.get("anomaly_key", "")),
+        "patch_short": int(payload.get("patch_short", -1)),
+        "patch_long": int(payload.get("patch_long", -1)),
+        "shared_channels": [str(c) for c in payload.get("shared_channels", [])],
+        "detail": dict(payload.get("detail", {})),
+    }
+
+
+def load_or_train_shared_encoder(
+    prepared_wells: dict[str, Any],
+    patch_short: int,
+    patch_long: int,
+    anomaly_key: str,
+    device: torch.device,
+    verbose: bool = False,
+) -> SharedEncoderState:
+    """Load a saved shared encoder if one exists in models/ and is compatible
+    with the current train pool; otherwise train from scratch.
+
+    Compatibility check requires the saved channel list to match the current
+    pool's channel list exactly (order-sensitive) and both patch sizes to
+    match. Override with ALMA_FORCE_RETRAIN_ENCODER=1.
+    """
+    force_retrain = os.environ.get("ALMA_FORCE_RETRAIN_ENCODER", "0") == "1"
+    cache_path = shared_encoder_path(anomaly_key)
+    meta = _peek_saved_encoder_meta(cache_path) if not force_retrain else None
+
+    if meta is not None:
+        pool, shared_channels, train_well_ids = collect_shared_train_pool(
+            prepared_wells,
+            enable_reduction=anomaly_key != "negermet",
+        )
+        channels_match = list(meta["shared_channels"]) == list(shared_channels)
+        patch_match = (
+            int(meta["patch_short"]) == int(patch_short)
+            and int(meta["patch_long"]) == int(patch_long)
+        )
+        key_match = str(meta["anomaly_key"]) == anomaly_key
+
+        if channels_match and patch_match and key_match:
+            if verbose:
+                src = meta["detail"].get("training_mode", "shared")
+                print(
+                    f"  Shared encoder cache HIT: loading {cache_path.name} "
+                    f"(channels={len(shared_channels)}, patch=({patch_short},{patch_long}), src={src})"
+                )
+            return load_shared_encoder_state(
+                anomaly_key=anomaly_key,
+                path=cache_path,
+                device=device,
+                compile_model=True,
+                verbose=verbose,
+            )
+
+        reasons = []
+        if not key_match:
+            reasons.append(f"anomaly_key mismatch ({meta['anomaly_key']} vs {anomaly_key})")
+        if not patch_match:
+            reasons.append(
+                f"patch sizes mismatch (saved=({meta['patch_short']},{meta['patch_long']}) vs current=({patch_short},{patch_long}))"
+            )
+        if not channels_match:
+            reasons.append(
+                f"channel set mismatch (saved={len(meta['shared_channels'])} vs current={len(shared_channels)})"
+            )
+        print(f"  Shared encoder cache STALE: {'; '.join(reasons)} -> retraining from scratch")
+    elif force_retrain and cache_path.exists():
+        print(f"  Shared encoder cache OVERRIDE (ALMA_FORCE_RETRAIN_ENCODER=1): retraining {cache_path.name}")
+
+    return train_shared_encoder(
+        prepared_wells=prepared_wells,
+        patch_short=patch_short,
+        patch_long=patch_long,
+        anomaly_key=anomaly_key,
+        device=device,
+        verbose=verbose,
     )
 
 

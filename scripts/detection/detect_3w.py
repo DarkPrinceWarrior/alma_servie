@@ -13,6 +13,9 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 
 from alma_service.engineered_features import PreparedWellData
 from alma_service.shared_encoder import (
@@ -24,6 +27,7 @@ from alma_service.shared_encoder import (
     shared_encoder_path,
     train_shared_encoder,
 )
+from physical_branches_3w import compute_physical_score
 
 
 def load_class_features(processed_dir: Path, folder_label: int) -> pd.DataFrame:
@@ -68,8 +72,14 @@ def build_prepared_wells(
         is_normal = grp["is_normal"].to_numpy().astype(bool)
         first_non_normal = int(np.argmax(~is_normal)) if (~is_normal).any() else len(is_normal)
         if not is_normal.any():
-            fallback_len = min(max(len(is_normal) // 4, cfg["paano"]["patch_long"] * 4), len(is_normal))
-            reference_mask = np.zeros(len(is_normal), dtype=bool)
+            patch_long = int(cfg["paano"]["patch_long"])
+            n = len(is_normal)
+            min_ref = min(patch_long * 2, max(16, n // 4))
+            max_ref = max(min_ref, n // 2)
+            fallback_len = min(max_ref, n)
+            if fallback_len < min_ref:
+                fallback_len = min(min_ref, n)
+            reference_mask = np.zeros(n, dtype=bool)
             reference_mask[:fallback_len] = True
             reference_end_idx = fallback_len
         else:
@@ -213,12 +223,62 @@ def score_wells(
     return pd.concat(rows, axis=0, ignore_index=True)
 
 
+def _apply_physical_branch(
+    scores_df: pd.DataFrame,
+    features_df: pd.DataFrame,
+    event_class: int,
+    wells: dict[str, PreparedWellData],
+    weight: float,
+) -> pd.DataFrame:
+    weight = float(np.clip(weight, 0.0, 1.0))
+    if weight <= 0:
+        scores_df["physical_score"] = 0.0
+        return scores_df
+    feats_by_instance = {iid: g for iid, g in features_df.groupby("instance_id", sort=False)}
+    physical_full: list[np.ndarray] = []
+    paano_score_array = scores_df["score"].to_numpy(dtype=np.float64)
+    instance_order = scores_df["well_id"].tolist()
+    instance_starts: dict[str, int] = {}
+    for idx, iid in enumerate(instance_order):
+        instance_starts.setdefault(iid, idx)
+    out_physical = np.zeros(len(scores_df), dtype=np.float32)
+    for iid, sub_scores in scores_df.groupby("well_id", sort=False):
+        well = wells.get(iid)
+        if well is None:
+            continue
+        feats = feats_by_instance.get(iid)
+        if feats is None:
+            continue
+        ts_ms = pd.to_datetime(sub_scores["timestamp"].to_numpy()).astype("datetime64[ns]")
+        feats_sub = feats.set_index(pd.to_datetime(feats["timestamp"]).astype("datetime64[ns]"))
+        feats_aligned = feats_sub.reindex(ts_ms)
+        ref_mask = sub_scores["reference_mask"].to_numpy(dtype=bool)
+        phys = compute_physical_score(feats_aligned, event_class, ref_mask)
+        if phys is None or len(phys) != len(sub_scores):
+            phys = np.zeros(len(sub_scores), dtype=np.float32)
+        idx_into_scores = sub_scores.index.to_numpy()
+        out_physical[idx_into_scores] = phys
+    paano_rank = pd.Series(paano_score_array).rank(method="average", pct=True).to_numpy()
+    physical_score = out_physical.astype(np.float64)
+    fused = (1.0 - weight) * paano_rank + weight * physical_score
+    scores_df["paano_fused"] = paano_rank.astype(np.float32)
+    scores_df["physical_score"] = physical_score.astype(np.float32)
+    scores_df["score"] = fused.astype(np.float32)
+    return scores_df
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PaAno encoder and score 3W instances for one event class.")
     parser.add_argument("--config", default="configs/3w_paano.json")
     parser.add_argument("--event-class", type=int, required=True)
     parser.add_argument("--force-retrain", action="store_true")
     parser.add_argument("--weight-short", type=float, default=0.6)
+    parser.add_argument(
+        "--physical-weight", type=float, default=None,
+        help="If set, fuse physical branch (class-specific) with PaAno score. "
+             "0.0 = pure PaAno, 1.0 = pure physical. Default: 0.0 (disabled). "
+             "Class 4 and 6 auto-enabled at 0.7 unless overridden.",
+    )
     args = parser.parse_args()
 
     cfg = json.loads((PROJECT_ROOT / args.config).read_text(encoding="utf-8"))
@@ -254,6 +314,20 @@ def main() -> None:
     if scores.empty:
         print("[detect_3w] no scores produced", flush=True)
         return
+
+    auto_weights = {4: 0.7, 6: 0.7}
+    physical_weight = args.physical_weight
+    if physical_weight is None:
+        physical_weight = auto_weights.get(args.event_class, 0.0)
+    if physical_weight > 0:
+        scores = _apply_physical_branch(
+            scores,
+            features_df=features_df,
+            event_class=args.event_class,
+            wells=wells,
+            weight=float(physical_weight),
+        )
+    scores["physical_weight"] = float(physical_weight)
 
     scores_dir = PROJECT_ROOT / "artifacts" / "3w" / "scores"
     scores_dir.mkdir(parents=True, exist_ok=True)
