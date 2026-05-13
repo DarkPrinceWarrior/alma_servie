@@ -19,12 +19,12 @@ from alma_service.anomaly_specs import get_dataset_spec
 from alma_service.dataset_builder import build_dataset
 
 
-def main(freq: str = "2min") -> None:
+def main(freq: str = "10min") -> None:
     build_dataset(get_dataset_spec("pritok"), freq=freq)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--freq", default="2min", help="Resample frequency (e.g. 15s, 2min)")
+    parser.add_argument("--freq", default="10min", help="Resample frequency (e.g. 15s, 2min)")
     args = parser.parse_args()
     main(freq=args.freq)
