@@ -38,6 +38,15 @@ PRITOK_WELL_FILES = {
     "3027": PRITOK_RAW_DIR / "3027.xlsx",
     "610": PRITOK_RAW_DIR / "610_Приток.xlsx",
     "602": PRITOK_RAW_DIR / "602_Приток.xlsx",
+    "122": PRITOK_RAW_DIR / "122_Кус_Приток.xlsx",
+    "5021": PRITOK_RAW_DIR / "5021_ЮЯ_Приток.xlsx",
+    "1442л": PRITOK_RAW_DIR / "1442л_ЮЯ_Приток.xlsx",
+    "1508": PRITOK_RAW_DIR / "1508_ЮЯ_Приток.xlsx",
+    "4203у": PRITOK_RAW_DIR / "4203у_ЮЯ_Приток.xlsx",
+    "1449": PRITOK_RAW_DIR / "1449_ЮЯ_Приток.xlsx",
+    "305г": PRITOK_RAW_DIR / "305г_ВИК_Изменение_частоты_Нормальная.xlsx",
+    "1996л": PRITOK_RAW_DIR / "1996л_ЮЯ_Изменение_частоты_Нормальная.xlsx",
+    "1995": PRITOK_RAW_DIR / "1995_ЮЯ_Изменение_частоты_Нормальная.xlsx",
 }
 
 SALT_WELL_FILES = {
