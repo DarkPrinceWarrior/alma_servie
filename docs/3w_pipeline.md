@@ -65,21 +65,24 @@ Optuna sweep → physical branches → P10 hook → multi-source A/B, откры
 
 ---
 
-## 2. Открытые направления, ранжированные по ROI (ALMA-first)
+## 2. Открытые направления, ранжированные по ROI (ALMA-first, после Sprint 4)
 
-**Основная цель проекта — ALMA production detector**. 3W — это domain pretrain и benchmark, не самостоятельный продукт. Ranking ниже — по влиянию на ALMA negermet / pritok / salt.
+**Основная цель — ALMA production detector**. После Sprint 4 направления #1-#3 (transfer c5→pritok, c4/c6→salt, slope-port) проверены и закрыты без эффекта на ALMA. Encoder и trend-physics ALMA выжаты на текущей feature/encoder архитектуре. Остались только методологические сдвиги.
 
 | # | Направление | ALMA-эффект | Сложность | Срок |
 |---|-------------|-------------|-----------|------|
-| 1 | **Transfer 3W class 5 encoder → ALMA pritok** через P10 hook. Class 5 = "RAPID_PRODUCTIVITY_LOSS" = тренд давления, семантически совпадает с pritok ("Приток"). Сейчас deployed class 9 (hydrate, не trend) | потенциально лучше pritok mae/delay, аналогично -25% FAR class 9 → negermet | низкая | 30 мин |
-| 2 | **Port `class5_trend_slope_score` → ALMA pritok physics branch**. ALMA pritok config уже содержит `pressure_trend_weight` — заменить или дополнить rolling-slope сигналом | прямой перенос Sprint 3 win'а в production: pritok mae снизится | низкая | 1-2 ч |
-| 3 | **Transfer 3W class 4 (FLOW_INSTABILITY) / class 6 (QUICK_RESTRICTION) encoder → ALMA salt** через P10 hook. Class 6 choke-step ≈ salt deposition physics. Sprint 2 уже исчерпал onset-tuning для salt; encoder-side не пробовали кроме class 9 | возможно сдвинуть salt FAR (0.013 → ниже) или delay | низкая | 30 мин |
-| 4 | **DACAD contrastive + GRL** на ALMA encoder (domain-adversarial training с 3W как source-domain) | encoder-side, единственный способ двинуть salt после Sprint 2 sweep | высокая | 3-5 дней |
-| 5 | **3W internal — FFT spectral branch class 3** (hit=0.188) | 0 для ALMA, только для 3W benchmark coverage | средняя | 1-2 дня |
-| 6 | **3W internal — autocorr branch class 4** (hit=0.536) | 0 для ALMA, только для 3W coverage | средняя | 1 день |
-| 7 | **3W internal — NORMAL guard P11 deploy** | 0 для ALMA | средняя | 1 день |
+| 1 | **DACAD contrastive + GRL** — domain-adversarial training. ALMA encoder обучается с adversarial discriminator, который не должен различать 3W source vs ALMA target distributions. Единственный путь сдвинуть salt encoder (sweep + transfer выжаты) | salt encoder-side gain возможен +0-10% FAR/mae; pritok возможно +0-5% mae | высокая | 3-5 дней |
+| 2 | **Optuna-tuned weight для `pressure_trend_slope`** — slope-компонента уже хранится в `PressureTrendOutput.components`. Sprint 4 показал, что in-line max-fuse ломает калибровку; нужен отдельный вес в `pressure_trend_weight`-семействе с Optuna search per-anomaly | marginal mae↓ на pritok, возможно ↓ на negermet | низкая | 1 день |
+| 3 | **3W class 5 trend-slope encoder** в P10 hook — обучить **отдельный** ALMA pritok encoder со slope-feature inject как extra channel вместо физического fusion | новый encoder-канал может дать pritok mae↓ без regression | средняя | 1-2 дня |
+| 4 | **3W internal — FFT spectral branch class 3** (hit=0.188) | 0 для ALMA, только 3W benchmark | средняя | 1-2 дня |
+| 5 | **3W internal — autocorr branch class 4** (hit=0.536) | 0 для ALMA, 3W benchmark | средняя | 1 день |
+| 6 | **3W internal — NORMAL guard P11 deploy** | 0 для ALMA | средняя | 1 день |
 
-**Recommended next sprint (ALMA-first)**: #1 + #2 + #3 параллельно — все три это прямой transfer Sprint 3 findings в production ALMA с известными точками входа. Ожидаемый ALMA gain: pritok delay/mae ↓, потенциально salt FAR ↓. Затем #4 DACAD как самостоятельный методологический шаг. 3W-internal (#5-#7) — только если есть отдельное требование "закрыть class 3 coverage в 3W benchmark".
+**Recommended next sprint**:
+- **Если ALMA priority** — #2 (slope Optuna tuning) дешёвый эксперимент с реальным шансом на pritok mae↓. Затем #1 (DACAD) как большой методологический шаг.
+- **Если 3W benchmark coverage** — #4 (FFT class 3) с высоковероятным ROI.
+
+Sprint 4 закрыл иллюзию "transfer любого класса → ALMA даст gain". Дальше — только методологические сдвиги или отдельные channel-инъекции, не варианты transfer.
 
 ---
 
@@ -249,6 +252,60 @@ Baseline `paano_shared` без transfer (split = all). Production-defaults по�
 
 ---
 
+## 4d. Sprint 4 (2026-05-13, ALMA-first) → **encoder/physics ALMA-side выжата**
+
+Параллельный запуск (GPU 1/2/3): transfer 3W class 5 → ALMA pritok, transfer 3W class 4/6 → ALMA salt, port `_rolling_slope` в `alma_service/pressure_trend.py`.
+
+### Транзиты 3W → ALMA (A/B vs deployed)
+
+Все 3 transfer encoders созданы, deploy + detect через swap-helper `scripts/evaluation/_s4_swap_test.py`.
+
+| Variant | ALMA target | hit (all) | FAR/day (all) | mae (train) | mae (test) | Δ vs deployed |
+|---------|-------------|----------:|---------------:|------------:|-----------:|---------------|
+| c5 → pritok | pritok | 1.000 | 0.0376 | 17.32ч | 30.59ч | ≈ identical to c9 (deployed). Train mae −0.43ч |
+| c4 → salt | salt | 1.000 | 0.0127 | 10.03ч | 2.00ч | ≈ identical to baseline |
+| c6 → salt | salt | 1.000 | 0.0127 | 10.03ч | 2.00ч | ≈ identical to baseline |
+
+**Вывод**: 
+- Pritok уже на encoder-side ceiling (class 9 deployed в Sprint 2 — best variant).
+- Salt **invariant к любому 3W transfer**: c4 (oscillation), c6 (choke step), c9 (hydrate) — все дают identical metrics. Salt encoder bottleneck не в representation.
+
+### Port `_rolling_slope` → ALMA pritok physics (`alma_service/pressure_trend.py`)
+
+Реализация:
+- Добавлена `_rolling_slope(values, window)` — causal OLS slope, mirror `physical_branches_3w._rolling_slope`.
+- Добавлен компонент `pressure_trend_slope` в `PressureTrendOutput.components`.
+
+Попытка #1: фьюз `slope_excess` в `change_core` через `np.maximum.reduce` →
+**catastrophic regression**: test hit 1.000 → **0.500**, mae 30.59 → 59.52ч, train hit invariant.
+Причина: slope_excess во время reference-window не нулевой (нормальные тренды давления тоже имеют наклон), это сдвигает per-well empirical_tail_score калибровку и провоцирует ложные onset на test.
+
+**Откат**: фьюз убран, `slope_tail` сохранён только как diagnostic component. Pritok metrics восстановлены 1-в-1.
+
+Slope можно использовать только через **отдельный конфигурируемый вес** с Optuna-tuning per-anomaly — но это уже не Sprint 4 scope.
+
+### Итоги Sprint 4
+
+| Что | Результат |
+|-----|-----------|
+| Transfer 3W class 5 → ALMA pritok | ≈ deployed c9 — marginal mae улучшение, не оправдывает deploy |
+| Transfer 3W class 4 → ALMA salt | ✗ invariant |
+| Transfer 3W class 6 → ALMA salt | ✗ invariant |
+| Port `_rolling_slope` → pritok physics (fuse через max) | ✗ regression test hit 1.000 → 0.500, откачено |
+| Port `_rolling_slope` → pritok physics (diagnostic-only) | ✓ shipped, без эффекта на текущий score |
+
+**Главный вывод Sprint 4**: ALMA encoder-side и pritok physics-side **выжаты** на текущей feature/encoder архитектуре:
+- Sprint 2 deployed c9 → pritok/negermet — best transfer.
+- Sprint 4 c5/c4/c6 transfers + slope-port — ничего нового не дают.
+- Salt encoder fundamentally invariant к 3W transfer (любого класса).
+
+**Что осталось для ALMA (после Sprint 4):**
+1. **DACAD contrastive + GRL** — единственный методологический путь к salt encoder gain. 3-5 дней.
+2. **Optuna-tuned separate weight для `pressure_trend_slope`** — может вытащить marginal mae на pritok через per-anomaly tuning, не через in-line fusion. 1 день.
+3. **3W-internal coverage** (FFT class 3, autocorr class 4) — благо для benchmark, не двигает ALMA production.
+
+---
+
 ## 4c. Итог 3W работы относительно baseline (2026-05-12 → 2026-05-13)
 
 ### Что было на старте 3W работы (tag `baseline-pre-3w-2026-05-12`)
@@ -311,26 +368,30 @@ Baseline `paano_shared` без transfer (split = all). Production-defaults по�
 4. **Multi-source NORMAL pretrain** хуже per-class на нашем pool size (intersection даёт 10 каналов вместо 25-35). Per-class остаётся best transfer-source.
 5. **Anomaly injection** работает только при больших pool'ах (3W class 5 marginal +1.5%; ALMA fine-tune negligible из-за 1-2 окон).
 
-### Что осталось (ALMA-first, синхронизировано с секцией 2)
+### Что осталось (ALMA-first, после Sprint 4 — синхронизировано с секцией 2)
 
-**Главная цель — ALMA production detector. 3W — это пре-обучение/benchmark, не самостоятельный продукт.** Открытые задачи ранжированы по ALMA-эффекту.
+**Главная цель — ALMA production detector.** Sprint 4 закрыл "transfer 3W class N → ALMA" во всех нетривиальных вариантах: pritok ceiling = class 9 (deployed), salt invariant к любому class. Slope-port дал regression и оставлен как diagnostic. Открытые задачи теперь — только методологические сдвиги.
 
 | Приоритет | Задача | ALMA-эффект | Сложность |
 |----:|--------|-------------|-----------|
-| **#1** | **Transfer 3W class 5 encoder → ALMA pritok** через P10 hook. Class 5 = тренд давления, семантика совпадает с pritok | pritok mae/delay ↓ (Sprint 3 finding в production) | низкая, 30 мин |
-| **#2** | **Port `class5_trend_slope_score` → ALMA pritok physics branch**. Использовать `pressure_trend_weight` или новый channel | pritok mae ↓ | низкая, 1-2 ч |
-| **#3** | **Transfer 3W class 4/6 encoder → ALMA salt** через P10. Class 6 choke-step ≈ salt deposition physics. Не пробовали (deployed только class 9) | salt FAR ↓ или delay ↓ | низкая, 30 мин |
-| **#4** | **DACAD contrastive + GRL** на ALMA encoder (3W как source domain) | salt encoder-side gain (sweep исчерпан в Sprint 2) | высокая, 3-5 дней |
-| #5 | 3W class 3 FFT spectral branch (hit=0.188) | 0 для ALMA, 3W coverage | средняя, 1-2 дня |
-| #6 | 3W class 4 autocorr branch (hit=0.536) | 0 для ALMA, 3W coverage | средняя, 1 день |
-| #7 | 3W NORMAL guard P11 production-deploy | 0 для ALMA | средняя, 1 день |
-| #8 | 3W class 2 single failed instance investigation | 0 для ALMA | низкая, 30 мин |
-| #9 | Cross-validation per-class 5-fold | методологический | низкая, 1 день |
+| **#1** | **DACAD contrastive + GRL** на ALMA encoder (3W как source-domain) | единственный путь к salt encoder gain | высокая, 3-5 дней |
+| **#2** | **Optuna-tuned weight для `pressure_trend_slope`** компоненты (slope уже считается, нужен отдельный вес и Optuna search) | marginal pritok mae↓ | низкая, 1 день |
+| #3 | 3W class 5 trend-slope **inject как extra channel** в ALMA pritok encoder | новый channel вместо max-fuse → возможно pritok mae↓ без regression | средняя, 1-2 дня |
+| #4 | 3W class 3 FFT spectral branch (hit=0.188) | 0 для ALMA, 3W coverage | средняя, 1-2 дня |
+| #5 | 3W class 4 autocorr branch (hit=0.536) | 0 для ALMA, 3W coverage | средняя, 1 день |
+| #6 | 3W NORMAL guard P11 production-deploy | 0 для ALMA | средняя, 1 день |
+| #7 | 3W class 2 single failed instance investigation | 0 для ALMA | низкая, 30 мин |
+| #8 | Cross-validation per-class 5-fold | методологический | низкая, 1 день |
 
 **Recommended next sprint (ALMA-focused)**:
-1. **#1 + #2 + #3 в одном sprint'е** — все три это прямой transfer Sprint 3 findings в production ALMA. Не блокируют друг друга, можно запустить параллельно на отдельных GPU.
-2. **После #1-#3** оценить ALMA acceptance, решить нужен ли #4 DACAD.
-3. **3W-internal задачи (#5-#9)** — только если есть отдельное требование "закрыть class 3 coverage в 3W benchmark". Для ALMA production они не нужны.
+1. **#2 первым** — дешёвый эксперимент (1 день), реальный шанс marginal pritok mae↓ через Optuna-search slope-weight.
+2. **#1 DACAD после** — большой методологический шаг, единственная остающаяся опция для salt.
+3. **3W-internal (#4-#8)** — только если есть отдельный запрос на 3W benchmark coverage.
+
+Закрытые в Sprint 4 (не повторять):
+- ~~Transfer 3W class 5 → ALMA pritok~~ — ≈ identical class 9 (deployed)
+- ~~Transfer 3W class 4/6 → ALMA salt~~ — invariant
+- ~~Port slope → pritok physics via max-fuse~~ — regression test hit 1.000 → 0.500
 
 ---
 

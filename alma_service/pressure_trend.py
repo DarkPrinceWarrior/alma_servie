@@ -86,6 +86,40 @@ def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
     )
 
 
+def _rolling_slope(values: np.ndarray, window: int) -> np.ndarray:
+    """Causal rolling least-squares slope of values over `window` samples.
+
+    Slope at index i is OLS fit of values[i-window+1..i] against local time
+    indices 0..window-1. Indices < window-1 yield 0 (insufficient data).
+    Mirrors scripts.detection.physical_branches_3w._rolling_slope so the
+    physical-trend signal stays consistent between 3W class 5 and ALMA pritok.
+    """
+    n = len(values)
+    w = int(window)
+    out = np.zeros(n, dtype=np.float64)
+    if n < w or w < 3:
+        return out.astype(np.float32)
+    t = np.arange(w, dtype=np.float64)
+    t_mean = t.mean()
+    t_centered = t - t_mean
+    denom = float(np.sum(t_centered * t_centered))
+    if denom < 1e-12:
+        return out.astype(np.float32)
+    x = np.where(np.isnan(values), 0.0, values).astype(np.float64)
+    idx = np.arange(n, dtype=np.float64)
+    cs_x = np.concatenate(([0.0], np.cumsum(x)))
+    cs_tx = np.concatenate(([0.0], np.cumsum(idx * x)))
+    for i in range(w - 1, n):
+        s = i - w + 1
+        sum_x = cs_x[i + 1] - cs_x[s]
+        sum_tx_global = cs_tx[i + 1] - cs_tx[s]
+        sum_t_local_x = sum_tx_global - s * sum_x
+        x_mean = sum_x / w
+        slope_num = sum_t_local_x - t_mean * w * x_mean
+        out[i] = slope_num / denom
+    return out.astype(np.float32)
+
+
 def _adaptive_horizons(reference_points: int, total_points: int) -> list[int]:
     if reference_points < 16 or total_points < 32:
         return []
@@ -135,6 +169,7 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
                 "pressure_trend_change": zero.copy(),
                 "pressure_trend_persistence": zero.copy(),
                 "pressure_trend_practical": zero.copy(),
+                "pressure_trend_slope": zero.copy(),
                 "pressure_trend_direction": zero.copy(),
                 "pressure_trend_horizon": zero.copy(),
             },
@@ -153,6 +188,7 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
                 "pressure_trend_change": zero.copy(),
                 "pressure_trend_persistence": zero.copy(),
                 "pressure_trend_practical": zero.copy(),
+                "pressure_trend_slope": zero.copy(),
                 "pressure_trend_direction": zero.copy(),
                 "pressure_trend_horizon": zero.copy(),
             },
@@ -184,6 +220,7 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
                 "pressure_trend_change": zero.copy(),
                 "pressure_trend_persistence": zero.copy(),
                 "pressure_trend_practical": zero.copy(),
+                "pressure_trend_slope": zero.copy(),
                 "pressure_trend_direction": zero.copy(),
                 "pressure_trend_horizon": zero.copy(),
             },
@@ -196,6 +233,7 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
         "pressure_trend_change": zero.copy(),
         "pressure_trend_persistence": zero.copy(),
         "pressure_trend_practical": zero.copy(),
+        "pressure_trend_slope": zero.copy(),
         "pressure_trend_direction": zero.copy(),
         "pressure_trend_horizon": zero.copy(),
     }
@@ -228,6 +266,14 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
             persistence_raw[reference_mask],
         )
 
+        # Sprint 4 #2: rolling regression slope as DIAGNOSTIC component only.
+        # Fusion via max with change_excess was tried but degraded test hit
+        # 1.000 -> 0.500 due to per-well reference-mask calibration shift.
+        # Kept as a stored component for future Optuna-tuned separate weight.
+        slope_raw = _rolling_slope(pressure, horizon)
+        slope_abs = np.abs(slope_raw) / ref_scale
+        slope_tail = empirical_tail_score(slope_abs, slope_abs[reference_mask])
+
         change_core = np.maximum(change_excess, persistence_excess)
         level_support = np.sqrt((level_excess + 1.0) * (practical_excess + 1.0))
         # The branch must describe an onset/change, not a permanently elevated
@@ -246,6 +292,7 @@ def build_pressure_trend_branch(prepared: PreparedWellData) -> PressureTrendOutp
                 "pressure_trend_change": change_tail.astype(np.float32),
                 "pressure_trend_persistence": persistence_tail.astype(np.float32),
                 "pressure_trend_practical": practical_tail.astype(np.float32),
+                "pressure_trend_slope": slope_tail.astype(np.float32),
                 "pressure_trend_direction": direction,
                 "pressure_trend_horizon": np.full(n, horizon, dtype=np.float32),
             },
