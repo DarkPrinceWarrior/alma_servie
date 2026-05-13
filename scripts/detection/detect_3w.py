@@ -118,8 +118,9 @@ def build_prepared_wells(
     return wells, feature_columns
 
 
-def encoder_artifact_path(folder_label: int, anomaly_key: str) -> Path:
-    return PROJECT_ROOT / "artifacts" / "3w" / "checkpoints" / f"{anomaly_key}_paano_shared_encoder.pt"
+def encoder_artifact_path(folder_label: int, anomaly_key: str, suffix: str = "") -> Path:
+    name = f"{anomaly_key}{suffix}_paano_shared_encoder.pt"
+    return PROJECT_ROOT / "artifacts" / "3w" / "checkpoints" / name
 
 
 def train_or_load_encoder(
@@ -130,8 +131,10 @@ def train_or_load_encoder(
     *,
     force_retrain: bool,
     anomaly_key: str,
+    inject_cfg=None,
+    artifact_suffix: str = "",
 ) -> SharedEncoderState:
-    artifact = encoder_artifact_path(folder_label, anomaly_key)
+    artifact = encoder_artifact_path(folder_label, anomaly_key, suffix=artifact_suffix)
     if artifact.exists() and not force_retrain:
         print(f"[encoder] loading existing  {artifact}", flush=True)
         try:
@@ -147,6 +150,7 @@ def train_or_load_encoder(
         anomaly_key=anomaly_key,
         device=device,
         verbose=True,
+        inject_cfg=inject_cfg,
     )
     print(f"[encoder] trained in {time.time() - t0:.1f}s  channels={len(state.shared_channels)}", flush=True)
     artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -279,6 +283,16 @@ def main() -> None:
              "0.0 = pure PaAno, 1.0 = pure physical. Default: 0.0 (disabled). "
              "Class 4 and 6 auto-enabled at 0.7 unless overridden.",
     )
+    parser.add_argument(
+        "--inject-rate", type=float, default=0.0,
+        help="Anomaly injection rate during 3W encoder pretrain (0-1). "
+             "0 = disabled (default), 0.3 = inject into 30%% of training windows.",
+    )
+    parser.add_argument(
+        "--encoder-suffix", type=str, default="",
+        help="Optional suffix for encoder artifact filename (e.g. '_inject03' to "
+             "keep injection variant separate from baseline).",
+    )
     args = parser.parse_args()
 
     cfg = json.loads((PROJECT_ROOT / args.config).read_text(encoding="utf-8"))
@@ -305,9 +319,16 @@ def main() -> None:
     )
     print(f"[detect_3w] device={device}", flush=True)
 
+    inject_cfg = None
+    if args.inject_rate > 0.0:
+        from alma_service.anomaly_injection import InjectionConfig
+        inject_cfg = InjectionConfig(rate=float(args.inject_rate))
+        print(f"[detect_3w] anomaly_injection_rate={inject_cfg.rate}", flush=True)
+
     state = train_or_load_encoder(
         wells, args.event_class, cfg, device,
         force_retrain=args.force_retrain, anomaly_key=anomaly_key,
+        inject_cfg=inject_cfg, artifact_suffix=args.encoder_suffix,
     )
 
     scores = score_wells(wells, state, device, args.weight_short)
@@ -315,7 +336,7 @@ def main() -> None:
         print("[detect_3w] no scores produced", flush=True)
         return
 
-    auto_weights = {4: 0.7, 6: 0.7}  # class 3 slug branch tried but degraded test hit (0.188 -> 0.125), reverted
+    auto_weights = {4: 0.7, 5: 0.6, 6: 0.7}  # class 5 trend-slope (Sprint 3): hit 0.582 -> 1.000 (P-PDG/P-TPT slope). class 3 slug tried negatively, reverted.
     physical_weight = args.physical_weight
     if physical_weight is None:
         physical_weight = auto_weights.get(args.event_class, 0.0)

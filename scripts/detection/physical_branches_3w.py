@@ -124,9 +124,68 @@ def class3_slug_score(df: pd.DataFrame, ref_mask: np.ndarray) -> np.ndarray:
     return _rank_normalize(composite)
 
 
+def _rolling_slope(x: np.ndarray, window: int) -> np.ndarray:
+    """Causal rolling linear-regression slope of x over `window` samples.
+
+    Slope at index i is least-squares fit of x[i-window+1..i] against time
+    indices 0..window-1. For indices < window the output is 0.
+    """
+    n = len(x)
+    out = np.zeros(n, dtype=np.float64)
+    if n < window or window < 3:
+        return out
+    t = np.arange(window, dtype=np.float64)
+    t_mean = t.mean()
+    t_centered = t - t_mean
+    denom = float(np.sum(t_centered * t_centered))
+    if denom < 1e-12:
+        return out
+    x = np.where(np.isnan(x), 0.0, x).astype(np.float64)
+    cs_x = np.concatenate(([0.0], np.cumsum(x)))
+    idx = np.arange(n, dtype=np.float64)
+    cs_tx = np.concatenate(([0.0], np.cumsum(idx * x)))
+    for i in range(window - 1, n):
+        s = i - window + 1
+        sum_x = cs_x[i + 1] - cs_x[s]
+        sum_tx_global = cs_tx[i + 1] - cs_tx[s]
+        sum_t_local_x = sum_tx_global - s * sum_x
+        x_mean = sum_x / window
+        slope_num = sum_t_local_x - t_mean * window * x_mean
+        out[i] = slope_num / denom
+    return out
+
+
+def class5_trend_slope_score(df: pd.DataFrame, ref_mask: np.ndarray) -> np.ndarray:
+    """Trend-slope score for RAPID_PRODUCTIVITY_LOSS (class 5).
+
+    Productivity loss manifests as a sustained downward trend on downhole
+    pressure indicators. Computes causal rolling-window regression slope on
+    P-PDG and P-TPT (window 30 samples ≈ 30min at 1min resample) and fuses
+    the negative-slope components via max-pool, then rank-normalizes.
+    """
+    window = 30
+    indicators: list[np.ndarray] = []
+    for col in ("P-PDG", "P-TPT"):
+        series = df.get(col)
+        if series is None:
+            continue
+        x = np.asarray(series.values, dtype=np.float64)
+        slope = _rolling_slope(x, window)
+        z = _causal_zscore(slope.astype(np.float32), ref_mask)
+        neg = np.clip(-z, 0.0, None)
+        indicators.append(neg)
+    if not indicators:
+        return np.zeros(len(df), dtype=np.float32)
+    composite = indicators[0]
+    for ind in indicators[1:]:
+        composite = np.maximum(composite, ind)
+    return _rank_normalize(composite)
+
+
 CLASS_SCORERS = {
     3: class3_slug_score,
     4: class4_oscillation_score,
+    5: class5_trend_slope_score,
     6: class6_choke_step_score,
 }
 

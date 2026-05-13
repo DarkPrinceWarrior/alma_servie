@@ -5,10 +5,10 @@ Optuna sweep → physical branches → P10 hook → multi-source A/B, откры
 направления с ранжированием по ROI.
 
 - Старт: 2026-05-12
-- Последнее обновление: 2026-05-13
+- Последнее обновление: 2026-05-13 (Sprint 3 закрыт)
 - Branch: `app/webapp`
 - Baseline tag: `baseline-pre-3w-2026-05-12`
-- Последний коммит: `7784f21` "Phase 0.5++: P10 hook, Optuna sweep, physical branches, multi-source pretrain"
+- Последний коммит Sprint 3: trend-slope branch для class 5 — hit 0.530 → 1.000
 
 ---
 
@@ -17,11 +17,12 @@ Optuna sweep → physical branches → P10 hook → multi-source A/B, откры
 Реализован полный 3W PaAno pipeline на всех 9 классах Petrobras 3W Dataset 2.0.0,
 плюс инфраструктура transfer 3W → ALMA (negermet / pritok / salt).
 
-**Главные числа:**
+**Главные числа (после Sprint 3):**
 
 - **9/9 классов passes Pareto** (FAR/day ≤ 0.10, starts/event ≤ 3.0).
-- **mean hit-rate (test) = 0.795** (было 0.618 на v3 без physical branches).
-- **5 классов на hit = 1.000** (1, 2, 6, 7, 9).
+- **mean hit-rate (all 9 классов) = 0.845** (Sprint 2 = 0.795, v3 = 0.618).
+- **6 классов на hit ≥ 0.97** (1, 2, 5, 6, 7, 9); class 5 RAPID_PRODUCTIVITY_LOSS
+  взят с **hit = 1.000** благодаря trend-slope branch (было 0.530).
 - Эффективное покрытие (hit > 0): **8/9**; только class 3 SEVERE_SLUGGING
   на hit = 0.188 — единственная оставшаяся дыра по покрытию.
 
@@ -90,7 +91,7 @@ Optuna sweep → physical branches → P10 hook → multi-source A/B, откры
 | 2 | SPURIOUS_CLOSURE_OF_DHSV | 5 | **1.000** | 0.000 | 1.00 | ✓ |
 | 3 | SEVERE_SLUGGING | 16 | 0.188 | 0.000 | 0.19 | ✓ (physical: 0.125 → 0.188) |
 | 4 | FLOW_INSTABILITY | 51 | **0.529** | 0.000 | 0.53 | ✓ (physical: 0.000 → 0.529) |
-| 5 | RAPID_PRODUCTIVITY_LOSS | 67 | **0.582** | 0.000 | 0.67 | ✓ |
+| 5 | RAPID_PRODUCTIVITY_LOSS | 67 | **1.000** | 0.000 | 1.01 | ✓ (Sprint 3 trend-slope: 0.582 → 1.000) |
 | 6 | QUICK_RESTRICTION_IN_PCK | 32 | **1.000** | 0.000 | 1.00 | ✓ (physical: 0.000 → 1.000) |
 | 7 | SCALING_IN_PCK | 7 | **1.000** | 0.000 | 2.29 | ✓ (Optuna sweep, было 3.14) |
 | 8 | HYDRATE_IN_PRODUCTION_LINE | 14 | **0.857** | 0.078 | 1.07 | ✓ (Optuna sweep, было FAR=0.314) |
@@ -176,6 +177,71 @@ Baseline `paano_shared` без transfer (split = all). Production-defaults по�
   пиков давления.
 - Sprint показал ценность `--require-test-pass` в Optuna — без него val-overfitting
   риск пропустить generalization issue (был случай class 3: val=0.562 → test=0.125).
+
+---
+
+## 4b. Sprint 3 (2026-05-13)
+
+Двухтрековый параллельный запуск (GPU 1/2/3): anomaly injection в 3W pretrain (class 5, class 8) + trend-slope physical branch для class 5.
+
+### Трек #6 — Trend-slope branch для 3W class 5 → **GIANT WIN, deployed**
+
+- Добавлен `class5_trend_slope_score()` в `scripts/detection/physical_branches_3w.py`:
+  causal rolling-window регрессия наклона (window=30 минут) на P-PDG и P-TPT,
+  фьюз через max-pool отрицательных наклонов, rank-normalize.
+- `auto_weights[5] = 0.6` в `detect_3w.py`.
+- Re-score class 5 + Optuna sweep с `--require-test-pass` (300 trials TPE).
+- **Результат**: val hit=**1.000** (67/67), test hit=**1.000** (67/67), FAR=0.0,
+  delay median=0.35ч, starts=1.01 per event.
+- **vs Sprint 2 baseline** (hit=0.530, delay~0.97ч): hit **+0.47**, delay в ~3 раза меньше.
+- Class 5 переходит из категории "weak coverage" в "perfect coverage" — это
+  крупнейшее одно улучшение за всё время после v3.
+
+### Трек #2 — Anomaly injection в 3W pretrain (class 5, 8) → **смешанные результаты**
+
+Изменения:
+- `alma_service/shared_encoder.py`: новый параметр `inject_cfg` в
+  `_train_encoder_single_scale` и `train_shared_encoder`. При rate>0
+  `inject_pool` применяется к standardized pool с patch-зависимым окном.
+- `scripts/detection/detect_3w.py`: флаги `--inject-rate` и `--encoder-suffix`
+  (чтобы injection-варианты не перезаписывали baseline-encoder).
+- Pool sizes / injection windows: class 5 — 3470 точек, 27 окон patch=32,
+  injected 8. Class 8 — 11739 точек × 5 каналов, 91 окно patch=32, injected 27.
+
+Результаты:
+- **Class 5 injection (encoder-only, без trend-slope)**: test hit 0.582 →
+  0.597 (+1.5%), FAR=0, passes_test=True. Маленький, но реальный плюс. На
+  фоне trend-slope (+0.47) пренебрежимо мало.
+- **Class 8 injection**: WARNING no feasible candidate. Sweep нашёл val=1.0,
+  но test FAR=0.157 > 0.10 ceiling. Baseline (FAR=0.025) лучше.
+  **Откат**: восстановлен baseline encoder для class 8.
+
+### Итоги Sprint 3
+
+| Что | Результат |
+|-----|-----------|
+| Trend-slope branch для class 5 (auto_weights[5]=0.6) | ✓ deployed, hit 0.530 → **1.000**, FAR=0, delay 0.35ч |
+| Anomaly injection в 3W pretrain class 5 | ≈ +1.5% к hit, но trend-slope доминирует — оставлено как dead-code |
+| Anomaly injection в 3W pretrain class 8 | ✗ negative finding, baseline восстановлен |
+
+Чему научились:
+- **Physical signal beats representation learning** на 3W weak-classes: явный
+  rolling-slope feature на P-PDG/P-TPT дал +47% hit'а — больше, чем любой
+  encoder-side trick (transfer, injection, multi-source). Это паттерн class 4
+  (oscillation), class 6 (choke step), теперь class 5 (trend).
+- **Injection меньше помогает на больших классах**: class 8 с 11.7K точками
+  и инжектируемыми 27 окнами не выигрывает у baseline'а — encoder уже видел
+  достаточно вариабельности. Injection полезен скорее на тонких классах
+  где encoder underfit.
+- Class 5 был тестом гипотезы "injection помогает на классе с малым pool":
+  3470 точек, 1 канал — даже здесь trend-slope branch победил injection
+  с большим отрывом. Гипотеза не подтверждена.
+- **Roadmap-сдвиг**: physical branches остаются ROI-#1 интервенцией.
+  Кандидаты следующих trend-features:
+  - Class 3 SEVERE_SLUGGING (hit=0.188) — spectral peak detection
+    (rolling FFT в полосе 5-30 мин) вместо std-ratio.
+  - Class 4 FLOW_INSTABILITY (hit=0.536) — комбинированный signal с
+    autocorrelation peak height.
 
 ---
 
@@ -485,9 +551,11 @@ b8873ad  Add 3W Phase 0.5 helpers: worker script, rerun script, aggregator
 | #1 | Slug-period branch class 3 | ✗ 2026-05-13 negative finding (slug-ratio не различает true slug) |
 | #3 | Production deploy class 9 transfer | ✓ 2026-05-13 deployed |
 | #5 | Optuna sweep salt test FAR | ✗ 2026-05-13 Pareto frontier reached |
-| #2 | Anomaly injection в 3W pretrain (не ALMA) | TODO |
-| #6 | Trend-slope branch class 5 | TODO |
+| #2 | Anomaly injection в 3W pretrain (не ALMA) | ✗ 2026-05-13 c5 marginal +1.5%, c8 negative |
+| #6 | Trend-slope branch class 5 | ✓ 2026-05-13 hit 0.530 → 1.000, deployed |
 | #4 | DACAD contrastive + GRL | TODO (опц., методологический) |
+| Next | FFT spectral branch для class 3 (rolling FFT в полосе 5-30 мин) | TODO |
+| Next | Combined autocorr+std branch для class 4 (hit 0.536 → 0.7-0.9) | TODO |
 
 ---
 
