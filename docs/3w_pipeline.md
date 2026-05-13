@@ -116,6 +116,69 @@ Baseline `paano_shared` без transfer (split = all). Production-defaults по�
 
 ---
 
+## 4a. Sprint 2 (2026-05-13, после консолидации docs)
+
+Трёхтрековый параллельный запуск (GPU 1-4):
+
+### Трек #3 — Production deploy class 9 transfer → **успех**
+
+- Скопирован `models/3w_class_9_transfer/{negermet,pritok}_paano_shared_encoder.pt`
+  в production-path (salt не трогаем — invariant).
+- Re-run `detect_negermet` и `detect_pritok` через P10 hook — cache HIT с
+  `src=3w_pretrain_alma_finetune` подтверждён.
+- Production метрики ALMA после deploy совпали 1-в-1 с ранее измеренными
+  в `artifacts/results/transfers/3w_class_9_v2/`:
+  - **negermet**: FAR/day (all) 0.250 → 0.188 (-25%), starts 1.80 → 1.60
+  - **pritok**: mae_h (train) 21.01 → 17.75 (-3.3ч)
+  - **salt**: invariant (baseline)
+- Snapshot в `artifacts/results/transfers/production_deployed/`.
+
+### Трек #5 — Optuna sweep ALMA salt onset → **negative finding**
+
+- Новый скрипт `scripts/evaluation/optuna_sweep_alma.py` (300 trials TPE,
+  расширенный search space на 7 параметров с включением gate_mode).
+- Constraints: `hit_rate >= 1.0` + `far_per_day <= 0.10` + `starts <= 3.0` на val + test.
+- Результат: **no feasible candidate found** — все configs которые снижали
+  FAR на test ниже текущих 0.023 одновременно роняли hit-rate ниже 1.0.
+- **Вывод**: salt baseline уже на Pareto frontier. Дальнейшее снижение FAR
+  возможно только через encoder-уровневые изменения, не onset-tuning.
+- Best-effort selected (для архива): `artifacts/results/transfers/alma_sweep/salt_alma_sweep_selected.json`.
+
+### Трек #1 — Slug-period branch для 3W class 3 → **negative finding, откат**
+
+- Добавлен `class3_slug_score()` в `scripts/detection/physical_branches_3w.py`:
+  fusion `z(P-TPT_roll5m_std / P-TPT_roll30m_std)` + `z(P-PDG_roll5m_std /
+  P-PDG_roll30m_std)` + `0.5 * z(P-TPT_roll5m_std)`.
+- `auto_weights[3] = 0.6` в `detect_3w.py`.
+- Re-score class 3 + Optuna sweep с `--require-test-pass`.
+- Результат: val hit=0.562, **test hit=0.125** (было 0.188 без slug branch).
+- **Вывод**: slug-period сигнал на P-TPT/P-PDG roll-std не различает true slug
+  от других trend-like artifacts на симулированных class 3 инстансах. Branch
+  ухудшил test generalization.
+- **Откат**: `auto_weights[3]` убран, class 3 пересчитан без physical branch,
+  Optuna sweep повторён → test hit восстановлен до 0.188.
+- Артефакт neg-finding: `artifacts/3w/metrics/slug_branch_negative_result/`.
+
+### Итоги Sprint 2
+
+| Что | Результат |
+|-----|-----------|
+| Production deploy class 9 transfer (negermet, pritok) | ✓ deployed, FAR -25%, delay -3.3ч сохранены |
+| ALMA salt FAR sweep | ✗ Pareto frontier reached |
+| 3W class 3 slug-period branch | ✗ negative finding, откачено |
+
+Чему научились:
+- ALMA salt encoder уже выжата по onset-tuning. Следующий шаг для salt —
+  только encoder-side (например DACAD-style contrastive, не sweep).
+- Slug на class 3 требует более тонкого сигнала, чем простой fast/slow std
+  ratio. Кандидаты: spectral peak detection (rolling FFT), rolling
+  autocorrelation peak height в полосе 5-30 мин, временная корреляция
+  пиков давления.
+- Sprint показал ценность `--require-test-pass` в Optuna — без него val-overfitting
+  риск пропустить generalization issue (был случай class 3: val=0.562 → test=0.125).
+
+---
+
 ## 5. Что сделано (хронологически)
 
 ### Phase 0.5 (2026-05-12 → старт)
@@ -419,9 +482,9 @@ b8873ad  Add 3W Phase 0.5 helpers: worker script, rerun script, aggregator
 | Multi-src | Global NORMAL pretrain A/B | ✓ 2026-05-13 (вариант хуже class 9) |
 | Injection | Anomaly injection в ALMA fine-tune A/B | ✓ 2026-05-13 (insignificant на small pool) |
 | P11 | 3W NORMAL guard для production | ✓ prototype, deferred deploy |
-| #1 | Slug-period branch class 3 | TODO (приоритет высокий) |
-| #3 | Production deploy class 9 transfer | TODO (30 мин, low-friction) |
-| #5 | Optuna sweep salt test FAR | TODO |
+| #1 | Slug-period branch class 3 | ✗ 2026-05-13 negative finding (slug-ratio не различает true slug) |
+| #3 | Production deploy class 9 transfer | ✓ 2026-05-13 deployed |
+| #5 | Optuna sweep salt test FAR | ✗ 2026-05-13 Pareto frontier reached |
 | #2 | Anomaly injection в 3W pretrain (не ALMA) | TODO |
 | #6 | Trend-slope branch class 5 | TODO |
 | #4 | DACAD contrastive + GRL | TODO (опц., методологический) |

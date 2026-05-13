@@ -80,7 +80,52 @@ def class6_choke_step_score(df: pd.DataFrame, ref_mask: np.ndarray) -> np.ndarra
     return _rank_normalize(composite)
 
 
+def class3_slug_score(df: pd.DataFrame, ref_mask: np.ndarray) -> np.ndarray:
+    """Slug-regime score for SEVERE_SLUGGING (class 3).
+
+    Approach: detect quasi-periodic oscillations in downhole pressure with
+    typical slug period 5-30 min. Uses two complementary indicators:
+    (a) ratio of fast-rolling std (5m) to slow-rolling std (30m) — same as
+        class 4 but on P-PDG (downhole gauge, closer to slug source);
+    (b) z-score of P-TPT_roll5m_std (fast variance growth), since slug events
+        produce sustained high-frequency pressure oscillation.
+
+    Both indicators are z-scored against the per-well reference window and
+    fused via max-pool, then rank-normalized.
+    """
+    p_pdg_fast = df.get("P-PDG_roll5m_std")
+    p_pdg_slow = df.get("P-PDG_roll30m_std")
+    p_tpt_fast = df.get("P-TPT_roll5m_std")
+    p_tpt_slow = df.get("P-TPT_roll30m_std")
+    if p_tpt_fast is None or p_tpt_slow is None:
+        return np.zeros(len(df), dtype=np.float32)
+
+    tpt_fast = np.asarray(p_tpt_fast.values, dtype=np.float64)
+    tpt_slow = np.asarray(p_tpt_slow.values, dtype=np.float64)
+    tpt_slow = np.where(tpt_slow < 1e-6, 1e-6, tpt_slow)
+    tpt_ratio = np.nan_to_num(tpt_fast / tpt_slow, nan=1.0, posinf=10.0, neginf=0.0)
+    z_tpt = np.clip(_causal_zscore(tpt_ratio, ref_mask), 0.0, None)
+
+    if p_pdg_fast is not None and p_pdg_slow is not None:
+        pdg_fast = np.asarray(p_pdg_fast.values, dtype=np.float64)
+        pdg_slow = np.asarray(p_pdg_slow.values, dtype=np.float64)
+        pdg_slow = np.where(pdg_slow < 1e-6, 1e-6, pdg_slow)
+        pdg_ratio = np.nan_to_num(pdg_fast / pdg_slow, nan=1.0, posinf=10.0, neginf=0.0)
+        z_pdg = np.clip(_causal_zscore(pdg_ratio, ref_mask), 0.0, None)
+        composite = np.maximum(z_tpt, z_pdg)
+    else:
+        composite = z_tpt
+
+    # Additional indicator: absolute fast variance (slug bursts are not just
+    # ratios but also high amplitude).
+    z_abs = np.clip(_causal_zscore(tpt_fast, ref_mask), 0.0, None)
+    composite = np.maximum(composite, 0.5 * z_abs)
+
+    return _rank_normalize(composite)
+
+
 CLASS_SCORERS = {
+    3: class3_slug_score,
     4: class4_oscillation_score,
     6: class6_choke_step_score,
 }

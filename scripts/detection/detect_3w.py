@@ -315,7 +315,7 @@ def main() -> None:
         print("[detect_3w] no scores produced", flush=True)
         return
 
-    auto_weights = {4: 0.7, 6: 0.7}
+    auto_weights = {4: 0.7, 6: 0.7}  # class 3 slug branch tried but degraded test hit (0.188 -> 0.125), reverted
     physical_weight = args.physical_weight
     if physical_weight is None:
         physical_weight = auto_weights.get(args.event_class, 0.0)
