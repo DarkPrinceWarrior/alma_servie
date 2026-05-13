@@ -64,6 +64,7 @@ def build_prepared_wells(
         grp = grp.sort_values("timestamp")
         timestamps = grp["timestamp"].to_numpy()
         feature_matrix = grp[feature_columns].to_numpy(dtype=np.float32)
+        feature_matrix = np.nan_to_num(feature_matrix, nan=0.0, posinf=0.0, neginf=0.0)
         is_normal = grp["is_normal"].to_numpy().astype(bool)
         first_non_normal = int(np.argmax(~is_normal)) if (~is_normal).any() else len(is_normal)
         if not is_normal.any():
