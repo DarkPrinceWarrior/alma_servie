@@ -245,6 +245,84 @@ Baseline `paano_shared` без transfer (split = all). Production-defaults по�
 
 ---
 
+## 4c. Итог 3W работы относительно baseline (2026-05-12 → 2026-05-13)
+
+### Что было на старте 3W работы (tag `baseline-pre-3w-2026-05-12`)
+
+- ALMA production detector `paano_shared` на 3 аномалиях (negermet / pritok / salt)
+  с hit=1.000 на всех 3-х. Per-class encoder, обучен только на ALMA-нормах.
+- 3W Petrobras Dataset не использовался. Domain-pretrain отсутствовал.
+- ALMA negermet FAR/day = 0.250, pritok mae_h (train) = 21.01ч, salt FAR/day = 0.013.
+- Нет infrastructure для transfer learning. Encoder weights только в `models/`.
+
+### Что получили после 3W работы (3 спринта, 11 коммитов на ветке `app/webapp`)
+
+**Новый продуктовый pipeline (3W Petrobras 2.0.0):**
+
+| Метрика | До 3W | После 3W |
+|---------|------:|---------:|
+| Классов аномалий с production-grade результатом | 3 (ALMA) | 3 (ALMA) + **9 (3W)** |
+| 3W mean hit (all 9 классов) | n/a | **0.845** |
+| 3W классов с hit ≥ 0.97 | n/a | **6/9** (1, 2, 5, 6, 7, 9) |
+| 3W классов passes Pareto | n/a | **9/9** |
+| 3W инфраструктура (build/detect/sweep/report) | n/a | 9 detect_3w-конфигов + tune-pipeline |
+
+**Улучшения ALMA (через 3W transfer):**
+
+| ALMA метрика | До 3W | После Sprint 2 deploy |
+|--------------|------:|----------------------:|
+| negermet FAR/day (all) | 0.250 | **0.188** (−25%) |
+| negermet starts/interval | 1.80 | **1.60** |
+| pritok mae_h (train) | 21.01ч | **17.75ч** (−3.3ч) |
+| pritok hit-rate, FAR | 1.000 / 0.039 | 1.000 / 0.038 |
+| salt | invariant | invariant (encoder не bottleneck) |
+
+**Реализованная инфраструктура** (новые модули, скрипты, артефакты):
+
+1. **Build pipeline**: `scripts/datasets/build_3w_dataset.py` + `configs/3w_paano.json`
+   — manifest + intervals + features + balanced splits на 2228 instances.
+2. **Detection pipeline**: `scripts/detection/detect_3w.py` + per-class encoders
+   в `artifacts/3w/checkpoints/` (9 файлов).
+3. **Physical branches**: `scripts/detection/physical_branches_3w.py` —
+   `class4_oscillation_score`, `class5_trend_slope_score` (Sprint 3),
+   `class6_choke_step_score`, `class3_slug_score` (dead-code).
+4. **Tuning**: `scripts/evaluation/optuna_sweep_3w.py` (TPE с `--require-test-pass`)
+   + `scripts/evaluation/optuna_sweep_alma.py` (ALMA-аналог).
+5. **Transfer mechanism**:
+   - `alma_service/shared_encoder.load_or_train_shared_encoder()` (P10 hook).
+   - `scripts/evaluation/transfer_3w_to_alma.py` (warm-start + fine-tune).
+   - `alma_service/anomaly_injection.py` (synthetic augment, dead-code на ALMA).
+6. **Comparison**: `scripts/evaluation/compare_transfer_variants.py` —
+   tabular A/B по 4 transfer-вариантам.
+7. **Reporting**: `scripts/reports/generate_3w_report.py` —
+   9 offline Plotly HTML без CDN.
+8. **Aggregation**: `scripts/evaluation/aggregate_3w_phase05.py` —
+   benchmark summary parquet + JSON.
+
+**Ключевые выводы (cumulative)**:
+
+1. **3W успешно использован как domain pretrain** для transfer в ALMA (per-class class 9 → ALMA negermet/pritok).
+2. **Physical branches** дают существенно больший gain на 3W weak-классах, чем encoder-side трюки (transfer, multi-source, injection). Sprint 3 class 5 trend-slope: +0.47 hit. Sprint 1 class 4/6: +0.53 / +1.00.
+3. **ALMA hit = 1.000 — это ceiling**: encoder transfer двигает только FAR / delay, не hit-rate. Дальнейшие gains для ALMA требуют изменения onset-логики или encoder-уровневые техники (DACAD).
+4. **Multi-source NORMAL pretrain** хуже per-class на нашем pool size (intersection даёт 10 каналов вместо 25-35). Per-class остаётся best transfer-source.
+5. **Anomaly injection** работает только при больших pool'ах (3W class 5 marginal +1.5%; ALMA fine-tune negligible из-за 1-2 окон).
+
+### Что осталось
+
+| Приоритет | Задача | Ожидаемый эффект | Сложность |
+|----:|--------|------------------|-----------|
+| #1 | **FFT spectral branch для 3W class 3** SEVERE_SLUGGING (hit=0.188) | hit 0.188 → 0.5-0.8 (по аналогии с трендом trend-slope: physical signal закрывает класс) | средняя, 1-2 дня |
+| #2 | **Combined autocorr + std branch для 3W class 4** FLOW_INSTABILITY (hit=0.536) | hit 0.536 → 0.7-0.9 | средняя, 1 день |
+| #3 | **DACAD contrastive + GRL** на ALMA encoder | Возможное улучшение salt + class-balance на 3W classes 3/4. ALMA hit-ceiling 1.000 ограничивает gain | высокая, 3-5 дней |
+| #4 | **3W NORMAL guard production-deploy** (P11) | -10-30% FAR на 3W class 8 при сохранении hit | средняя, 1 день |
+| #5 | **Class 2 SPURIOUS_CLOSURE_OF_DHSV** (test 1.000 / all 0.972) — раз­зобраться с одиночным failed instance | Чистый hit на all-split | низкая, 30 мин |
+| #6 | **Cross-validation per-class** (5-fold) вместо одиночного instance-split | Доверительные интервалы acceptance-чисел | низкая, 1 день |
+| Опц. | **Transfer 3W class 4/6 → ALMA salt** через P10 hook | Возможно сдвинуть salt FAR (encoder-side, не onset) | низкая, 30 мин |
+
+**Recommended next sprint**: #1 (FFT class 3) + #2 (class 4 autocorr) параллельно на разных GPU. Оба physical-branch — высоковероятный ROI по паттерну Sprint 1/3.
+
+---
+
 ## 5. Что сделано (хронологически)
 
 ### Phase 0.5 (2026-05-12 → старт)
@@ -520,6 +598,9 @@ ssh a100-remote 'cd /root/projects/alma_servie && \
 ## 12. Git log (хронология коммитов app/webapp)
 
 ```
+5b64409  Sprint 3: trend-slope branch для class 5 + anomaly injection в 3W pretrain
+8e14cbd  Sprint 2: deploy class 9 transfer; salt sweep + class 3 slug branch negative findings
+facf716  Consolidate 3W docs into single docs/3w_pipeline.md
 7784f21  Phase 0.5++: P10 hook, Optuna sweep, physical branches, multi-source pretrain
 2376bcc  Add 3W diagnostic snapshots (v1 baseline and v3 post-fix)
 074091b  3W PaAno v3 + P10 transfer mechanism
