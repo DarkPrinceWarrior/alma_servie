@@ -1,0 +1,47 @@
+# VCS / tooling
+.git
+.gitignore
+.github
+.serena
+.codex
+.claude
+
+# Python envs / caches
+**/.venv
+**/venv
+.venv
+venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache
+**/.ruff_cache
+dist
+build
+wheels
+
+# Node
+**/node_modules
+**/.next
+app/front/playwright-report
+app/front/test-results
+app/front/screenshots
+
+# Heavy runtime data — mounted as volumes at runtime, never needed in the image
+salym
+salym_prepared
+data
+db
+artifacts
+models
+runs
+
+# Repo docs / research configs not needed by the app images
+docs
+configs
+
+# Secrets and logs
+**/.env
+**/.env.local
+*.log
