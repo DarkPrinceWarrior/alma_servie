@@ -298,40 +298,72 @@ function ProgressPanel({
   );
 }
 
+const PRESSURE_CHANNEL = "Давление на приеме насоса кгс/см²";
+const DEFAULT_TELEMETRY = new Set([
+  PRESSURE_CHANNEL,
+  "Коэффициент загрузки ПЭД",
+  "Выходная частота",
+]);
+
 function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
   const accent = ACCENT[result.anomaly];
 
   const chart = useMemo<{ data: Data[]; layout: Partial<Layout> }>(() => {
     if (result.score_series.length === 0) return { data: [], layout: {} };
-    const x = result.score_series.map((p) => p.t);
-    const y = result.score_series.map((p) => p.score);
+
+    const scoreTrace: Data = {
+      type: "scattergl",
+      mode: "lines",
+      name: "Отклонение от нормы",
+      x: result.score_series.map((p) => p.t),
+      y: result.score_series.map((p) => p.score),
+      line: { color: accent, width: 1.6 },
+      yaxis: "y",
+    };
+
+    const telemetryTraces: Data[] = result.telemetry.map((ch) => ({
+      type: "scattergl",
+      mode: "lines",
+      name: ch.name,
+      x: ch.points.map((p) => p.t),
+      y: ch.points.map((p) => p.v),
+      line: { width: 1 },
+      yaxis: "y2",
+      visible: DEFAULT_TELEMETRY.has(ch.name) ? true : "legendonly",
+    }));
+
     const shapes: Partial<Shape>[] = result.detected_starts.map((ts) => ({
       type: "line",
+      xref: "x",
+      yref: "paper",
       x0: ts,
       x1: ts,
-      yref: "paper",
       y0: 0,
       y1: 1,
-      line: { color: "#a855f7", width: 2, dash: "dash" },
+      line: { color: "#a855f7", width: 2, dash: "dashdot" },
     }));
+
     return {
-      data: [
-        {
-          x,
-          y,
-          type: "scatter",
-          mode: "lines",
-          name: "Отклонение от нормы",
-          line: { color: accent, width: 1.5 },
-        },
-      ],
+      data: [scoreTrace, ...telemetryTraces],
       layout: {
-        height: 320,
-        margin: { l: 50, r: 20, t: 10, b: 40 },
+        height: 460,
+        margin: { l: 60, r: 60, t: 16, b: 80 },
         xaxis: { title: { text: "Время" } },
-        yaxis: { title: { text: "Отклонение от нормы" } },
+        yaxis: {
+          title: { text: "Отклонение от нормы" },
+          side: "left",
+          zeroline: true,
+        },
+        yaxis2: {
+          title: { text: "Каналы телеметрии" },
+          overlaying: "y",
+          side: "right",
+          showgrid: false,
+        },
         shapes,
-        showlegend: false,
+        showlegend: true,
+        legend: { orientation: "h", y: -0.22 },
+        hovermode: "x unified",
         paper_bgcolor: "white",
         plot_bgcolor: "white",
       },
@@ -341,25 +373,12 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
   return (
     <Card>
       <CardContent className="py-5 space-y-4">
-        <div className="flex items-center gap-3">
-          <h2
-            className="font-display text-[19.2px] font-medium tracking-[-0.192px]"
-            style={{ color: accent }}
-          >
-            {LABEL[result.anomaly]}
-          </h2>
-          {result.status === "succeeded" ? (
-            <span className="inline-flex items-center gap-1 rounded-full bg-[rgba(22,163,74,0.1)] px-2.5 py-1 text-xs font-medium text-[#16a34a]">
-              <CheckCircle2 className="h-3.5 w-3.5" />
-              Обработано
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1 rounded-full bg-[rgba(196,50,50,0.1)] px-2.5 py-1 text-xs font-medium text-[#c43232]">
-              <AlertTriangle className="h-3.5 w-3.5" />
-              Не обработано
-            </span>
-          )}
-        </div>
+        <h2
+          className="font-display text-[19.2px] font-medium tracking-[-0.192px]"
+          style={{ color: accent }}
+        >
+          {LABEL[result.anomaly]}
+        </h2>
 
         {result.status === "failed" ? (
           <p className="text-sm text-[#797979]">
@@ -367,11 +386,11 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
           </p>
         ) : (
           <>
-            <div className="flex flex-wrap items-center gap-4">
-              <div className="flex flex-col">
+            <div className="flex flex-wrap items-stretch gap-3">
+              <div className="flex min-w-[180px] flex-col justify-center rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-5 py-3.5">
                 <span
                   className={cn(
-                    "text-2xl font-semibold leading-tight",
+                    "text-[32px] font-semibold leading-none",
                     (result.n_detected ?? 0) > 0
                       ? "text-[#c43232]"
                       : "text-[#16a34a]",
@@ -379,20 +398,20 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 >
                   {result.n_detected ?? 0}
                 </span>
-                <span className="mt-0.5 text-xs text-muted-foreground">
+                <span className="mt-1.5 text-xs text-muted-foreground">
                   Обнаружено стартов аномалии
                 </span>
               </div>
 
-              <div className="inline-flex items-center gap-2.5 rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-4 py-2.5">
-                <CalendarRange className="h-5 w-5 text-[#4b4ce6]" />
-                <div className="flex flex-col">
+              <div className="flex flex-1 items-center gap-3 rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-5 py-3.5">
+                <CalendarRange className="h-6 w-6 shrink-0 text-[#4b4ce6]" />
+                <div className="flex flex-col gap-1">
                   <span className="text-xs text-muted-foreground">
                     Период данных
                   </span>
                   <span className="text-sm font-medium tabular-nums text-[#222226]">
                     {fmtDt(result.time_start)}
-                    <span className="mx-1.5 text-[#aaa]">→</span>
+                    <span className="mx-2 text-[#aaa]">→</span>
                     {fmtDt(result.time_end)}
                   </span>
                 </div>
@@ -404,7 +423,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 <p className="text-sm font-medium text-[#222226]">
                   Обнаруженные старты аномалии:
                 </p>
-                <ul className="mt-1 flex flex-wrap gap-2">
+                <ul className="mt-2 flex flex-wrap gap-2">
                   {result.detected_starts.map((ts) => (
                     <li
                       key={ts}
@@ -422,7 +441,26 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
             )}
 
             {chart.data.length > 0 && (
-              <div className="rounded-md border border-[#e5e5e5]">
+              <div className="space-y-1.5 rounded-md border border-[#e5e5e5] p-2">
+                <div className="flex flex-wrap items-center gap-4 px-1 text-xs text-muted-foreground">
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className="inline-block h-0.5 w-4"
+                      style={{ background: accent }}
+                    />
+                    Отклонение от нормы (score)
+                  </span>
+                  <span className="inline-flex items-center gap-1.5">
+                    <span
+                      className="inline-block h-0.5 w-4"
+                      style={{ borderTop: "2px dashed #a855f7" }}
+                    />
+                    Обнаруженный старт аномалии
+                  </span>
+                  <span>
+                    Каналы телеметрии — справа, переключаются в легенде
+                  </span>
+                </div>
                 <Plot
                   data={chart.data}
                   layout={chart.layout}

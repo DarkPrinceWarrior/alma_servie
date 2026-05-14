@@ -10,6 +10,16 @@ class UploadScorePoint(BaseModel):
     score: float
 
 
+class UploadTimePoint(BaseModel):
+    t: str
+    v: float
+
+
+class UploadChannel(BaseModel):
+    name: str
+    points: list[UploadTimePoint]
+
+
 class UploadAnomalyResult(BaseModel):
     anomaly: AnomalyType
     status: str  # "succeeded" | "failed" | "pending"
@@ -24,6 +34,7 @@ class UploadAnomalyResult(BaseModel):
     time_start: str | None = None
     time_end: str | None = None
     score_series: list[UploadScorePoint] = []
+    telemetry: list[UploadChannel] = []
     error: str | None = None
 
 

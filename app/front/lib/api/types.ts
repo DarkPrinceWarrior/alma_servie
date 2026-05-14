@@ -176,6 +176,16 @@ export interface UploadScorePoint {
   score: number;
 }
 
+export interface UploadTimePoint {
+  t: string;
+  v: number;
+}
+
+export interface UploadChannel {
+  name: string;
+  points: UploadTimePoint[];
+}
+
 export interface UploadAnomalyResult {
   anomaly: AnomalyType;
   status: "succeeded" | "failed" | "pending";
@@ -190,6 +200,7 @@ export interface UploadAnomalyResult {
   time_start: string | null;
   time_end: string | null;
   score_series: UploadScorePoint[];
+  telemetry: UploadChannel[];
   error: string | null;
 }
 

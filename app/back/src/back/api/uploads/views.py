@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -14,8 +15,10 @@ from back.api.detections import crud as det_crud
 from back.api.detections.schemas import DetectionRunRead
 from back.api.uploads.schemas import (
     UploadAnomalyResult,
+    UploadChannel,
     UploadResultBundle,
     UploadScorePoint,
+    UploadTimePoint,
 )
 from back.core.config import settings
 from back.models.detection_run import DetectionRun
@@ -26,6 +29,8 @@ router = APIRouter(tags=["Uploads"])
 _ANOMALIES = ("negermet", "pritok", "salt")
 _WELL_ID_RE = re.compile(r"^[\w\-.]{1,64}$", re.UNICODE)
 _MAX_SERIES_POINTS = 2000
+_MAX_TELEMETRY_POINTS = 1200
+_TELEMETRY_META_COLS = {"timestamp", "well_id"}
 
 
 @router.post(
@@ -95,6 +100,49 @@ def _read_score_series(scores_path: Path) -> list[UploadScorePoint]:
     ]
 
 
+def _parse_bounds(
+    time_start: str | None, time_end: str | None
+) -> tuple[datetime, datetime] | None:
+    if not time_start or not time_end:
+        return None
+    try:
+        return datetime.fromisoformat(time_start), datetime.fromisoformat(time_end)
+    except ValueError:
+        return None
+
+
+def _read_telemetry(
+    source_path: Path, time_start: str | None, time_end: str | None
+) -> list[UploadChannel]:
+    if not source_path.exists():
+        return []
+    df = pl.read_parquet(source_path)
+    if not df.height or "timestamp" not in df.columns:
+        return []
+    df = df.sort("timestamp")
+    bounds = _parse_bounds(time_start, time_end)
+    if bounds is not None:
+        lo, hi = bounds
+        df = df.filter((pl.col("timestamp") >= lo) & (pl.col("timestamp") <= hi))
+    if not df.height:
+        return []
+    stride = max(1, df.height // _MAX_TELEMETRY_POINTS)
+    df = df.gather_every(stride)
+    ts = [str(t) for t in df["timestamp"].to_list()]
+    channels: list[UploadChannel] = []
+    for col in df.columns:
+        if col in _TELEMETRY_META_COLS or not df.schema[col].is_numeric():
+            continue
+        points = [
+            UploadTimePoint(t=t, v=float(v))
+            for t, v in zip(ts, df[col].to_list(), strict=True)
+            if v is not None
+        ]
+        if points:
+            channels.append(UploadChannel(name=col, points=points))
+    return channels
+
+
 def _read_anomaly_result(anomaly: str, anomaly_dir: Path) -> UploadAnomalyResult:
     summary_path = anomaly_dir / "summary.json"
     error_path = anomaly_dir / "error.json"
@@ -115,6 +163,11 @@ def _read_anomaly_result(anomaly: str, anomaly_dir: Path) -> UploadAnomalyResult
             time_start=summary.get("time_start"),
             time_end=summary.get("time_end"),
             score_series=_read_score_series(anomaly_dir / "scores.parquet"),
+            telemetry=_read_telemetry(
+                anomaly_dir / "source.parquet",
+                summary.get("time_start"),
+                summary.get("time_end"),
+            ),
         )
 
     if error_path.exists():
