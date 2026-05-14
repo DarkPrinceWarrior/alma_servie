@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import shlex
 import signal
 from datetime import UTC, datetime
@@ -63,9 +64,14 @@ async def finalize(
 async def execute(run: DetectionRun) -> None:
     logger.info(f"[worker] launching run={run.id} cmd={run.command!r}")
     try:
+        # Run research scripts from the rw data mount so alma_service resolves
+        # PROJECT_ROOT to /data (real models/db/artifacts), not the baked /build copy.
+        run_root = str(settings.data_root)
+        env = {**os.environ, "PYTHONPATH": run_root}
         proc = await asyncio.create_subprocess_exec(
             *shlex.split(run.command),
-            cwd=str(settings.research_root),
+            cwd=run_root,
+            env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )

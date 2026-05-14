@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 COPY requirements.txt /build/requirements.txt
-RUN pip install torch --index-url https://download.pytorch.org/whl/cpu && \
+RUN pip install torch==2.11.0 && \
     pip install -r /build/requirements.txt && \
     pip install sqlalchemy[asyncio] asyncpg loguru pydantic-settings
 

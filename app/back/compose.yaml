@@ -15,10 +15,11 @@ services:
       DATABASE_URL: postgresql+asyncpg://app:app@postgres:5432/alma_servie
       DATA_ROOT: /data
       RESEARCH_ROOT: /workspace
-      DETECTION_MOCK: "true"
+      DETECTION_MOCK: "false"
     volumes:
       - ../..:/data:ro
       - ../..:/workspace:ro
+      - uploads:/uploads
     ports:
       - "8000:8000"
     depends_on:
@@ -57,9 +58,17 @@ services:
     volumes:
       - ../..:/data
       - ../..:/workspace:ro
+      - uploads:/uploads
     depends_on:
       postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
     restart: unless-stopped
 
   frontend:
@@ -99,3 +108,4 @@ services:
 
 volumes:
   pgdata:
+  uploads:

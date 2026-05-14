@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     data_root: Path = Path("/data")
     research_root: Path = Path("/workspace")
+    uploads_root: Path = Path("/uploads")
 
     detection_mock: bool = True
     detection_mock_duration_seconds: float = 2.0

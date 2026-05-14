@@ -11,6 +11,7 @@ from back.api.auth.views import router as auth_router
 from back.api.detections.views import router as detections_router
 from back.api.health.views import router as health_router
 from back.api.reports.views import router as reports_router
+from back.api.uploads.views import router as uploads_router
 from back.api.users.views import router as users_router
 from back.api.wells.views import router as wells_router
 from back.core.config import settings
@@ -101,6 +102,7 @@ app.include_router(users_router, prefix="/api")
 app.include_router(wells_router, prefix="/api")
 app.include_router(detections_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
+app.include_router(uploads_router, prefix="/api")
 
 
 @app.get("/", include_in_schema=False)

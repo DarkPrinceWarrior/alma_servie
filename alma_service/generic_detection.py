@@ -1644,6 +1644,7 @@ def run_single_well(
     detector: str = DEFAULT_DETECTOR,
     source_path: str | None = None,
     retune: bool = False,
+    save_dir: str | None = None,
 ) -> None:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -1693,6 +1694,36 @@ def run_single_well(
 
     cfg_payload = load_json(config_path(spec, detector_key))
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
+
+    if save_dir is not None:
+        score_rows, predicted, _detail_map = _build_score_rows(detector_key, {well_id: run}, cfg)
+        score_df = pd.DataFrame(score_rows)
+        pred_df = predicted_from_mapping(predicted)
+        out_dir = Path(save_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        write_table(score_df, out_dir / "scores.parquet")
+        write_table(pred_df, out_dir / "predicted_starts.parquet")
+        starts_list = [str(pd.Timestamp(ts)) for ts in predicted.get(well_id, [])]
+        summary = {
+            "anomaly": spec.anomaly_key,
+            "well_id": well_id,
+            "detector": detector_key,
+            "split": split,
+            "n_points": int(len(score_df)),
+            "n_detected": len(starts_list),
+            "detected_starts": starts_list,
+            "score_min": float(score_df["score"].min()) if not score_df.empty else None,
+            "score_median": float(score_df["score"].median()) if not score_df.empty else None,
+            "score_max": float(score_df["score"].max()) if not score_df.empty else None,
+            "time_start": str(score_df["timestamp"].min()) if not score_df.empty else None,
+            "time_end": str(score_df["timestamp"].max()) if not score_df.empty else None,
+        }
+        (out_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"Single-well outputs saved to {out_dir}")
+        print(f"Detected starts: {starts_list}")
+        return
 
     score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
     print(f"Prepared detail: {json.dumps(run.prepared.detail, ensure_ascii=False, indent=2)}")

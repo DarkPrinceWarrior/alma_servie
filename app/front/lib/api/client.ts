@@ -122,6 +122,17 @@ export async function apiPostForm<T>(
   return body as T;
 }
 
+export async function apiPostMultipart<T>(
+  path: string,
+  form: FormData,
+): Promise<T> {
+  // No explicit Content-Type — the browser sets the multipart boundary.
+  const res = await request(path, { method: "POST", body: form });
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw makeError(res.status, body);
+  return body as T;
+}
+
 export async function apiPost(path: string): Promise<void> {
   const res = await request(path, { method: "POST" });
   if (!res.ok) {

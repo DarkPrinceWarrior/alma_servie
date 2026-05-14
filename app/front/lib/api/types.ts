@@ -169,3 +169,26 @@ export interface UserRead {
   created_at: string;
   updated_at: string;
 }
+
+// uploads (unlabeled well Excel -> inference)
+export interface UploadScorePoint {
+  t: string;
+  score: number;
+}
+
+export interface UploadResult {
+  run_id: string;
+  anomaly: AnomalyType;
+  well_id: string;
+  detector: string;
+  status: string;
+  n_points: number;
+  n_detected: number;
+  detected_starts: string[];
+  score_min: number | null;
+  score_median: number | null;
+  score_max: number | null;
+  time_start: string | null;
+  time_end: string | null;
+  score_series: UploadScorePoint[];
+}

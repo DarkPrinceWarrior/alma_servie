@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { useAuth } from "@/hooks/use-auth";
@@ -23,8 +24,16 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex min-h-screen flex-col bg-[#f9f9f9]">
       <header className="flex items-center justify-between border-b border-[#e5e5e5] bg-[#f9f9f9] px-10 py-4">
-        <div className="flex items-center gap-2 text-sm text-[#424247]">
-          <span className="font-medium">Alma · Аномалии</span>
+        <div className="flex items-center gap-5 text-sm text-[#424247]">
+          <Link href="/" className="font-medium hover:text-[#222226]">
+            Alma · Аномалии
+          </Link>
+          <Link
+            href="/upload"
+            className="text-[#4b4ce6] hover:text-[#3f40d1]"
+          >
+            Загрузить скважину
+          </Link>
         </div>
         <div className="flex items-center gap-3 text-sm">
           <span className="text-[#797979]">{user.email}</span>
