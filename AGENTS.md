@@ -68,12 +68,19 @@ Excel exports -> Parquet datasets -> blind detection -> interactive HTML reports
 Root research code:
 
 - `alma_service/` - shared research library used by scripts;
-- `scripts/datasets/` - dataset builders;
-- `scripts/detection/` - anomaly detection entry points;
+- `scripts/datasets/` - dataset builders (`build_*_dataset.py`, `build_3w_dataset.py`);
+- `scripts/detection/` - anomaly detection entry points (`detect_*.py`, `detect_3w.py`, `physical_branches_3w.py`);
 - `scripts/reports/` - HTML report generators;
-- `scripts/evaluation/` - evaluation utilities;
+- `scripts/evaluation/` - evaluation utilities, 3W sweeps, 3W -> ALMA transfer;
 - `paano/` - PaAno neural library/submodule;
+- `configs/3w_paano.json` - Petrobras 3W pipeline config;
 - `db/`, `artifacts/`, `models/` - generated outputs, gitignored.
+
+The Petrobras 3W Dataset 2.0.0 is used as an oil-domain pretrain/benchmark for
+ALMA (not a replacement for customer data). The transfer hook
+`alma_service.shared_encoder.load_or_train_shared_encoder()` warm-starts the
+production `paano_shared` encoder from a 3W per-class encoder. The single public
+detector key stays `paano_shared`. Full report and roadmap: `docs/3w_pipeline.md`.
 
 Backend code:
 
@@ -99,10 +106,15 @@ Build datasets:
 
 ```bash
 python scripts/datasets/build_negermet_dataset.py --freq 15s
-python scripts/datasets/build_pritok_dataset.py --freq 2min
+python scripts/datasets/build_pritok_dataset.py --freq 10min
 python scripts/datasets/build_salt_dataset.py --freq 2min
 bash scripts/run_full_dataset_build.sh
+python scripts/datasets/build_3w_dataset.py --config configs/3w_paano.json
 ```
+
+`build_pritok_dataset.py` defaults to `--freq 10min`; it must match the
+production detect grid `db/pritok_anomaly_database_10min.parquet`. A freq
+mismatch silently yields `n_channels=0` and undetected wells.
 
 Run detection:
 

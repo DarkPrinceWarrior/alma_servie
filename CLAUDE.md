@@ -28,11 +28,16 @@ pip install -r requirements.txt
 ### Build datasets
 ```bash
 python scripts/datasets/build_negermet_dataset.py --freq 15s
-python scripts/datasets/build_pritok_dataset.py --freq 2min
+python scripts/datasets/build_pritok_dataset.py --freq 10min
 python scripts/datasets/build_salt_dataset.py --freq 2min
 # Or all at once:
 bash scripts/run_full_dataset_build.sh
+# Petrobras 3W domain pretrain/benchmark:
+python scripts/datasets/build_3w_dataset.py --config configs/3w_paano.json
 ```
+`build_pritok_dataset.py` defaults to `--freq 10min`, which must match the
+production detect grid `db/pritok_anomaly_database_10min.parquet`. A freq
+mismatch silently yields `n_channels=0` (wells not detected).
 
 ### Run detection
 ```bash
@@ -179,6 +184,13 @@ Anomaly-specific physics is fused inside this same detector:
 
 ### `paano/` submodule
 The PaAno neural library (ICLR 2026 paper). The repository uses it through `SharedPaAnoDetector` and `alma_service/shared_encoder.py`. Entry points: `paano/main.py`, `paano/train.py`, `paano/model.py`.
+
+### 3W domain pretrain & transfer (`docs/3w_pipeline.md`)
+The Petrobras 3W Dataset 2.0.0 is an oil-domain pretrain/benchmark for ALMA — not a replacement for customer data. Full report and roadmap live in `docs/3w_pipeline.md`.
+- **Build/detect/tune/report**: `scripts/datasets/build_3w_dataset.py` (+ `configs/3w_paano.json`), `scripts/detection/detect_3w.py`, `scripts/evaluation/optuna_sweep_3w.py`, `scripts/reports/generate_3w_report.py`. Nine per-class PaAno encoders in `artifacts/3w/checkpoints/`.
+- **Physical branches**: `scripts/detection/physical_branches_3w.py` — per-class physics scorers (oscillation / trend-slope / choke-step). On weak 3W classes explicit physics beats encoder-side tricks.
+- **Transfer mechanism**: `alma_service/shared_encoder.load_or_train_shared_encoder()` (P10 hook) validates `anomaly_key`/patch/channels and reuses a cached encoder. `scripts/evaluation/transfer_3w_to_alma.py` transplants conv2..N + heads (skips channel-dependent `convblocks[0]`) and fine-tunes on ALMA normals. Deployed: 3W class 9 → negermet (FAR/day 0.250→0.188) and pritok (train delay −3.3h). Salt is encoder-invariant — physics dominates score fusion.
+- 3W/transfer artifacts (`artifacts/3w/`, `models/3w_class_9_transfer/`) are gitignored and live on the server.
 
 ## Conventions
 
