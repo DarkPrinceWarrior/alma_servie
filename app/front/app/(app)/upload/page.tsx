@@ -305,8 +305,45 @@ const DEFAULT_TELEMETRY = new Set([
   "Выходная частота",
 ]);
 
+const CHANNEL_PALETTE = [
+  "#2f6fb5",
+  "#16a34a",
+  "#d2772f",
+  "#9333ea",
+  "#0891b2",
+  "#dc2626",
+  "#65a30d",
+  "#db2777",
+  "#0f766e",
+  "#b45309",
+  "#4f46e5",
+  "#be123c",
+];
+
+function channelColor(idx: number): string {
+  return CHANNEL_PALETTE[idx % CHANNEL_PALETTE.length];
+}
+
 function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
   const accent = ACCENT[result.anomaly];
+
+  const [visible, setVisible] = useState<Set<string>>(
+    () =>
+      new Set(
+        result.telemetry
+          .map((ch) => ch.name)
+          .filter((name) => DEFAULT_TELEMETRY.has(name)),
+      ),
+  );
+
+  function toggleChannel(name: string) {
+    setVisible((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  }
 
   const chart = useMemo<{ data: Data[]; layout: Partial<Layout> }>(() => {
     if (result.score_series.length === 0) return { data: [], layout: {} };
@@ -321,15 +358,15 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
       yaxis: "y",
     };
 
-    const telemetryTraces: Data[] = result.telemetry.map((ch) => ({
+    const telemetryTraces: Data[] = result.telemetry.map((ch, idx) => ({
       type: "scattergl",
       mode: "lines",
       name: ch.name,
       x: ch.points.map((p) => p.t),
       y: ch.points.map((p) => p.v),
-      line: { width: 1 },
+      line: { width: 1, color: channelColor(idx) },
       yaxis: "y2",
-      visible: DEFAULT_TELEMETRY.has(ch.name) ? true : "legendonly",
+      visible: visible.has(ch.name),
     }));
 
     const shapes: Partial<Shape>[] = result.detected_starts.map((ts) => ({
@@ -346,8 +383,8 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
     return {
       data: [scoreTrace, ...telemetryTraces],
       layout: {
-        height: 460,
-        margin: { l: 60, r: 60, t: 16, b: 80 },
+        height: 380,
+        margin: { l: 60, r: 60, t: 16, b: 44 },
         xaxis: { title: { text: "Время" } },
         yaxis: {
           title: { text: "Отклонение от нормы" },
@@ -361,14 +398,13 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
           showgrid: false,
         },
         shapes,
-        showlegend: true,
-        legend: { orientation: "h", y: -0.22 },
+        showlegend: false,
         hovermode: "x unified",
         paper_bgcolor: "white",
         plot_bgcolor: "white",
       },
     };
-  }, [result, accent]);
+  }, [result, accent, visible]);
 
   return (
     <Card>
@@ -441,7 +477,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
             )}
 
             {chart.data.length > 0 && (
-              <div className="space-y-1.5 rounded-md border border-[#e5e5e5] p-2">
+              <div className="space-y-2 rounded-md border border-[#e5e5e5] p-2">
                 <div className="flex flex-wrap items-center gap-4 px-1 text-xs text-muted-foreground">
                   <span className="inline-flex items-center gap-1.5">
                     <span
@@ -457,9 +493,6 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                     />
                     Обнаруженный старт аномалии
                   </span>
-                  <span>
-                    Каналы телеметрии — справа, переключаются в легенде
-                  </span>
                 </div>
                 <Plot
                   data={chart.data}
@@ -468,6 +501,41 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                   style={{ width: "100%" }}
                   useResizeHandler
                 />
+                {result.telemetry.length > 0 && (
+                  <div className="border-t border-[#eee] px-1 pt-2">
+                    <p className="mb-2 text-xs font-medium text-[#797979]">
+                      Каналы телеметрии — нажмите, чтобы показать на графике
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {result.telemetry.map((ch, idx) => {
+                        const on = visible.has(ch.name);
+                        const color = channelColor(idx);
+                        return (
+                          <button
+                            key={ch.name}
+                            type="button"
+                            onClick={() => toggleChannel(ch.name)}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                              on
+                                ? "bg-white font-medium"
+                                : "border-[#e5e5e5] bg-white text-[#9a9a9a] hover:border-[#cfcfcf]",
+                            )}
+                            style={
+                              on ? { color, borderColor: color } : undefined
+                            }
+                          >
+                            <span
+                              className="h-2 w-2 rounded-full"
+                              style={{ background: on ? color : "#cfcfcf" }}
+                            />
+                            {ch.name}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </>
