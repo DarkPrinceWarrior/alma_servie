@@ -170,20 +170,19 @@ export interface UserRead {
   updated_at: string;
 }
 
-// uploads (unlabeled well Excel -> inference)
+// uploads (unlabeled well Excel -> inference across all 3 anomaly classes)
 export interface UploadScorePoint {
   t: string;
   score: number;
 }
 
-export interface UploadResult {
-  run_id: string;
+export interface UploadAnomalyResult {
   anomaly: AnomalyType;
-  well_id: string;
-  detector: string;
-  status: string;
-  n_points: number;
-  n_detected: number;
+  status: "succeeded" | "failed" | "pending";
+  well_id: string | null;
+  detector: string | null;
+  n_points: number | null;
+  n_detected: number | null;
   detected_starts: string[];
   score_min: number | null;
   score_median: number | null;
@@ -191,4 +190,14 @@ export interface UploadResult {
   time_start: string | null;
   time_end: string | null;
   score_series: UploadScorePoint[];
+  error: string | null;
+}
+
+export interface UploadResultBundle {
+  run_id: string;
+  well_id: string;
+  status: RunStatus;
+  n_done: number;
+  n_total: number;
+  results: UploadAnomalyResult[];
 }

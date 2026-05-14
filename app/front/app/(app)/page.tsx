@@ -3,7 +3,7 @@
 import { Box, ChevronRight, Star } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { type AnomalyType, detections, reports, wells } from "@/lib/api";
+import { type AnomalyType, reports, wells } from "@/lib/api";
 import type { AnomalyReportAvailability, WellSummary } from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 
@@ -20,18 +20,12 @@ const ACCENT: Record<AnomalyType, string> = {
 };
 
 export default function HomePage() {
-  const [testWells, setTestWells] = useState<Record<AnomalyType, WellSummary[]>>(
-    { negermet: [], pritok: [], salt: [] },
-  );
+  const [testWells, setTestWells] = useState<
+    Record<AnomalyType, WellSummary[]>
+  >({ negermet: [], pritok: [], salt: [] });
   const [availability, setAvailability] = useState<
     Record<AnomalyType, AnomalyReportAvailability | null>
   >({ negermet: null, pritok: null, salt: null });
-  const [running, setRunning] = useState<Record<AnomalyType, boolean>>({
-    negermet: false,
-    pritok: false,
-    salt: false,
-  });
-  const [error, setError] = useState<string | null>(null);
 
   const loadAll = useCallback(async () => {
     const results = await Promise.all(
@@ -67,24 +61,7 @@ export default function HomePage() {
     loadAll();
   }, [loadAll]);
 
-  const totalTest = ANOMALIES.reduce(
-    (acc, a) => acc + testWells[a].length,
-    0,
-  );
-
-  async function onRunInference(a: AnomalyType) {
-    setRunning((s) => ({ ...s, [a]: true }));
-    setError(null);
-    try {
-      const detector = availability[a]?.best_detector ?? "paano_shared";
-      await detections.launchDetection(a, detector as never);
-      await loadAll();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Ошибка запуска инференса");
-    } finally {
-      setRunning((s) => ({ ...s, [a]: false }));
-    }
-  }
+  const totalTest = ANOMALIES.reduce((acc, a) => acc + testWells[a].length, 0);
 
   return (
     <div className="min-h-screen bg-[#f9f9f9]">
@@ -113,16 +90,12 @@ export default function HomePage() {
           ))}
         </section>
 
-        {error && <p className="text-sm text-[#c43232]">{error}</p>}
-
         {ANOMALIES.map((a) => (
           <AnomalySection
             key={a}
             anomaly={a}
             wells={testWells[a]}
             ready={availability[a]?.has_any_report ?? false}
-            running={running[a]}
-            onRun={() => onRunInference(a)}
           />
         ))}
       </div>
@@ -134,48 +107,25 @@ function AnomalySection({
   anomaly,
   wells: rows,
   ready,
-  running,
-  onRun,
 }: {
   anomaly: AnomalyType;
   wells: WellSummary[];
   ready: boolean;
-  running: boolean;
-  onRun: () => void;
 }) {
   return (
     <section className="flex flex-col gap-4 rounded-[16px] bg-white p-4">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h2
-            className={cn(
-              "font-display text-[23.04px] font-medium leading-[1.3] tracking-[-0.576px]",
-              ACCENT[anomaly],
-            )}
-          >
-            {LABEL[anomaly]}
-          </h2>
-          <span className="rounded-full bg-[rgba(34,34,38,0.05)] px-2 py-1 text-[11.11px] font-medium text-[#424247]">
-            {rows.length} тестовых
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onRun}
-          disabled={running}
+      <div className="flex items-center gap-3">
+        <h2
           className={cn(
-            "rounded-[12px] px-4 py-2 text-sm font-medium transition-colors",
-            running
-              ? "bg-[rgba(75,76,230,0.06)] text-[rgba(75,76,230,0.4)] cursor-not-allowed"
-              : "bg-[#4b4ce6] text-white hover:bg-[#3f40d1]",
+            "font-display text-[23.04px] font-medium leading-[1.3] tracking-[-0.576px]",
+            ACCENT[anomaly],
           )}
         >
-          {running
-            ? "Инференс запущен…"
-            : ready
-              ? "Перезапустить инференс"
-              : "Запустить инференс"}
-        </button>
+          {LABEL[anomaly]}
+        </h2>
+        <span className="rounded-full bg-[rgba(34,34,38,0.05)] px-2 py-1 text-[11.11px] font-medium text-[#424247]">
+          {rows.length} тестовых
+        </span>
       </div>
 
       {rows.length === 0 ? (
@@ -205,7 +155,7 @@ function AnomalySection({
                   </span>
                   {!ready && (
                     <span className="text-sm text-[#797979]">
-                      отчёты не готовы — запустите инференс
+                      отчёты ещё не готовы
                     </span>
                   )}
                 </div>

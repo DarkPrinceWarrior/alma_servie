@@ -1,14 +1,22 @@
 """Detection on an uploaded single-well Excel (unlabeled well).
 
 Mirrors the raw -> parquet step of dataset_builder.build_dataset for a single
-file, then runs the production single-well detector and saves scores / predicted
-starts / summary into an output directory.
+file, then runs the production single-well detector for all three anomaly
+classes and saves per-class scores / predicted starts / summary into
+``<output-dir>/<anomaly>/``.
+
+The user does not pick an anomaly class — the upload is scored against
+negermet, pritok and salt. Per-class failures (e.g. the resampled series is
+too short for that class' frequency) are caught and recorded as ``error.json``
+so the rest of the run still completes.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+import traceback
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +29,8 @@ from alma_service.detection_artifacts import default_detector_for
 from alma_service.generic_detection import run_single_well
 from alma_service.paths import ensure_dir
 from alma_service.tabular_io import write_table
+
+ANOMALIES = ("negermet", "pritok", "salt")
 
 
 def build_single_well_parquet(anomaly: str, excel_path: Path, well_id: str, out_dir: Path) -> Path:
@@ -41,35 +51,65 @@ def build_single_well_parquet(anomaly: str, excel_path: Path, well_id: str, out_
     out_path = out_dir / "source.parquet"
     write_table(df_well, out_path)
     print(
-        f"Single-well dataset built: {out_path} "
+        f"[{anomaly}] single-well dataset built: {out_path} "
         f"({len(df_well)} rows, {len(numeric_cols)} channels, freq={freq})"
     )
     return out_path
 
 
+def run_for_anomaly(anomaly: str, excel_path: Path, well_id: str, output_dir: Path) -> bool:
+    anomaly_dir = output_dir / anomaly
+    try:
+        detector = default_detector_for(anomaly)
+        source_parquet = build_single_well_parquet(anomaly, excel_path, well_id, anomaly_dir)
+        run_single_well(
+            anomaly_key=anomaly,
+            well_id=well_id,
+            detector=detector,
+            source_path=str(source_parquet),
+            save_dir=str(anomaly_dir),
+        )
+        if not (anomaly_dir / "summary.json").exists():
+            raise RuntimeError("Детектор не сформировал результат (недостаточно данных).")
+        print(f"[{anomaly}] OK")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        ensure_dir(anomaly_dir)
+        (anomaly_dir / "error.json").write_text(
+            json.dumps(
+                {"anomaly": anomaly, "well_id": well_id, "error": f"{type(exc).__name__}: {exc}"},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+        print(f"[{anomaly}] FAILED: {exc}")
+        traceback.print_exc()
+        return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Detection on an uploaded single-well Excel.")
-    parser.add_argument("--anomaly", choices=["negermet", "pritok", "salt"], required=True)
     parser.add_argument("--excel", required=True, help="Path to the raw single-well xlsx")
     parser.add_argument("--well-id", required=True, help="Well identifier")
-    parser.add_argument("--output-dir", required=True, help="Directory for scores/starts/summary")
-    parser.add_argument("--detector", default=None)
+    parser.add_argument("--output-dir", required=True, help="Directory for per-class results")
     args = parser.parse_args()
 
-    detector = args.detector or default_detector_for(args.anomaly)
     excel_path = Path(args.excel).resolve()
     if not excel_path.exists():
         raise FileNotFoundError(excel_path)
 
-    out_dir = Path(args.output_dir)
-    source_parquet = build_single_well_parquet(args.anomaly, excel_path, args.well_id, out_dir)
-    run_single_well(
-        anomaly_key=args.anomaly,
-        well_id=args.well_id,
-        detector=detector,
-        source_path=str(source_parquet),
-        save_dir=args.output_dir,
-    )
+    output_dir = Path(args.output_dir)
+    ensure_dir(output_dir)
+
+    ok_count = 0
+    for anomaly in ANOMALIES:
+        if run_for_anomaly(anomaly, excel_path, args.well_id, output_dir):
+            ok_count += 1
+
+    print(f"Done: {ok_count}/{len(ANOMALIES)} anomaly classes scored.")
+    if ok_count == 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

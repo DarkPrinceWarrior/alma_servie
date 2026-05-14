@@ -10,18 +10,27 @@ class UploadScorePoint(BaseModel):
     score: float
 
 
-class UploadResult(BaseModel):
-    run_id: str
+class UploadAnomalyResult(BaseModel):
     anomaly: AnomalyType
+    status: str  # "succeeded" | "failed" | "pending"
+    well_id: str | None = None
+    detector: str | None = None
+    n_points: int | None = None
+    n_detected: int | None = None
+    detected_starts: list[str] = []
+    score_min: float | None = None
+    score_median: float | None = None
+    score_max: float | None = None
+    time_start: str | None = None
+    time_end: str | None = None
+    score_series: list[UploadScorePoint] = []
+    error: str | None = None
+
+
+class UploadResultBundle(BaseModel):
+    run_id: str
     well_id: str
-    detector: str
-    status: str
-    n_points: int
-    n_detected: int
-    detected_starts: list[str]
-    score_min: float | None
-    score_median: float | None
-    score_max: float | None
-    time_start: str | None
-    time_end: str | None
-    score_series: list[UploadScorePoint]
+    status: str  # overall DetectionRun status
+    n_done: int
+    n_total: int
+    results: list[UploadAnomalyResult]
