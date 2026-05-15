@@ -73,6 +73,7 @@ export default function UploadPage() {
   const [error, setError] = useState<string | null>(null);
   const [bundle, setBundle] = useState<UploadResultBundle | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [viewMode, setViewMode] = useState<"live" | "history" | null>(null);
   const [history, setHistory] = useState<UploadListItem[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [openingRunId, setOpeningRunId] = useState<string | null>(null);
@@ -135,6 +136,7 @@ export default function UploadPage() {
       if (bundle && ids.includes(bundle.run_id)) {
         setBundle(null);
         setPhase("idle");
+        setViewMode(null);
       }
       await refreshHistory();
     } catch (err) {
@@ -154,6 +156,7 @@ export default function UploadPage() {
       await uploads.bulkDeleteUploads(history.map((it) => it.run_id));
       setBundle(null);
       setPhase("idle");
+      setViewMode(null);
       await refreshHistory();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Не удалось очистить");
@@ -163,10 +166,12 @@ export default function UploadPage() {
   async function openHistoryItem(runId: string) {
     setError(null);
     setOpeningRunId(runId);
+    setElapsed(0);
     try {
       const result = await uploads.getUploadResult(runId);
       setBundle(result);
       setPhase("done");
+      setViewMode("history");
       // bring results into view
       window.requestAnimationFrame(() => {
         document
@@ -199,6 +204,7 @@ export default function UploadPage() {
     setBundle(null);
     setElapsed(0);
     setPhase("uploading");
+    setViewMode("live");
 
     const startedAt = Date.now();
     const ticker = setInterval(
@@ -341,7 +347,7 @@ export default function UploadPage() {
       />
 
       <div id="upload-results" className="space-y-5">
-        {(busy || phase === "done") && (
+        {viewMode === "live" && (busy || phase === "done") && (
           <ProgressPanel
             phase={phase}
             nDone={nDone}
@@ -350,6 +356,10 @@ export default function UploadPage() {
             elapsed={elapsed}
             results={bundle?.results ?? []}
           />
+        )}
+
+        {viewMode === "history" && bundle && (
+          <HistoryStatusStrip results={bundle.results} />
         )}
 
         {bundle?.results
@@ -538,6 +548,39 @@ function HistoryStatusBadge({
       ? `Сбой · ${nDone}/${nTotal}`
       : `В работе · ${nDone}/${nTotal}`;
   return <span className={cls}>{label}</span>;
+}
+
+function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
+  const order: AnomalyType[] = ["negermet", "pritok", "salt"];
+  const statusOf = (a: AnomalyType) =>
+    results.find((r) => r.anomaly === a)?.status ?? "pending";
+  return (
+    <Card>
+      <CardContent className="py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          {order.map((a) => {
+            const st = statusOf(a);
+            return (
+              <span
+                key={a}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium",
+                  st === "succeeded" &&
+                    "bg-[rgba(22,163,74,0.1)] text-[#16a34a]",
+                  st === "failed" && "bg-[rgba(196,50,50,0.1)] text-[#c43232]",
+                  st === "pending" && "bg-[rgba(34,34,38,0.05)] text-[#797979]",
+                )}
+              >
+                {st === "succeeded" && <CheckCircle2 className="h-3.5 w-3.5" />}
+                {st === "failed" && <AlertTriangle className="h-3.5 w-3.5" />}
+                {LABEL[a]}
+              </span>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
 }
 
 function ProgressPanel({

@@ -1,6 +1,6 @@
 "use client";
 
-import { Box, ChevronRight, Star } from "lucide-react";
+import { ChevronRight } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { type AnomalyType, reports, wells } from "@/lib/api";
@@ -72,19 +72,15 @@ export default function HomePage() {
 
         <section className="flex gap-2">
           <KpiCard
-            icon={<Box className="h-6 w-6 text-[#424247]" />}
             label="Тестовых скважин"
             value={totalTest}
-            iconBg="bg-[rgba(34,34,38,0.05)]"
             labelColor="text-[#222226]"
           />
           {ANOMALIES.map((a) => (
             <KpiCard
               key={a}
-              icon={<Star className="h-6 w-6 fill-[#d2a232] text-[#d2a232]" />}
               label={LABEL[a]}
               value={testWells[a].length}
-              iconBg="bg-[rgba(230,179,58,0.17)]"
               labelColor="text-[#d2a232]"
             />
           ))}
@@ -172,39 +168,25 @@ function AnomalySection({
 }
 
 function KpiCard({
-  icon,
   label,
   value,
-  iconBg,
   labelColor,
 }: {
-  icon: React.ReactNode;
   label: string;
   value: number;
-  iconBg: string;
   labelColor: string;
 }) {
   return (
-    <div className="flex flex-1 flex-col gap-4 rounded-[32px] bg-[rgba(34,34,38,0.02)] p-4 backdrop-blur-[21px]">
-      <div className="flex items-center gap-2">
-        <div
-          className={cn(
-            "flex h-11 w-11 items-center justify-center rounded-full",
-            iconBg,
-          )}
-        >
-          {icon}
-        </div>
-        <p
-          className={cn(
-            "flex-1 truncate text-base font-semibold leading-[1.5]",
-            labelColor,
-          )}
-        >
-          {label}
-        </p>
-      </div>
-      <div className="flex items-end gap-0.5 pl-2">
+    <div className="flex flex-1 flex-col gap-3 rounded-[32px] bg-[rgba(34,34,38,0.02)] p-4 backdrop-blur-[21px]">
+      <p
+        className={cn(
+          "truncate text-base font-semibold leading-[1.5]",
+          labelColor,
+        )}
+      >
+        {label}
+      </p>
+      <div className="flex items-end gap-0.5">
         <span className="font-display text-[33.18px] font-medium leading-[1.5] tracking-[-0.796px] text-[#222226]">
           {value}
         </span>
