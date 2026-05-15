@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import BaseModel
 
 from back.api.wells.schemas import AnomalyType
@@ -45,3 +47,25 @@ class UploadResultBundle(BaseModel):
     n_done: int
     n_total: int
     results: list[UploadAnomalyResult]
+
+
+class UploadListItem(BaseModel):
+    run_id: str
+    well_id: str
+    status: str
+    created_at: datetime
+    n_done: int
+    n_total: int
+    n_detected_total: int
+
+
+class UploadList(BaseModel):
+    items: list[UploadListItem]
+
+
+class BulkDeleteRequest(BaseModel):
+    run_ids: list[str]
+
+
+class BulkDeleteResponse(BaseModel):
+    deleted: int

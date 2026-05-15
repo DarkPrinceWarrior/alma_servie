@@ -7,6 +7,7 @@ import {
   CheckCircle2,
   FileSpreadsheet,
   Loader2,
+  Trash2,
   Upload,
 } from "lucide-react";
 import dynamic from "next/dynamic";
@@ -15,13 +16,19 @@ import type { Data, Layout, Shape } from "plotly.js";
 import {
   type ChangeEvent,
   type FormEvent,
+  useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { type AnomalyType, uploads } from "@/lib/api";
-import type { UploadAnomalyResult, UploadResultBundle } from "@/lib/api/types";
+import type {
+  UploadAnomalyResult,
+  UploadListItem,
+  UploadResultBundle,
+} from "@/lib/api/types";
 import { cn } from "@/lib/utils";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
@@ -53,13 +60,127 @@ function pluralStarts(n: number): string {
   return "обнаруженных стартов";
 }
 
+function fmtCreated(s: string): string {
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(d.getDate())}.${pad(d.getMonth() + 1)}.${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [bundle, setBundle] = useState<UploadResultBundle | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [history, setHistory] = useState<UploadListItem[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [openingRunId, setOpeningRunId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const refreshHistory = useCallback(async () => {
+    try {
+      const list = await uploads.listUploads();
+      setHistory(list.items);
+      setSelected((prev) => {
+        const stillExisting = new Set(list.items.map((it) => it.run_id));
+        const next = new Set<string>();
+        prev.forEach((id) => {
+          if (stillExisting.has(id)) next.add(id);
+        });
+        return next;
+      });
+    } catch (err) {
+      // history is supplementary — surface in errors area but don't block uploads
+      setError(
+        err instanceof Error
+          ? `Не удалось загрузить историю: ${err.message}`
+          : "Не удалось загрузить историю",
+      );
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshHistory();
+  }, [refreshHistory]);
+
+  function toggleSelect(runId: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(runId)) next.delete(runId);
+      else next.add(runId);
+      return next;
+    });
+  }
+
+  function toggleSelectAll() {
+    setSelected((prev) =>
+      prev.size === history.length
+        ? new Set()
+        : new Set(history.map((it) => it.run_id)),
+    );
+  }
+
+  async function deleteSelected() {
+    if (selected.size === 0) return;
+    if (
+      !window.confirm(
+        `Удалить выбранные загрузки (${selected.size})? Действие необратимо.`,
+      )
+    )
+      return;
+    const ids = [...selected];
+    try {
+      await uploads.bulkDeleteUploads(ids);
+      if (bundle && ids.includes(bundle.run_id)) {
+        setBundle(null);
+        setPhase("idle");
+      }
+      await refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось удалить");
+    }
+  }
+
+  async function deleteAll() {
+    if (history.length === 0) return;
+    if (
+      !window.confirm(
+        `Очистить всю историю (${history.length} загрузок)? Действие необратимо.`,
+      )
+    )
+      return;
+    try {
+      await uploads.bulkDeleteUploads(history.map((it) => it.run_id));
+      setBundle(null);
+      setPhase("idle");
+      await refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Не удалось очистить");
+    }
+  }
+
+  async function openHistoryItem(runId: string) {
+    setError(null);
+    setOpeningRunId(runId);
+    try {
+      const result = await uploads.getUploadResult(runId);
+      setBundle(result);
+      setPhase("done");
+      // bring results into view
+      window.requestAnimationFrame(() => {
+        document
+          .getElementById("upload-results")
+          ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Не удалось открыть результат",
+      );
+    } finally {
+      setOpeningRunId(null);
+    }
+  }
 
   function onFileChange(e: ChangeEvent<HTMLInputElement>) {
     setFile(e.target.files?.[0] ?? null);
@@ -111,6 +232,7 @@ export default function UploadPage() {
       setPhase("error");
     } finally {
       clearInterval(ticker);
+      refreshHistory();
     }
   }
 
@@ -206,24 +328,216 @@ export default function UploadPage() {
         </CardContent>
       </Card>
 
-      {(busy || phase === "done") && (
-        <ProgressPanel
-          phase={phase}
-          nDone={nDone}
-          nTotal={nTotal}
-          progressPct={progressPct}
-          elapsed={elapsed}
-          results={bundle?.results ?? []}
-        />
-      )}
+      <HistoryPanel
+        items={history}
+        selected={selected}
+        onToggle={toggleSelect}
+        onToggleAll={toggleSelectAll}
+        onDeleteSelected={deleteSelected}
+        onDeleteAll={deleteAll}
+        onOpen={openHistoryItem}
+        activeRunId={bundle?.run_id ?? null}
+        openingRunId={openingRunId}
+      />
 
-      {bundle?.results
-        .filter((r) => r.status !== "pending")
-        .map((r) => (
-          <AnomalyResultCard key={r.anomaly} result={r} />
-        ))}
+      <div id="upload-results" className="space-y-5">
+        {(busy || phase === "done") && (
+          <ProgressPanel
+            phase={phase}
+            nDone={nDone}
+            nTotal={nTotal}
+            progressPct={progressPct}
+            elapsed={elapsed}
+            results={bundle?.results ?? []}
+          />
+        )}
+
+        {bundle?.results
+          .filter((r) => r.status !== "pending")
+          .map((r) => (
+            <AnomalyResultCard key={r.anomaly} result={r} />
+          ))}
+      </div>
     </div>
   );
+}
+
+function HistoryPanel({
+  items,
+  selected,
+  onToggle,
+  onToggleAll,
+  onDeleteSelected,
+  onDeleteAll,
+  onOpen,
+  activeRunId,
+  openingRunId,
+}: {
+  items: UploadListItem[];
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+  onToggleAll: () => void;
+  onDeleteSelected: () => void;
+  onDeleteAll: () => void;
+  onOpen: (id: string) => void;
+  activeRunId: string | null;
+  openingRunId: string | null;
+}) {
+  if (items.length === 0) {
+    return (
+      <Card>
+        <CardContent className="py-5">
+          <p className="text-sm text-muted-foreground">
+            Загрузок пока нет. Загрузите Excel выше — результаты сохранятся
+            здесь и будут доступны после перезагрузки страницы.
+          </p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const allSelected = selected.size === items.length;
+
+  return (
+    <Card>
+      <CardContent className="py-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <label className="inline-flex cursor-pointer items-center gap-2 text-sm text-[#222226]">
+              <input
+                type="checkbox"
+                checked={allSelected}
+                onChange={onToggleAll}
+                className="h-4 w-4 cursor-pointer accent-[#4b4ce6]"
+              />
+              <span>
+                История загрузок · {items.length}
+                {selected.size > 0 && (
+                  <span className="ml-2 text-xs text-muted-foreground">
+                    выбрано {selected.size}
+                  </span>
+                )}
+              </span>
+            </label>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onDeleteSelected}
+              disabled={selected.size === 0}
+              className={cn(
+                "inline-flex items-center gap-1.5 rounded-[10px] border px-3 py-1.5 text-xs font-medium transition-colors",
+                selected.size === 0
+                  ? "cursor-not-allowed border-[#e5e5e5] text-[#aaa]"
+                  : "border-[#c43232] text-[#c43232] hover:bg-[rgba(196,50,50,0.06)]",
+              )}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Удалить выбранные
+            </button>
+            <button
+              type="button"
+              onClick={onDeleteAll}
+              className="inline-flex items-center gap-1.5 rounded-[10px] border border-[#e5e5e5] px-3 py-1.5 text-xs font-medium text-[#797979] hover:bg-[#f3f3f3]"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Очистить всё
+            </button>
+          </div>
+        </div>
+
+        <ul className="divide-y divide-[#eee] border-y border-[#eee]">
+          {items.map((it) => {
+            const isSelected = selected.has(it.run_id);
+            const isActive = activeRunId === it.run_id;
+            return (
+              <li
+                key={it.run_id}
+                className={cn(
+                  "flex flex-wrap items-center gap-3 px-1 py-2 transition-colors",
+                  isActive && "bg-[rgba(75,76,230,0.04)]",
+                )}
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => onToggle(it.run_id)}
+                  className="h-4 w-4 cursor-pointer accent-[#4b4ce6]"
+                />
+                <button
+                  type="button"
+                  onClick={() => onOpen(it.run_id)}
+                  className="flex flex-1 flex-wrap items-center gap-3 text-left"
+                >
+                  <span className="min-w-[140px] truncate font-medium text-[#222226]">
+                    {it.well_id || "—"}
+                  </span>
+                  <span className="text-xs tabular-nums text-muted-foreground">
+                    {fmtCreated(it.created_at)}
+                  </span>
+                  <HistoryStatusBadge
+                    status={it.status}
+                    nDone={it.n_done}
+                    nTotal={it.n_total}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    {it.n_detected_total > 0
+                      ? `${it.n_detected_total} ${pluralStarts(it.n_detected_total)}`
+                      : "аномалий не обнаружено"}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onOpen(it.run_id)}
+                  disabled={openingRunId === it.run_id}
+                  className={cn(
+                    "rounded-[10px] border px-3 py-1.5 text-xs font-medium transition-colors",
+                    openingRunId === it.run_id
+                      ? "cursor-wait border-[#e5e5e5] text-[#aaa]"
+                      : isActive
+                        ? "border-[#4b4ce6] bg-[#4b4ce6] text-white"
+                        : "border-[#4b4ce6] text-[#4b4ce6] hover:bg-[rgba(75,76,230,0.06)]",
+                  )}
+                >
+                  {openingRunId === it.run_id
+                    ? "Открываю…"
+                    : isActive
+                      ? "Открыто"
+                      : "Открыть"}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
+function HistoryStatusBadge({
+  status,
+  nDone,
+  nTotal,
+}: {
+  status: string;
+  nDone: number;
+  nTotal: number;
+}) {
+  const isRunning = status === "running" || status === "pending";
+  const isDone = status === "succeeded";
+  const isFailed = status === "failed";
+  const cls = cn(
+    "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium",
+    isDone && "bg-[rgba(22,163,74,0.1)] text-[#16a34a]",
+    isFailed && "bg-[rgba(196,50,50,0.1)] text-[#c43232]",
+    isRunning && "bg-[rgba(75,76,230,0.08)] text-[#4b4ce6]",
+  );
+  const label = isDone
+    ? `Готово · ${nDone}/${nTotal}`
+    : isFailed
+      ? `Сбой · ${nDone}/${nTotal}`
+      : `В работе · ${nDone}/${nTotal}`;
+  return <span className={cls}>{label}</span>;
 }
 
 function ProgressPanel({

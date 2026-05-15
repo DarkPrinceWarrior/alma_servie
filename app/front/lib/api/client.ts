@@ -141,4 +141,12 @@ export async function apiPost(path: string): Promise<void> {
   }
 }
 
+export async function apiDelete(path: string): Promise<void> {
+  const res = await request(path, { method: "DELETE" });
+  if (!res.ok && res.status !== 204) {
+    const body = await res.json().catch(() => null);
+    throw makeError(res.status, body);
+  }
+}
+
 export { request };

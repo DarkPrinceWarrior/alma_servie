@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -9,13 +10,18 @@ from typing import Annotated
 
 import polars as pl
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import select
 
 from back.api.deps import DbDep
 from back.api.detections import crud as det_crud
 from back.api.detections.schemas import DetectionRunRead
 from back.api.uploads.schemas import (
+    BulkDeleteRequest,
+    BulkDeleteResponse,
     UploadAnomalyResult,
     UploadChannel,
+    UploadList,
+    UploadListItem,
     UploadResultBundle,
     UploadScorePoint,
     UploadTimePoint,
@@ -192,16 +198,119 @@ async def get_upload_result(run_id: uuid.UUID, db: DbDep) -> UploadResultBundle:
     results = [_read_anomaly_result(a, out_dir / a) for a in _ANOMALIES]
     n_done = sum(1 for r in results if r.status != "pending")
 
-    well_id = next((r.well_id for r in results if r.well_id), "")
-    if not well_id:
-        match = re.search(r"--well-id\s+(\S+)", run.command)
-        well_id = match.group(1) if match else ""
-
     return UploadResultBundle(
         run_id=str(run_id),
-        well_id=well_id,
+        well_id=_well_id_from_results(results) or _well_id_from_command(run.command),
         status=run.status,
         n_done=n_done,
         n_total=len(_ANOMALIES),
         results=results,
     )
+
+
+def _well_id_from_results(results: list[UploadAnomalyResult]) -> str:
+    return next((r.well_id for r in results if r.well_id), "")
+
+
+def _well_id_from_command(command: str) -> str:
+    match = re.search(r"--well-id\s+(\S+)", command)
+    return match.group(1) if match else ""
+
+
+def _summarize_run_dir(out_dir: Path) -> tuple[int, int]:
+    n_done = 0
+    n_detected = 0
+    for anomaly in _ANOMALIES:
+        sub = out_dir / anomaly
+        if (sub / "summary.json").exists():
+            n_done += 1
+            try:
+                summary = json.loads((sub / "summary.json").read_text(encoding="utf-8"))
+                n_detected += int(summary.get("n_detected") or 0)
+            except (json.JSONDecodeError, OSError):
+                pass
+        elif (sub / "error.json").exists():
+            n_done += 1
+    return n_done, n_detected
+
+
+@router.get(
+    "/uploads",
+    response_model=UploadList,
+    dependencies=[Depends(require_permission("detection:run"))],
+)
+async def list_uploads(db: DbDep) -> UploadList:
+    result = await db.execute(
+        select(DetectionRun)
+        .where(DetectionRun.anomaly == "multi")
+        .order_by(DetectionRun.created_at.desc())
+        .limit(200)
+    )
+    runs = result.scalars().all()
+    items: list[UploadListItem] = []
+    for run in runs:
+        out_dir = settings.uploads_root / "results" / str(run.id)
+        n_done, n_detected = _summarize_run_dir(out_dir)
+        items.append(
+            UploadListItem(
+                run_id=str(run.id),
+                well_id=_well_id_from_command(run.command),
+                status=run.status,
+                created_at=run.created_at,
+                n_done=n_done,
+                n_total=len(_ANOMALIES),
+                n_detected_total=n_detected,
+            )
+        )
+    return UploadList(items=items)
+
+
+def _delete_run_files(run_id: uuid.UUID) -> None:
+    excel_path = settings.uploads_root / "excel" / f"{run_id}.xlsx"
+    excel_path.unlink(missing_ok=True)
+    out_dir = settings.uploads_root / "results" / str(run_id)
+    if out_dir.exists():
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+@router.delete(
+    "/uploads/{run_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_permission("detection:run"))],
+)
+async def delete_upload(run_id: uuid.UUID, db: DbDep) -> None:
+    run = await db.scalar(
+        select(DetectionRun).where(
+            DetectionRun.id == run_id, DetectionRun.anomaly == "multi"
+        )
+    )
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Загрузка '{run_id}' не найдена")
+    _delete_run_files(run_id)
+    await db.delete(run)
+    await db.commit()
+
+
+@router.post(
+    "/uploads/bulk-delete",
+    response_model=BulkDeleteResponse,
+    dependencies=[Depends(require_permission("detection:run"))],
+)
+async def bulk_delete_uploads(req: BulkDeleteRequest, db: DbDep) -> BulkDeleteResponse:
+    if not req.run_ids:
+        return BulkDeleteResponse(deleted=0)
+    try:
+        uuids = [uuid.UUID(rid) for rid in req.run_ids]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Некорректный run_id: {exc}") from exc
+    result = await db.execute(
+        select(DetectionRun).where(
+            DetectionRun.id.in_(uuids), DetectionRun.anomaly == "multi"
+        )
+    )
+    runs = list(result.scalars().all())
+    for run in runs:
+        _delete_run_files(run.id)
+        await db.delete(run)
+    await db.commit()
+    return BulkDeleteResponse(deleted=len(runs))

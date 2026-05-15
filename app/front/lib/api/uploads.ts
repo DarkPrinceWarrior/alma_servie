@@ -1,5 +1,5 @@
-import { apiGet, apiPostMultipart } from "./client";
-import type { DetectionRunRead, UploadResultBundle } from "./types";
+import { apiDelete, apiGet, apiPostJson, apiPostMultipart } from "./client";
+import type { DetectionRunRead, UploadList, UploadResultBundle } from "./types";
 
 export async function createUpload(
   wellId: string,
@@ -15,4 +15,20 @@ export async function getUploadResult(
   runId: string,
 ): Promise<UploadResultBundle> {
   return apiGet<UploadResultBundle>(`/api/uploads/${runId}/result`);
+}
+
+export async function listUploads(): Promise<UploadList> {
+  return apiGet<UploadList>("/api/uploads");
+}
+
+export async function deleteUpload(runId: string): Promise<void> {
+  await apiDelete(`/api/uploads/${runId}`);
+}
+
+export async function bulkDeleteUploads(
+  runIds: string[],
+): Promise<{ deleted: number }> {
+  return apiPostJson<{ deleted: number }>("/api/uploads/bulk-delete", {
+    run_ids: runIds,
+  });
 }

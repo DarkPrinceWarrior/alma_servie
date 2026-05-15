@@ -212,3 +212,17 @@ export interface UploadResultBundle {
   n_total: number;
   results: UploadAnomalyResult[];
 }
+
+export interface UploadListItem {
+  run_id: string;
+  well_id: string;
+  status: RunStatus;
+  created_at: string;
+  n_done: number;
+  n_total: number;
+  n_detected_total: number;
+}
+
+export interface UploadList {
+  items: UploadListItem[];
+}
