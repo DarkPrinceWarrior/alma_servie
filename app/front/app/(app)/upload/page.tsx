@@ -44,6 +44,15 @@ function fmtDt(s: string | null | undefined): string {
   return s.replace("T", " ").slice(0, 16);
 }
 
+function pluralStarts(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "обнаруженный старт";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
+    return "обнаруженных старта";
+  return "обнаруженных стартов";
+}
+
 export default function UploadPage() {
   const [file, setFile] = useState<File | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
@@ -385,7 +394,15 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
       layout: {
         height: 380,
         margin: { l: 60, r: 60, t: 16, b: 44 },
-        xaxis: { title: { text: "Время" } },
+        xaxis: {
+          title: { text: "Время" },
+          hoverformat: "%d.%m.%Y %H:%M",
+          tickformatstops: [
+            { dtickrange: [null, 60_000], value: "%H:%M:%S" },
+            { dtickrange: [60_000, 86_400_000], value: "%H:%M" },
+            { dtickrange: [86_400_000, null], value: "%d.%m.%Y" },
+          ],
+        },
         yaxis: {
           title: { text: "Отклонение от нормы" },
           side: "left",
@@ -422,11 +439,11 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
           </p>
         ) : (
           <>
-            <div className="flex flex-wrap items-stretch gap-3">
-              <div className="flex min-w-[180px] flex-col justify-center rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-5 py-3.5">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+              <span className="inline-flex items-baseline gap-1.5">
                 <span
                   className={cn(
-                    "text-[32px] font-semibold leading-none",
+                    "text-base font-semibold",
                     (result.n_detected ?? 0) > 0
                       ? "text-[#c43232]"
                       : "text-[#16a34a]",
@@ -434,38 +451,36 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 >
                   {result.n_detected ?? 0}
                 </span>
-                <span className="mt-1.5 text-xs text-muted-foreground">
-                  Обнаружено стартов аномалии
+                <span className="text-xs text-muted-foreground">
+                  {pluralStarts(result.n_detected ?? 0)}
                 </span>
-              </div>
-
-              <div className="flex flex-1 items-center gap-3 rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-5 py-3.5">
-                <CalendarRange className="h-6 w-6 shrink-0 text-[#4b4ce6]" />
-                <div className="flex flex-col gap-1">
-                  <span className="text-xs text-muted-foreground">
-                    Период данных
-                  </span>
-                  <span className="text-sm font-medium tabular-nums text-[#222226]">
-                    {fmtDt(result.time_start)}
-                    <span className="mx-2 text-[#aaa]">→</span>
-                    {fmtDt(result.time_end)}
-                  </span>
-                </div>
-              </div>
+              </span>
+              <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                <CalendarRange className="h-3.5 w-3.5 text-[#4b4ce6]" />
+                <span>Период:</span>
+                <span className="font-medium tabular-nums text-[#222226]">
+                  {fmtDt(result.time_start)}
+                  <span className="mx-1.5 text-[#aaa]">→</span>
+                  {fmtDt(result.time_end)}
+                </span>
+              </span>
             </div>
 
             {result.detected_starts.length > 0 ? (
-              <div>
-                <p className="text-sm font-medium text-[#222226]">
-                  Обнаруженные старты аномалии:
+              <div className="space-y-2">
+                <p className="text-xs uppercase tracking-wide text-muted-foreground">
+                  Обнаруженные старты аномалии
                 </p>
-                <ul className="mt-2 flex flex-wrap gap-2">
-                  {result.detected_starts.map((ts) => (
+                <ul className="flex flex-wrap gap-1.5">
+                  {result.detected_starts.map((ts, idx) => (
                     <li
                       key={ts}
-                      className="rounded-full bg-[rgba(149,45,45,0.1)] px-3 py-1 text-sm font-medium tabular-nums text-[#c43232]"
+                      className="inline-flex items-center gap-2 rounded-md border border-[#e5e5e5] bg-white px-2.5 py-1 text-sm text-[#222226]"
                     >
-                      {fmtDt(ts)}
+                      <span className="inline-flex h-5 min-w-5 items-center justify-center rounded bg-[#a855f7] px-1.5 text-[10px] font-semibold text-white">
+                        №{idx + 1}
+                      </span>
+                      <span className="tabular-nums">{fmtDt(ts)}</span>
                     </li>
                   ))}
                 </ul>
