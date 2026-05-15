@@ -555,31 +555,27 @@ function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
   return (
-    <Card>
-      <CardContent className="py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          {order.map((a) => {
-            const st = statusOf(a);
-            return (
-              <span
-                key={a}
-                className={cn(
-                  "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium",
-                  st === "succeeded" &&
-                    "bg-[rgba(22,163,74,0.1)] text-[#16a34a]",
-                  st === "failed" && "bg-[rgba(196,50,50,0.1)] text-[#c43232]",
-                  st === "pending" && "bg-[rgba(34,34,38,0.05)] text-[#797979]",
-                )}
-              >
-                {st === "succeeded" && <CheckCircle2 className="h-3.5 w-3.5" />}
-                {st === "failed" && <AlertTriangle className="h-3.5 w-3.5" />}
-                {LABEL[a]}
-              </span>
-            );
-          })}
-        </div>
-      </CardContent>
-    </Card>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-1 text-xs text-muted-foreground">
+      <span>Открыто из истории · статусы:</span>
+      {order.map((a) => {
+        const st = statusOf(a);
+        return (
+          <span
+            key={a}
+            className={cn(
+              "inline-flex items-center gap-1 font-medium",
+              st === "succeeded" && "text-[#16a34a]",
+              st === "failed" && "text-[#c43232]",
+              st === "pending" && "text-[#797979]",
+            )}
+          >
+            {st === "succeeded" && <CheckCircle2 className="h-3.5 w-3.5" />}
+            {st === "failed" && <AlertTriangle className="h-3.5 w-3.5" />}
+            {LABEL[a]}
+          </span>
+        );
+      })}
+    </div>
   );
 }
 
