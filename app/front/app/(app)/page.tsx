@@ -19,6 +19,13 @@ const ACCENT: Record<AnomalyType, string> = {
   salt: "text-[#d2a232]",
 };
 
+const KPI_COLOR: Record<AnomalyType | "total", string> = {
+  total: "#424247",
+  negermet: "#c43232",
+  pritok: "#2f6fb5",
+  salt: "#d2a232",
+};
+
 export default function HomePage() {
   const [testWells, setTestWells] = useState<
     Record<AnomalyType, WellSummary[]>
@@ -74,14 +81,14 @@ export default function HomePage() {
           <KpiCard
             label="Тестовых скважин"
             value={totalTest}
-            labelColor="text-[#222226]"
+            color={KPI_COLOR.total}
           />
           {ANOMALIES.map((a) => (
             <KpiCard
               key={a}
               label={LABEL[a]}
               value={testWells[a].length}
-              labelColor="text-[#d2a232]"
+              color={KPI_COLOR[a]}
             />
           ))}
         </section>
@@ -170,30 +177,26 @@ function AnomalySection({
 function KpiCard({
   label,
   value,
-  labelColor,
+  color,
 }: {
   label: string;
   value: number;
-  labelColor: string;
+  color: string;
 }) {
   return (
-    <div className="flex flex-1 flex-col gap-3 rounded-[32px] bg-[rgba(34,34,38,0.02)] p-4 backdrop-blur-[21px]">
+    <div className="flex flex-1 items-center justify-between gap-3 rounded-[20px] border border-[#e5e5e5] bg-white px-4 py-3">
       <p
-        className={cn(
-          "truncate text-base font-semibold leading-[1.5]",
-          labelColor,
-        )}
+        className="truncate text-sm font-semibold leading-[1.4]"
+        style={{ color }}
       >
         {label}
       </p>
-      <div className="flex items-end gap-0.5">
-        <span className="font-display text-[33.18px] font-medium leading-[1.5] tracking-[-0.796px] text-[#222226]">
-          {value}
-        </span>
-        <span className="py-2 text-[14.3px] font-medium leading-[1.5] tracking-[-0.214px] text-[rgba(34,34,38,0.22)]">
-          шт
-        </span>
-      </div>
+      <span
+        className="flex h-12 min-w-[48px] items-center justify-center rounded-full px-3 font-display text-[22px] font-medium tabular-nums"
+        style={{ background: `${color}1a`, color }}
+      >
+        {value}
+      </span>
     </div>
   );
 }
