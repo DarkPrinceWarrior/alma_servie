@@ -2,8 +2,10 @@ import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from loguru import logger
+from slowapi.errors import RateLimitExceeded
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +17,7 @@ from back.api.uploads.views import router as uploads_router
 from back.api.users.views import router as users_router
 from back.api.wells.views import router as wells_router
 from back.core.config import settings
+from back.core.rate_limit import limiter
 from back.db.database import AsyncSessionLocal
 from back.rbac.roles import BASE_ROLES, RoleCode
 
@@ -95,6 +98,17 @@ app = FastAPI(
     debug=settings.debug,
     lifespan=lifespan,
 )
+
+
+async def _rate_limit_exceeded_handler(_: Request, __: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Слишком много попыток, попробуйте позже"},
+    )
+
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.include_router(health_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")

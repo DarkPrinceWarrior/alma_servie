@@ -15,6 +15,7 @@ from back.api.auth.crud import (
 from back.api.auth.schemas import TokenResponse
 from back.api.deps import DbDep, UserDep
 from back.core.config import settings
+from back.core.rate_limit import limiter
 from back.core.security import (
     create_access_token,
     create_refresh_token,
@@ -53,6 +54,7 @@ def _delete_refresh_cookie(response: Response) -> None:
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit("5/minute")
 async def login(
     request: Request,
     response: Response,
@@ -95,6 +97,7 @@ async def login(
 
 
 @router.post("/refresh", response_model=TokenResponse)
+@limiter.limit("30/minute")
 async def refresh_tokens(
     response: Response,
     request: Request,
