@@ -23,6 +23,28 @@ const END_COLOR = "#dc2626";
 
 const PRESSURE_CHANNEL = "Давление на приеме насоса кгс/см²";
 
+const STATUS_LABELS: Record<string, string> = {
+  Detected: "Обнаружено",
+  detected: "Обнаружено",
+  "Not found": "Не обнаружено",
+  "not found": "Не обнаружено",
+  "Not detected": "Не обнаружено",
+  Missed: "Пропуск",
+};
+
+function translateStatus(status: string): string {
+  return STATUS_LABELS[status] ?? status;
+}
+
+function pluralIntervals(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return `${n} размеченный интервал`;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
+    return `${n} размеченных интервала`;
+  return `${n} размеченных интервалов`;
+}
+
 function pickDefaultChannels(
   telemetryNames: string[],
   fi: FeatureImportanceResponse | null | undefined,
@@ -180,14 +202,11 @@ export function WellReportChart({ series, fi }: Props) {
         style={{ width: "100%", height: "560px" }}
       />
       <div className="flex flex-wrap gap-4 px-2 py-1 text-xs text-muted-foreground">
-        <span>
-          {series.n_points_downsampled} / {series.n_points_raw} точек
-        </span>
         <span>{series.telemetry.length} каналов</span>
-        <span>{series.intervals.length} размеченных интервалов</span>
+        <span>{pluralIntervals(series.intervals.length)}</span>
         {firstResult?.status && (
           <span className="font-medium text-foreground">
-            Статус: {firstResult.status}
+            Статус: {translateStatus(firstResult.status)}
           </span>
         )}
       </div>

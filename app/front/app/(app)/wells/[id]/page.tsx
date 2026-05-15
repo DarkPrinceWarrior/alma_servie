@@ -1,6 +1,12 @@
 "use client";
 
-import { ArrowLeft, HelpCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  CalendarCheck2,
+  CalendarX2,
+  Clock,
+  Timer,
+} from "lucide-react";
 import Link from "next/link";
 import { useParams, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -168,41 +174,56 @@ export default function WellPage() {
       </div>
 
       <Card>
-        <CardContent className="flex items-start justify-between gap-8 py-5">
+        <CardContent className="flex flex-col gap-5 py-5">
           <div className="flex items-center gap-4">
             <span className="text-2xl font-semibold">Аномалии:</span>
             <AnomalyChip anomaly={anomaly} />
           </div>
 
-          <div className="flex items-center gap-10">
-            <Metric label="Фактическое начало" value={fmtDt(actualStart)} />
-            <Metric label="Фактическое окончание" value={fmtDt(actualEnd)} />
-            <Metric label="Время обнаружения" value={fmtDt(detectedAt)} />
-            <Metric label="Задержка" value={delay} />
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <MetricCard
+              icon={<CalendarCheck2 className="h-5 w-5" />}
+              label="Фактическое начало"
+              value={fmtDt(actualStart)}
+              color="#16a34a"
+            />
+            <MetricCard
+              icon={<CalendarX2 className="h-5 w-5" />}
+              label="Фактическое окончание"
+              value={fmtDt(actualEnd)}
+              color="#dc2626"
+            />
+            <MetricCard
+              icon={<Clock className="h-5 w-5" />}
+              label="Время обнаружения"
+              value={fmtDt(detectedAt)}
+              color="#a855f7"
+            />
+            <MetricCard
+              icon={<Timer className="h-5 w-5" />}
+              label="Задержка"
+              value={delay}
+              color="#4b4ce6"
+            />
           </div>
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <TabButton
-            active={activeTab === "report"}
-            onClick={() => setTab("report")}
-            disabled={!hasReport}
-          >
-            Основной отчёт
-          </TabButton>
-          <TabButton
-            active={activeTab === "feature_importance"}
-            onClick={() => setTab("feature_importance")}
-            disabled={!hasFI}
-          >
-            Feature importance
-          </TabButton>
-        </div>
-        <div className="text-xs text-muted-foreground">
-          Детектор: <span className="text-foreground">{detector ?? "—"}</span>
-        </div>
+      <div className="flex items-center gap-2">
+        <TabButton
+          active={activeTab === "report"}
+          onClick={() => setTab("report")}
+          disabled={!hasReport}
+        >
+          Основной отчёт
+        </TabButton>
+        <TabButton
+          active={activeTab === "feature_importance"}
+          onClick={() => setTab("feature_importance")}
+          disabled={!hasFI}
+        >
+          Важность признаков
+        </TabButton>
       </div>
 
       {error && <p className="text-sm text-destructive">Ошибка: {error}</p>}
@@ -231,20 +252,39 @@ export default function WellPage() {
 
 function AnomalyChip({ anomaly }: { anomaly: AnomalyType }) {
   return (
-    <span
-      className={cn("inline-flex items-center gap-1", ANOMALY_ACCENT[anomaly])}
-    >
-      <span className="text-2xl font-semibold">{ANOMALY_LABEL[anomaly]}</span>
-      <HelpCircle className="h-4 w-4 opacity-60" />
+    <span className={cn("text-2xl font-semibold", ANOMALY_ACCENT[anomaly])}>
+      {ANOMALY_LABEL[anomaly]}
     </span>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+function MetricCard({
+  icon,
+  label,
+  value,
+  color,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+  color: string;
+}) {
   return (
-    <div className="flex flex-col">
-      <span className="text-sm font-semibold leading-none">{value}</span>
-      <span className="mt-1 text-xs text-muted-foreground">{label}</span>
+    <div className="flex items-center gap-3 rounded-[12px] border border-[#e5e5e5] bg-[#fafafa] px-4 py-3">
+      <span
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
+        style={{ background: `${color}1a`, color }}
+      >
+        {icon}
+      </span>
+      <div className="flex flex-col gap-0.5 min-w-0">
+        <span className="text-[11px] uppercase tracking-wide text-muted-foreground">
+          {label}
+        </span>
+        <span className="truncate text-sm font-semibold tabular-nums text-[#222226]">
+          {value}
+        </span>
+      </div>
     </div>
   );
 }

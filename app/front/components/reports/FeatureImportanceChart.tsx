@@ -178,7 +178,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
   if (count === 0) {
     return (
       <div className="rounded-md border bg-card p-6 text-sm text-muted-foreground">
-        Feature importance для скважины «{fi.well_id}» не найдена.
+        Важность признаков для скважины «{fi.well_id}» не найдена.
       </div>
     );
   }
@@ -187,7 +187,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
     <div className="space-y-4">
       <div className="rounded-md border bg-card p-2">
         <p className="px-2 pt-2 text-sm font-medium">
-          Важность каналов (permutation importance, %)
+          Важность каналов (важность по перестановке, %)
         </p>
         <Plot
           data={barData}
