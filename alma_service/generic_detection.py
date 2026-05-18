@@ -29,6 +29,7 @@ from alma_service.detection_artifacts import (
     DETECTOR_KEYS,
     benchmark_summary_path,
     config_path,
+    incidents_path,
     load_json,
     normalize_detector_key,
     predicted_starts_path,
@@ -39,6 +40,10 @@ from alma_service.detection_artifacts import (
     tuning_path,
 )
 from alma_service.engineered_features import PreparedWellData, prepare_engineered_well
+from alma_service.engineered_features import (
+    REFERENCE_POLICIES,
+    REFERENCE_POLICY_NORMAL_WINDOWS,
+)
 from alma_service.generic_detectors import (
     DetectorScoreOutput,
     SharedPaAnoDetector,
@@ -60,7 +65,26 @@ from alma_service.paano_defaults import (
     REFERENCE_MIN_RATIO,
 )
 from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
+from alma_service.prediction_postprocess import build_incidents, filter_actionable_starts
 from alma_service.tabular_io import read_table, write_table
+from alma_service.telemetry_status import build_telemetry_status
+
+STATUS_COLUMNS = [
+    "quality_status",
+    "regime_status",
+    "zone_status",
+    "event_class",
+    "is_bad_data",
+    "is_regime_event",
+    "is_pre_anomaly_zone",
+    "is_labelled_anomaly",
+]
+
+
+def _incident_merge_window_hours(cfg: dict[str, Any]) -> float:
+    cooldown_hours = float(cfg.get("cooldown_hours", 0.0))
+    rearm_hours = float(cfg.get("rearm_window_minutes", 0.0)) / 60.0
+    return max(cooldown_hours * 2.0, rearm_hours * 2.0, 1.0)
 
 BASE_ONSET_CONFIG = {
     "target_far_per_day": 0.50,
@@ -308,6 +332,7 @@ def _prepare_all_wells(
     intervals: pd.DataFrame,
     verbose: bool,
     zone_aware: bool = False,
+    reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
 ) -> dict[str, PreparedWellData]:
     from alma_service.dataset_config import split_for_well
 
@@ -344,6 +369,7 @@ def _prepare_all_wells(
             anomaly_intervals=(
                 intervals[intervals["well_id"] == well_id] if zone_aware else None
             ),
+            reference_policy=reference_policy,
         )
         if prepared is None:
             if verbose:
@@ -1416,6 +1442,9 @@ def _build_score_rows(
     detector_key: str,
     runs: dict[str, PreparedDetectorRun],
     cfg: dict[str, Any],
+    *,
+    anomaly_key: str = "",
+    intervals: pd.DataFrame | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, list[pd.Timestamp]], dict[str, dict[str, Any]]]:
     score_rows: list[dict[str, Any]] = []
     predicted: dict[str, list[pd.Timestamp]] = {}
@@ -1424,6 +1453,18 @@ def _build_score_rows(
     for well_id, run in runs.items():
         score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
         predicted[well_id] = starts
+        well_intervals = None
+        if intervals is not None and not intervals.empty:
+            normalized = intervals["well_id"].astype(str).str.strip().str.lower()
+            well_intervals = intervals[normalized == str(well_id).strip().lower()]
+        status_frame = build_telemetry_status(
+            timestamps=run.prepared.timestamps,
+            raw_columns=run.prepared.raw_columns,
+            raw_matrix=run.prepared.raw_matrix,
+            anomaly_key=anomaly_key,
+            anomaly_intervals=well_intervals,
+            patch_size=int(run.prepared.detail.get("patch_size", 96)),
+        ).frame
         detail_map[well_id] = {
             "prepared": run.prepared.detail,
             "detector": run.score_output.detail,
@@ -1443,6 +1484,9 @@ def _build_score_rows(
                 "stability_mask": bool(run.prepared.stability_mask[idx]),
                 "onset_allowed_mask": bool(run.prepared.onset_allowed_mask[idx]),
             }
+            if len(status_frame) == len(score):
+                for name in STATUS_COLUMNS:
+                    row[name] = status_frame.iloc[idx][name]
             for name, values in components.items():
                 if len(values) != len(score):
                     continue
@@ -1450,6 +1494,26 @@ def _build_score_rows(
             score_rows.append(row)
 
     return score_rows, predicted, detail_map
+
+
+def _attach_predicted_start_status(pred_df: pd.DataFrame, score_df: pd.DataFrame) -> pd.DataFrame:
+    if pred_df.empty or score_df.empty:
+        return pred_df
+    available = ["well_id", "timestamp", *[name for name in STATUS_COLUMNS if name in score_df.columns]]
+    if len(available) <= 2:
+        return pred_df
+    status_df = score_df[available].copy()
+    status_df["well_id"] = status_df["well_id"].astype(str).str.strip().str.lower()
+    status_df["timestamp"] = pd.to_datetime(status_df["timestamp"])
+    result = pred_df.copy()
+    result["well_id"] = result["well_id"].astype(str).str.strip().str.lower()
+    result["detected_time"] = pd.to_datetime(result["detected_time"])
+    return result.merge(
+        status_df,
+        left_on=["well_id", "detected_time"],
+        right_on=["well_id", "timestamp"],
+        how="left",
+    ).drop(columns=["timestamp"])
 
 
 def _merge_result_details(
@@ -1523,6 +1587,7 @@ def run_detection(
     source_path: str | None = None,
     retune: bool = False,
     verbose: bool = True,
+    reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
 ) -> pd.DataFrame:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -1548,6 +1613,7 @@ def run_detection(
     prepared_runs = _prepare_all_wells(
         spec, df, intervals, verbose=verbose,
         zone_aware=True,
+        reference_policy=reference_policy,
     )
     if not prepared_runs:
         raise RuntimeError("No wells survived engineered preprocessing.")
@@ -1583,16 +1649,32 @@ def run_detection(
         verbose=verbose,
     )
 
-    score_rows, predicted, detail_map = _build_score_rows(detector_key, detector_runs, cfg)
+    score_rows, predicted, detail_map = _build_score_rows(
+        detector_key,
+        detector_runs,
+        cfg,
+        anomaly_key=spec.anomaly_key,
+        intervals=intervals,
+    )
     score_df = pd.DataFrame(score_rows)
     pred_df = predicted_from_mapping(predicted)
+    pred_df = _attach_predicted_start_status(pred_df, score_df)
     if not pred_df.empty:
+        pred_df["anomaly"] = spec.anomaly_key
+        pred_df["detector"] = detector_key
         split_lookup = {well_id: run.prepared.split for well_id, run in detector_runs.items()}
         pred_df["split"] = pred_df["well_id"].map(split_lookup).fillna("train")
+    incident_result = build_incidents(
+        pred_df,
+        merge_window_hours=_incident_merge_window_hours(cfg),
+    )
+    pred_df = incident_result.starts
+    incident_df = incident_result.incidents
+    eval_pred_df = filter_actionable_starts(pred_df)
 
     split_summaries, split_frames = summarize_splits(
         intervals=intervals,
-        predictions=pred_df,
+        predictions=eval_pred_df,
         scores=score_df,
         prestart_hours=PRESTART_TOLERANCE_HOURS,
     )
@@ -1613,16 +1695,29 @@ def run_detection(
     write_table(pred_df, pred_output_path)
     print(f"Predicted starts saved to {pred_output_path}")
 
+    incidents_output_path = incidents_path(spec, detector_key)
+    ensure_parent(incidents_output_path)
+    write_table(incident_df, incidents_output_path)
+    print(f"Incidents saved to {incidents_output_path}")
+
     summary_payload = {
         "anomaly": spec.anomaly_key,
         "detector": detector_key,
         "config": cfg,
         "prestart_hours": PRESTART_TOLERANCE_HOURS,
         "splits": split_summaries,
+        "prediction_postprocess": {
+            "raw_starts": int(len(pred_df)),
+            "actionable_starts": int(len(eval_pred_df)),
+            "suppressed_starts": int(len(pred_df) - len(eval_pred_df)),
+            "incidents": int(len(incident_df)),
+            "incident_merge_window_hours": _incident_merge_window_hours(cfg),
+        },
         "artifacts": {
             "results_path": str(output),
             "scores_path": str(score_output_path),
             "predicted_starts_path": str(pred_output_path),
+            "incidents_path": str(incidents_output_path),
             "report_path": str(report_path(spec, detector_key)),
         },
     }
@@ -1645,6 +1740,7 @@ def run_single_well(
     source_path: str | None = None,
     retune: bool = False,
     save_dir: str | None = None,
+    reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
 ) -> None:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -1673,6 +1769,7 @@ def run_single_well(
         reference_min_days=REFERENCE_MIN_DAYS,
         min_reference_coverage=MIN_REFERENCE_COVERAGE,
         min_total_coverage=MIN_TOTAL_COVERAGE,
+        reference_policy=reference_policy,
     )
     if prepared is None:
         print("No usable data after engineered preprocessing.")
@@ -1696,13 +1793,31 @@ def run_single_well(
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
 
     if save_dir is not None:
-        score_rows, predicted, _detail_map = _build_score_rows(detector_key, {well_id: run}, cfg)
+        score_rows, predicted, _detail_map = _build_score_rows(
+            detector_key,
+            {well_id: run},
+            cfg,
+            anomaly_key=spec.anomaly_key,
+            intervals=intervals,
+        )
         score_df = pd.DataFrame(score_rows)
         pred_df = predicted_from_mapping(predicted)
+        pred_df = _attach_predicted_start_status(pred_df, score_df)
+        if not pred_df.empty:
+            pred_df["anomaly"] = spec.anomaly_key
+            pred_df["detector"] = detector_key
+            pred_df["split"] = split
+        incident_result = build_incidents(
+            pred_df,
+            merge_window_hours=_incident_merge_window_hours(cfg),
+        )
+        pred_df = incident_result.starts
+        incident_df = incident_result.incidents
         out_dir = Path(save_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
         write_table(score_df, out_dir / "scores.parquet")
         write_table(pred_df, out_dir / "predicted_starts.parquet")
+        write_table(incident_df, out_dir / "incidents.parquet")
         starts_list = [str(pd.Timestamp(ts)) for ts in predicted.get(well_id, [])]
         summary = {
             "anomaly": spec.anomaly_key,
@@ -1711,6 +1826,8 @@ def run_single_well(
             "split": split,
             "n_points": int(len(score_df)),
             "n_detected": len(starts_list),
+            "n_actionable_detected": int(pred_df["actionable_alert"].sum()) if "actionable_alert" in pred_df else len(starts_list),
+            "n_incidents": int(len(incident_df)),
             "detected_starts": starts_list,
             "score_min": float(score_df["score"].min()) if not score_df.empty else None,
             "score_median": float(score_df["score"].median()) if not score_df.empty else None,
@@ -1750,6 +1867,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=str, default=None)
     parser.add_argument("--well", type=str, default=None)
     parser.add_argument("--retune", action="store_true")
+    parser.add_argument("--reference-policy", choices=sorted(REFERENCE_POLICIES), default=REFERENCE_POLICY_NORMAL_WINDOWS)
     return parser.parse_args()
 
 
@@ -1762,6 +1880,7 @@ def main() -> None:
             detector=args.detector,
             source_path=args.source,
             retune=args.retune,
+            reference_policy=args.reference_policy,
         )
         return
     run_detection(
@@ -1771,6 +1890,7 @@ def main() -> None:
         source_path=args.source,
         retune=args.retune,
         verbose=True,
+        reference_policy=args.reference_policy,
     )
 
 

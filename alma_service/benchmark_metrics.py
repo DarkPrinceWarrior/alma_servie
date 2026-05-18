@@ -37,12 +37,14 @@ def load_intervals(path: str | Path) -> pd.DataFrame:
     )
 
 
-def load_predicted_starts(path: str | Path) -> pd.DataFrame:
+def load_predicted_starts(path: str | Path, *, actionable_only: bool = True) -> pd.DataFrame:
     df = read_table(path, dtypes={"well_id": str}, parse_dates=["detected_time"])
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
     if "split" not in df.columns:
         df["split"] = "train"
     df["split"] = df["split"].astype(str).str.strip().str.lower()
+    if actionable_only and "actionable_alert" in df.columns:
+        df = df[df["actionable_alert"].fillna(True).astype(bool)].copy()
     return df.dropna(subset=["well_id", "detected_time"]).sort_values(["well_id", "detected_time"])
 
 

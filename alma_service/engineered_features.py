@@ -64,6 +64,9 @@ MASK_TARGETS = {
     "salt": {"target_masked_fraction": 0.75, "hard_max_fraction": 0.90},
 }
 EPS = 1e-6
+REFERENCE_POLICY_DEFAULT = "default"
+REFERENCE_POLICY_NORMAL_WINDOWS = "normal_windows"
+REFERENCE_POLICIES = {REFERENCE_POLICY_DEFAULT, REFERENCE_POLICY_NORMAL_WINDOWS}
 
 
 @dataclass
@@ -326,8 +329,13 @@ def prepare_engineered_well(
     min_reference_coverage: float,
     min_total_coverage: float,
     anomaly_intervals: pd.DataFrame | None = None,
+    reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
+    normal_reference_fraction: float | None = None,
 ) -> PreparedWellData | None:
     patch_size = int(ANOMALY_PATCH_SIZE.get(anomaly_key, patch_size))
+    reference_policy = str(reference_policy or REFERENCE_POLICY_NORMAL_WINDOWS).strip().lower()
+    if reference_policy not in REFERENCE_POLICIES:
+        raise ValueError(f"Unknown reference_policy: {reference_policy}")
     wd = well_df.sort_values("timestamp").reset_index(drop=True)
     timestamps = wd["timestamp"].to_numpy()
     if len(timestamps) < patch_size * 4:
@@ -458,6 +466,20 @@ def prepare_engineered_well(
     if int(reference_mask.sum()) < min_ref_points:
         return None
 
+    normal_window_detail: dict[str, object] = {}
+    if reference_policy == REFERENCE_POLICY_NORMAL_WINDOWS:
+        normal_window_detail["normal_windows_source"] = "expert_confirmed_full_pre_anomaly_normal"
+        if anomaly_intervals is not None and not anomaly_intervals.empty:
+            first_start = pd.Timestamp(anomaly_intervals.sort_values("start_date").iloc[0]["start_date"])
+            first_start_idx = int(np.searchsorted(pd.DatetimeIndex(timestamps), first_start, side="left"))
+            if first_start_idx >= min_ref_points:
+                reference_mask = np.zeros(len(wd), dtype=bool)
+                reference_mask[:first_start_idx] = True
+                reference_end_idx = first_start_idx
+                normal_window_detail["first_anomaly_start"] = str(first_start)
+                normal_window_detail["reference_policy"] = "all_points_before_first_anomaly_start"
+                normal_window_detail["reference_points"] = int(reference_mask.sum())
+
     # --- 4-zone data curation ---
     zone_labels_arr = None
     if anomaly_intervals is not None and not anomaly_intervals.empty:
@@ -469,7 +491,12 @@ def prepare_engineered_well(
         )
         clean_mask = make_clean_normal_mask(zone_labels_arr)
         # Tighten reference_mask: only clean_normal within reference window
-        reference_mask = reference_mask & clean_mask
+        if reference_policy == REFERENCE_POLICY_NORMAL_WINDOWS:
+            # Expert rule: the full period before actual_start is normal; any
+            # suspicious degradation should already be inside the marked anomaly.
+            reference_mask = reference_mask & (pd.DatetimeIndex(timestamps) < first_start)
+        else:
+            reference_mask = reference_mask & clean_mask
         if int(reference_mask.sum()) < min_ref_points:
             # Fallback: use original reference_mask without zone filtering
             reference_mask = np.zeros(len(wd), dtype=bool)
@@ -503,6 +530,9 @@ def prepare_engineered_well(
     if zone_labels_arr is not None:
         zone_onset = make_onset_allowed_from_zones(zone_labels_arr, reference_end_idx)
         onset_allowed_mask = onset_allowed_mask & zone_onset
+    if reference_policy == REFERENCE_POLICY_NORMAL_WINDOWS:
+        onset_allowed_mask = onset_allowed_mask.copy()
+        onset_allowed_mask[reference_mask] = False
 
     feature_mode, feature_windows, slope_windows, include_stale = _feature_mode(
         reference_points=int(reference_mask.sum()),
@@ -559,6 +589,8 @@ def prepare_engineered_well(
         "mask_profile": chosen_profile_name,
         "feature_mode": feature_mode,
         "patch_size": patch_size,
+        "reference_policy": reference_policy,
+        "normal_window_selector": normal_window_detail,
         "zone_aware": zone_labels_arr is not None,
     }
     return PreparedWellData(

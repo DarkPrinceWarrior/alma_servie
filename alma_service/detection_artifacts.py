@@ -44,6 +44,10 @@ def predicted_starts_path(spec: DetectionSpec, detector: str) -> Path:
     return DB_DIR / f"{detector_stem(spec, detector)}_predicted_starts.parquet"
 
 
+def incidents_path(spec: DetectionSpec, detector: str) -> Path:
+    return DB_DIR / f"{detector_stem(spec, detector)}_incidents.parquet"
+
+
 def config_path(spec: DetectionSpec, detector: str) -> Path:
     return DB_DIR / f"{detector_stem(spec, detector)}_config.json"
 

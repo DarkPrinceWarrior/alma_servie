@@ -460,6 +460,7 @@ def train_shared_encoder(
     device: torch.device,
     verbose: bool = False,
     inject_cfg: Any = None,
+    num_iter: int = PAANO_NUM_ITERS,
 ) -> SharedEncoderState:
     """Train two shared encoders (short + long scale) on clean-normal data
     from all train wells of the given anomaly family.
@@ -486,16 +487,17 @@ def train_shared_encoder(
         )
 
     model_short, mean_short, std_short = _train_encoder_single_scale(
-        pool, patch_short, device, verbose=verbose, inject_cfg=inject_cfg,
+        pool, patch_short, device, verbose=verbose, inject_cfg=inject_cfg, num_iter=num_iter,
     )
     model_long, mean_long, std_long = _train_encoder_single_scale(
-        pool, patch_long, device, verbose=verbose, inject_cfg=inject_cfg,
+        pool, patch_long, device, verbose=verbose, inject_cfg=inject_cfg, num_iter=num_iter,
     )
 
     detail = {
         "pool_points": int(len(pool)),
         "shared_channels": len(shared_channels),
         "train_wells": train_well_ids,
+        "iterations": int(num_iter),
     }
     if inject_cfg is not None and getattr(inject_cfg, "rate", 0.0) > 0.0:
         detail["anomaly_injection"] = {

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from alma_service.anomaly_specs import get_detection_spec
 from alma_service.benchmark_metrics import predicted_from_mapping, summarize_splits
@@ -20,6 +25,10 @@ from alma_service.generic_detection import (
     _tune_config,
     load_anomaly_data,
     load_intervals,
+)
+from alma_service.engineered_features import (
+    REFERENCE_POLICIES,
+    REFERENCE_POLICY_NORMAL_WINDOWS,
 )
 from alma_service.shared_encoder import (
     collect_shared_train_pool,
@@ -65,7 +74,7 @@ def _load_saved_baseline(anomaly_key: str) -> dict[str, Any]:
     }
 
 
-def _prepare_by_class() -> tuple[dict[str, dict[str, Any]], dict[str, pd.DataFrame]]:
+def _prepare_by_class(reference_policy: str) -> tuple[dict[str, dict[str, Any]], dict[str, pd.DataFrame]]:
     prepared_by_class: dict[str, dict[str, Any]] = {}
     intervals_by_class: dict[str, pd.DataFrame] = {}
     for anomaly_key in ANOMALY_KEYS:
@@ -83,6 +92,7 @@ def _prepare_by_class() -> tuple[dict[str, dict[str, Any]], dict[str, pd.DataFra
             intervals,
             verbose=False,
             zone_aware=True,
+            reference_policy=reference_policy,
         )
         intervals_by_class[anomaly_key] = intervals
     return prepared_by_class, intervals_by_class
@@ -180,7 +190,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", default="artifacts/results/global_pretrain_finetune")
     parser.add_argument("--patch-short", type=int, default=96)
     parser.add_argument("--patch-long", type=int, default=192)
+    parser.add_argument("--global-iters", type=int, default=200)
     parser.add_argument("--fine-tune-iters", type=int, default=200)
+    parser.add_argument("--reference-policy", choices=sorted(REFERENCE_POLICIES), default=REFERENCE_POLICY_NORMAL_WINDOWS)
     parser.add_argument("--no-retune", action="store_true")
     return parser.parse_args()
 
@@ -190,7 +202,7 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    prepared_by_class, intervals_by_class = _prepare_by_class()
+    prepared_by_class, intervals_by_class = _prepare_by_class(str(args.reference_policy))
     global_pool_runs = _global_train_pool(prepared_by_class)
     global_pool, global_channels, global_train_wells = collect_shared_train_pool(
         global_pool_runs,
@@ -205,12 +217,15 @@ def main() -> None:
         anomaly_key="global",
         device=device,
         verbose=True,
+        num_iter=int(args.global_iters),
     )
 
     payload: dict[str, Any] = {
         "mode": "global_pretrain_class_finetune",
         "patch_short": args.patch_short,
         "patch_long": args.patch_long,
+        "reference_policy": str(args.reference_policy),
+        "global_iters": int(args.global_iters),
         "fine_tune_iters": args.fine_tune_iters,
         "retune": not args.no_retune,
         "global_pool_points_after_reduction": int(len(global_pool)),

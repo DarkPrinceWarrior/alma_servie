@@ -9,6 +9,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from alma_service.detection_artifacts import DETECTOR_KEYS, default_detector_for
+from alma_service.engineered_features import REFERENCE_POLICIES, REFERENCE_POLICY_NORMAL_WINDOWS
 from alma_service.generic_detection import run_detection, run_single_well
 
 
@@ -19,10 +20,18 @@ def main() -> None:
     parser.add_argument("--source", type=str, default=None)
     parser.add_argument("--well", type=str, default=None)
     parser.add_argument("--retune", action="store_true")
+    parser.add_argument("--reference-policy", choices=sorted(REFERENCE_POLICIES), default=REFERENCE_POLICY_NORMAL_WINDOWS)
     args = parser.parse_args()
 
     if args.well:
-        run_single_well("negermet", args.well, detector=args.detector, source_path=args.source, retune=args.retune)
+        run_single_well(
+            "negermet",
+            args.well,
+            detector=args.detector,
+            source_path=args.source,
+            retune=args.retune,
+            reference_policy=args.reference_policy,
+        )
         return
     run_detection(
         "negermet",
@@ -31,6 +40,7 @@ def main() -> None:
         source_path=args.source,
         retune=args.retune,
         verbose=True,
+        reference_policy=args.reference_policy,
     )
 
 
