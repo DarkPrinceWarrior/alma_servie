@@ -461,6 +461,7 @@ def train_shared_encoder(
     verbose: bool = False,
     inject_cfg: Any = None,
     num_iter: int = PAANO_NUM_ITERS,
+    enable_reduction: bool | None = None,
 ) -> SharedEncoderState:
     """Train two shared encoders (short + long scale) on clean-normal data
     from all train wells of the given anomaly family.
@@ -468,10 +469,12 @@ def train_shared_encoder(
     Returns a :class:`SharedEncoderState` with both models and normalization stats.
     """
     _set_seed()
+    if enable_reduction is None:
+        enable_reduction = anomaly_key != "negermet"
 
     pool, shared_channels, train_well_ids = collect_shared_train_pool(
         prepared_wells,
-        enable_reduction=anomaly_key != "negermet",
+        enable_reduction=bool(enable_reduction),
     )
 
     if verbose:

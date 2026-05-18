@@ -9,9 +9,9 @@ LOG_DIR="${LOG_DIR:-artifacts/logs}"
 RUN_TS="$(date +%Y%m%d_%H%M%S)"
 LOG_FILE="$LOG_DIR/full_dataset_build_${RUN_TS}.log"
 
-NEGERMET_FREQ="${NEGERMET_FREQ:-15s}"
-PRITOK_FREQ="${PRITOK_FREQ:-2min}"
-SALT_FREQ="${SALT_FREQ:-2min}"
+NEGERMET_FREQ="${NEGERMET_FREQ:-2min}"
+PRITOK_FREQ="${PRITOK_FREQ:-10min}"
+SALT_FREQ="${SALT_FREQ:-15min}"
 
 mkdir -p "$LOG_DIR"
 

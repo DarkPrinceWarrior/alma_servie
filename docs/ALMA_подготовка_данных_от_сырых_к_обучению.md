@@ -333,13 +333,425 @@ event-like raw telemetry
 - не считать sparse raw channel плохим, если после `ffill` он имеет нормальную
   историю и покрытие.
 
+## 11. Как собирать общий pool нормальной работы
+
+Общая модель не должна превращать несколько скважин в один искусственный
+временной ряд. Склейка делается только после того, как каждая скважина отдельно
+приведена к общей частоте, общей схеме колонок и своей нормализации.
+
+Правильная форма данных для одной скважины:
+
+```text
+well_i -> матрица T_i x C
+```
+
+где:
+
+- `T_i` - количество временных точек конкретной скважины;
+- `C` - одинаковый набор каналов/признаков для всех скважин в данном
+  эксперименте;
+- строки внутри `T_i` остаются временным рядом этой скважины;
+- значения разных скважин не смешиваются внутри одной строки.
+
+Общий train pool собирается вертикальной склейкой нормальных окон:
+
+```text
+X_train =
+  concat(
+    well_1_normal_windows,
+    well_2_normal_windows,
+    ...,
+    well_n_normal_windows,
+    axis=0
+  )
+```
+
+Это значит, что если есть приток с `X` скважинами по 26 параметров и негермет с
+5 скважинами по 26 параметров, то после приведения к одному `C` мы складываем
+нормальные окна этих скважин как разные обучающие примеры. Мы не складываем
+давление одной скважины с давлением другой по времени и не строим общий
+календарный ряд.
+
+Пример:
+
+```text
+pritok_1062:    7000 x 26
+pritok_129л:    8900 x 26
+negermet_1123л: 1200 x 26
+negermet_524:   1800 x 26
+
+pool:
+  normal_windows(pritok_1062)
+  + normal_windows(pritok_129л)
+  + normal_windows(negermet_1123л)
+  + normal_windows(negermet_524)
+```
+
+Если используется sliding-window/patch обучение, фактическая единица склейки -
+не отдельная строка, а окно:
+
+```text
+well_i_normal -> patches: N_i x patch_size x C
+global_pool -> concat(patches всех скважин, axis=0)
+```
+
+То есть склеиваются независимые окна нормальной работы разных скважин. Порядок
+времени внутри каждого окна сохраняется.
+
+Что нельзя делать:
+
+- нельзя соединять конец ряда одной скважины с началом ряда другой и считать
+  это непрерывным процессом;
+- нельзя использовать разные частоты в одном pool без пересчета физической
+  длительности patch/window;
+- нельзя позволять длинной скважине или большому классу полностью доминировать
+  в обучении;
+- нельзя динамически менять набор колонок от скважины к скважине внутри одной
+  модели.
+
+Для общей модели нужен баланс:
+
+- ограничивать максимальное число окон от одной скважины;
+- балансировать вклад классов `negermet`, `pritok`, `salt` и чистого
+  `norm_work`;
+- длинные и короткие скважины должны давать сопоставимый вклад;
+- `norm_work` использовать как дополнительную нормальную работу, но не давать
+  ему управлять выбором каналов.
+
+Итоговая логика:
+
+```text
+raw wells
+-> per-well regular grid
+-> per-well interpolation/ffill
+-> fixed feature schema
+-> per-well normal windows
+-> balanced concat of windows
+-> global normality encoder
+```
+
+Класс аномалии в этом подходе не является target для encoder. Он нужен для
+балансировки train pool, оценки результатов и последующей интерпретации.
+
 ## Ближайшие практические шаги
 
 1. Исправить stale defaults в full dataset build, чтобы они совпадали с
-   production parquet или явно были помечены как research.
+   production parquet или явно были помечены как research. Статус: сделано.
+   Defaults приведены к production-источникам: `negermet=2min`,
+   `pritok=10min`, `salt=15min`.
 2. Сделать отчет доступности каналов по каждому датасету: selected/dropped,
-   причина, coverage, first valid timestamp.
-3. Подготовить benchmark единой частоты для `negermet/pritok/salt`.
+   причина, coverage, first valid timestamp. Статус: сделано. Скрипт:
+   `scripts/datasets/audit_preprocessing_defaults_and_channels.py`, результат:
+   `artifacts/analysis/preprocessing_defaults_and_channels.md` и `.json`.
+3. Подготовить benchmark единой частоты для `negermet/pritok/salt`. Статус:
+   аналитический аудит сделан, обучение не запускалось. Скрипт:
+   `scripts/datasets/audit_frequency_candidates.py`, результат:
+   `artifacts/analysis/frequency_candidates_audit.md` и `.json`.
 4. Реализовать `fixed_feature_schema` для безопасного подключения `norm_work`.
-5. После этого повторить global normality benchmark и сравнить с текущим
-   `paano_shared`.
+   Статус: сделано для global normality benchmark. Конфиг:
+   `configs/alma_global_feature_schema.json`, код:
+   `alma_service/feature_schema.py`, подключение:
+   `scripts/evaluation/benchmark_global_normality_detector.py`.
+5. Реализовать `balanced global normal pool`. Статус: сделано в
+   `scripts/evaluation/benchmark_global_normality_detector.py`. По умолчанию
+   используется `equal_min`: каждый источник дает одинаковое число reference
+   rows, равное минимальному доступному источнику после per-well cap.
+6. Пересобрать `negermet/pritok/salt/norm_work` на `5min` и сделать
+   schema-only проверку уже на единой частоте. Статус: сделано. Parquet:
+   `db/negermet_anomaly_database_5min.parquet`,
+   `db/pritok_anomaly_database_5min.parquet`,
+   `db/salt_anomaly_database_5min.parquet`,
+   `db/norm_work_database_5min.parquet`. Schema-only результат:
+   `artifacts/results/global_normality_detector/schema_preview_5min/global_fixed_feature_schema_preview.json`.
+7. После этого повторить global normality benchmark и сравнить с текущим
+   `paano_shared`. Статус: не запускать до разбора ограничения по `negermet`
+   на 5min.
+
+## Прогресс от 2026-05-18
+
+Что проверено:
+
+- `negermet` production source: `db/negermet_anomaly_database_2min.parquet`;
+- `pritok` production source: `db/pritok_anomaly_database_10min.parquet`;
+- `salt` production source: `db/salt_anomaly_database_15min.parquet`;
+- `norm_work` для аудита общего набора каналов: `db/norm_work_database_10min.parquet`.
+
+До исправления defaults были расхождения:
+
+- `build_negermet_dataset.py` по умолчанию собирал `15s`, а production detection
+  брал `2min`;
+- `run_full_dataset_build.sh` по умолчанию собирал `pritok=2min`, а production
+  detection брал `10min`;
+- `build_salt_dataset.py` и `run_full_dataset_build.sh` по умолчанию собирали
+  `2min`, а production detection брал `15min`.
+
+После исправления:
+
+```text
+negermet -> 2min
+pritok   -> 10min
+salt     -> 15min
+```
+
+Отчет доступности каналов показал:
+
+- primary-источники: `negermet` - 6 скважин / 26 каналов, `pritok` - 27
+  скважин / 27 каналов, `salt` - 9 скважин / 27 каналов, `norm_work` - 20
+  скважин / 26 каналов;
+- в строгий общий набор для global normality сейчас проходят 21 канал;
+- спорные/отброшенные каналы: `Cos Ф`, `Активная выходная мощность`,
+  `Вибрация ХY`, `Выходное напряжение ПЧ`, `Выходной ток ПЧ`,
+  `Напряжение в звене постоянного тока ПЧ`;
+- причина спорности не в частоте, а в отсутствии канала хотя бы в одной
+  скважине/датасете или недостаточном покрытии.
+
+Вывод: общий encoder можно строить на фиксированном core из 21 канала. Если
+хотим использовать остальные 6 каналов, их нельзя молча добавлять в общий
+`C`: нужен отдельный режим `optional channels` или class-specific/diagnostic
+ветки, иначе модель будет зависеть от того, у какой скважины какие параметры
+случайно есть.
+
+## Прогресс по частоте от 2026-05-18
+
+Сделан отдельный аудит кандидатов общей частоты по сырым cache-файлам
+`db/raw_cache/*/*.parquet`. Это не пересобранные регулярные parquet, а исходные
+timestamp каждого параметра до `ffill` и регулярной сетки.
+
+Проверены частоты:
+
+- `2min`;
+- `5min`;
+- `10min`;
+- `15min`.
+
+Факты по сырым интервалам:
+
+```text
+negermet  median raw delta = 26s,  p90 = 2.72min, p95 = 15.07min
+pritok    median raw delta = 36s,  p90 = 15.12min, p95 = 15.23min
+salt      median raw delta = 44s,  p90 = 15.10min, p95 = 15.25min
+norm_work median raw delta = 42s,  p90 = 15.12min, p95 = 15.25min
+```
+
+Важный вывод: сырые ряды действительно event-like. Часто параметр может
+обновляться десятками секунд, но это не значит, что общую модель надо учить на
+секундной сетке. Иначе сетка будет огромной, а значительная часть частых
+обновлений будет от вибраций/служебных частых изменений, а не от масштаба
+аномалии.
+
+Размер общей сетки по всем четырем наборам:
+
+```text
+2min  -> 1 489 511 grid points
+5min  ->   595 780 grid points
+10min ->   297 862 grid points
+15min ->   198 556 grid points
+```
+
+Рекомендация:
+
+- первый общий benchmark делать на `5min`;
+- `10min` оставить как дешевый контрольный baseline;
+- `2min` не брать первым общим вариантом, потому что он сильно раздувает
+  `salt/pritok/norm_work`;
+- `15min` не брать как основной общий вариант, потому что он слишком грубый для
+  коротких событий `negermet`.
+
+Почему `5min`: это компромисс. Он не пытается сохранить каждый raw tick, но
+оставляет больше временного разрешения для быстрых событий, чем `10min/15min`,
+и при этом в 2.5 раза меньше по размеру, чем `2min`.
+
+## Прогресс по fixed feature schema от 2026-05-18
+
+Добавлен фиксированный raw-core schema для общей модели:
+
+```text
+configs/alma_global_feature_schema.json
+```
+
+В схему включен 21 канал, который прошел аудит доступности во всех primary-
+источниках `negermet`, `pritok`, `salt` и `norm_work`.
+
+Кодовая поддержка:
+
+- `alma_service/feature_schema.py` - загрузка schema и фильтрация
+  `PreparedWellData`;
+- `scripts/evaluation/benchmark_global_normality_detector.py` - новые флаги
+  `--feature-schema`, `--schema-only`, `--enable-feature-reduction`;
+- `alma_service/shared_encoder.py` - добавлен необязательный параметр
+  `enable_reduction`, старое поведение по умолчанию сохранено.
+
+Проверка без обучения:
+
+```bash
+uv run python scripts/evaluation/benchmark_global_normality_detector.py \
+  --include-norm-work \
+  --schema-only \
+  --no-retune \
+  --output-dir artifacts/results/global_normality_detector/schema_preview
+```
+
+Результат:
+
+```text
+pool rows        = 210 474
+train wells      = 95
+shared features  = 126
+```
+
+Это означает: 21 raw-канал после engineered feature expansion дает 126 общих
+feature columns, и strict schema не выбросила скважины.
+
+Важная найденная проблема: старая `feature reduction` при смешанном global pool
+схлопнула 126 features до 1 (`Дисбаланс токов::raw`). Для общего fixed-schema
+режима это некорректно, поэтому reduction по умолчанию выключена в global
+benchmark и может включаться только явно через `--enable-feature-reduction`.
+Для production class-specific `paano_shared` старое поведение не менялось.
+
+## Прогресс по balanced pool от 2026-05-18
+
+Добавлена балансировка train reference pool для общей модели:
+
+- `--disable-balanced-pool` - выключить балансировку;
+- `--balance-source-policy equal_min|cap`;
+- `--balance-rows-per-source`;
+- `--balance-rows-per-well`;
+- `--balance-seed`.
+
+Default-режим: `equal_min`.
+
+Смысл `equal_min`: сначала ограничиваем вклад одной скважины, потом смотрим,
+сколько reference rows осталось у каждого источника (`negermet`, `pritok`,
+`salt`, `norm_work`), и все источники режем до размера самого маленького. Так
+модель не получает ситуацию, где `pritok` или `norm_work` в десятки раз
+доминируют над `negermet`.
+
+Dry-run без обучения на текущих production-источниках:
+
+```bash
+uv run python scripts/evaluation/benchmark_global_normality_detector.py \
+  --include-norm-work \
+  --schema-only \
+  --no-retune \
+  --output-dir artifacts/results/global_normality_detector/schema_preview
+```
+
+Результат:
+
+```text
+shared features = 126
+train wells     = 95
+pool rows       = 24 532
+
+negermet  = 6 133 rows
+pritok    = 6 133 rows
+salt      = 6 133 rows
+norm_work = 6 133 rows
+```
+
+Важное ограничение текущего dry-run: он проверяет механику fixed schema и
+balanced pool на production-источниках с разной частотой. Это не финальный
+global benchmark. Перед обучением нужно пересобрать все четыре источника на
+единую частоту `5min` и повторить schema-only проверку.
+
+## Прогресс по единой частоте 5min от 2026-05-18
+
+Пересобраны регулярные parquet на единой сетке `5min`:
+
+```text
+db/negermet_anomaly_database_5min.parquet -> 9 145 rows, 6 wells
+db/pritok_anomaly_database_5min.parquet   -> 284 172 rows, 27 wells
+db/salt_anomaly_database_5min.parquet     -> 218 964 rows, 9 wells
+db/norm_work_database_5min.parquet        -> 83 499 rows, 20 wells
+```
+
+Сборка запускалась на сервере без обучения. Лог сохранен в
+`artifacts/logs/build_common_5min_*.log`.
+
+Повторена strict schema-only проверка уже на `5min`:
+
+```bash
+uv run python scripts/evaluation/benchmark_global_normality_detector.py \
+  --common-source-freq 5min \
+  --include-norm-work \
+  --schema-only \
+  --no-retune \
+  --output-dir artifacts/results/global_normality_detector/schema_preview_5min
+```
+
+Первый результат до исправления подготовки:
+
+```text
+shared features = 126
+train wells     = 93
+pool rows       = 7 904
+
+negermet  = 1 976 rows, 2 train wells
+pritok    = 1 976 rows, 25 train wells
+salt      = 1 976 rows, 6 train wells
+norm_work = 1 976 rows, 60 prepared entries
+```
+
+После разбора причины внесены две правки в
+`scripts/evaluation/benchmark_global_normality_detector.py`:
+
+- при `--common-source-freq` patch size для подготовки пересчитывается по
+  физической длительности production-сетки;
+- `norm_work` добавляется один раз через `--norm-work-profile`, а не три раза
+  через все anomaly-profile.
+
+Для `5min` получились такие prepare patch overrides:
+
+```text
+negermet -> 52   вместо 128 на 2min
+pritok   -> 384  вместо 192 на 10min
+salt     -> 384  вместо 128 на 15min
+```
+
+Повторный schema-only результат:
+
+```text
+shared features = 126
+train wells     = 55
+pool rows       = 9 816
+
+negermet  = 2 454 rows, 4 train wells
+pritok    = 2 454 rows, 25 train wells
+salt      = 2 454 rows, 6 train wells
+norm_work = 2 454 rows, 20 prepared entries
+```
+
+Фиксированная схема прошла чисто:
+
+```text
+negermet schema skips = 0
+pritok schema skips   = 0
+salt schema skips     = 0
+```
+
+Это значит, что выбранный core из 21 raw-канала совместим с пересобранными
+`5min` источниками. После feature expansion он дает те же 126 общих признаков.
+
+После пересчета patch size на `5min` в train reference pool для `negermet`
+попали четыре train-скважины:
+
+```text
+1123л -> 364 reference rows
+172г  -> 1 612 reference rows
+524   -> 209 reference rows
+5271г -> 269 reference rows
+```
+
+Из-за default-балансировки `equal_min` весь общий pool режется до размера
+самого маленького источника, поэтому остальные источники тоже ограничены
+`2 454` rows. Это ожидаемое поведение: `negermet` остается самым маленьким
+источником, но теперь он представлен четырьмя train-скважинами, а не двумя.
+
+`norm_work` теперь учитывается как 20 prepared entries: одна исходная скважина
+= один элемент pool. Default profile для подготовки `norm_work` выбран
+`pritok`, потому что это нейтральный профиль без salt soft-sensor веток; при
+fixed schema soft features всё равно не попадают в общий `C`.
+
+Вывод: пересборка и schema-only на `5min` выполнены, механические ограничения
+по patch size и тройному учету `norm_work` исправлены. Обучение benchmark пока
+не запускалось.
