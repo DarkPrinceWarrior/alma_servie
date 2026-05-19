@@ -53,6 +53,7 @@ META_COLUMNS = {"well_id", "timestamp", "split", "interval_idx", "anomaly_type"}
 
 DETECTOR_LABELS = {
     "paano_shared": "PaAno Shared Encoder",
+    "paano_global": "PaAno Global Encoder",
 }
 
 DISPLAY_NAMES = {
@@ -125,11 +126,18 @@ def _resolve_detector(spec: DetectionSpec, detector: str | None) -> str:
     return DEFAULT_DETECTOR
 
 
-def _load_source(spec: DetectionSpec, source_path: str | None) -> Path:
+def _load_source(spec: DetectionSpec, source_path: str | None, detector_key: str | None = None) -> Path:
     if source_path is not None:
         src = Path(source_path)
         if not src.exists():
             raise FileNotFoundError(f"Source file not found: {src}")
+        return src
+    if detector_key == "paano_global":
+        from alma_service.global_normality import configured_anomaly_source_path
+
+        src = configured_anomaly_source_path(spec.anomaly_key)
+        if not src.exists():
+            raise FileNotFoundError(f"Global detector source file not found: {src}")
         return src
     for name in spec.dataset.source_candidates:
         src = DB_DIR / name
@@ -138,9 +146,9 @@ def _load_source(spec: DetectionSpec, source_path: str | None) -> Path:
     raise FileNotFoundError(f"No source dataset found for {spec.anomaly_key}")
 
 
-def _load_timeseries(spec: DetectionSpec, source_path: str | None) -> pd.DataFrame:
+def _load_timeseries(spec: DetectionSpec, source_path: str | None, detector_key: str | None = None) -> pd.DataFrame:
     df = read_table(
-        _load_source(spec, source_path),
+        _load_source(spec, source_path, detector_key=detector_key),
         dtypes={"well_id": str},
         parse_dates=["timestamp"],
         low_memory=False,
@@ -884,7 +892,7 @@ def generate_feature_importance_report(
     print(f"Аномалия: {spec.display_name}")
     print(f"Детектор: {DETECTOR_LABELS.get(detector_key, detector_key)} ({detector_key})")
 
-    data_df = _load_timeseries(spec, source_path)
+    data_df = _load_timeseries(spec, source_path, detector_key=detector_key)
     intervals_df = _load_intervals(spec)
     scores_df = _load_scores(spec, detector_key)
     score_col = _score_column(scores_df)

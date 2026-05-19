@@ -79,6 +79,7 @@ STATUS_COLUMNS = [
     "is_pre_anomaly_zone",
     "is_labelled_anomaly",
 ]
+INVALID_SCORE_REASONS = {"not_enough_points"}
 
 
 def _incident_merge_window_hours(cfg: dict[str, Any]) -> float:
@@ -169,7 +170,8 @@ ANOMALY_RUNTIME_CONFIG = {
         "max_p90_delay_ratio": 0.20,
     },
 }
-CUDA_REQUIRED_DETECTORS = {"paano_shared"}
+PAANO_PRODUCTION_DETECTORS = {"paano_shared", "paano_global"}
+CUDA_REQUIRED_DETECTORS = PAANO_PRODUCTION_DETECTORS
 
 
 def _resolve_torch_device(detector_key: str, verbose: bool = True) -> torch.device:
@@ -190,6 +192,10 @@ def _resolve_torch_device(detector_key: str, verbose: bool = True) -> torch.devi
     return device
 
 
+def _is_paano_production_detector(detector_key: str) -> bool:
+    return detector_key in PAANO_PRODUCTION_DETECTORS
+
+
 @dataclass
 class PreparedDetectorRun:
     prepared: PreparedWellData
@@ -204,7 +210,7 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     cfg = BASE_ONSET_CONFIG.copy()
     profile = ANOMALY_ONSET_PROFILES.get(anomaly_key, {})
     cfg.update(profile.get("defaults", {}))
-    if detector_key == "paano_shared":
+    if _is_paano_production_detector(detector_key):
         cfg["fusion_weight_short"] = 0.60
     return cfg
 
@@ -406,10 +412,10 @@ def _build_local_runs(
     verbose: bool,
     shared_state: Any = None,
 ) -> dict[str, PreparedDetectorRun]:
-    if detector_key != "paano_shared":
+    if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
     if shared_state is None:
-        raise ValueError("paano_shared requires a trained or loaded shared encoder state.")
+        raise ValueError(f"{detector_key} requires a trained or loaded shared encoder state.")
 
     from alma_service.shared_encoder import select_shared_columns
 
@@ -470,8 +476,27 @@ def _build_local_runs(
     return out
 
 
+def _build_global_runs(
+    prepared_runs: dict[str, PreparedWellData],
+    device: torch.device,
+    verbose: bool,
+    shared_state: Any,
+) -> dict[str, PreparedDetectorRun]:
+    if shared_state is None:
+        raise ValueError("paano_global requires a trained or loaded global encoder state.")
+
+    from alma_service.global_normality import build_global_core_runs
+
+    return build_global_core_runs(
+        prepared_runs,
+        shared_state,
+        device,
+        verbose=verbose,
+    )
+
+
 def _score_for_config(run: PreparedDetectorRun, detector_key: str, cfg: dict[str, Any]) -> np.ndarray:
-    if detector_key != "paano_shared":
+    if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
 
     model_score = run.score_output.components.get("paano_score")
@@ -499,6 +524,7 @@ def _detect_starts_for_run(
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp]]:
     cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
+    score_unavailable_reason = _score_unavailable_reason(run)
     thresholds, diagnostics = calibrate_causal_thresholds_from_reference_mask(
         scores=score,
         timestamps=run.prepared.timestamps,
@@ -507,6 +533,8 @@ def _detect_starts_for_run(
         min_run_points=int(cfg["min_run_points"]),
         ema_alpha=float(cfg["ema_alpha"]),
     )
+    if score_unavailable_reason is not None:
+        return score, thresholds, []
     starts = detect_causal_onsets_masked(
         scores=score,
         timestamps=run.prepared.timestamps,
@@ -524,8 +552,15 @@ def _detect_starts_for_run(
     return score, thresholds, starts
 
 
+def _score_unavailable_reason(run: PreparedDetectorRun) -> str | None:
+    reason = str(run.score_output.detail.get("reason", "")).strip()
+    if reason in INVALID_SCORE_REASONS:
+        return reason
+    return None
+
+
 def _candidate_configs(anomaly_key: str, detector_key: str) -> list[dict[str, Any]]:
-    if detector_key != "paano_shared":
+    if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
 
     candidates: list[dict[str, Any]] = []
@@ -829,7 +864,7 @@ def _robust_optuna_objective_value(
 
 
 def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
-    if detector_key != "paano_shared":
+    if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
 
     grid = (
@@ -1453,6 +1488,8 @@ def _build_score_rows(
     for well_id, run in runs.items():
         score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
         predicted[well_id] = starts
+        score_unavailable_reason = _score_unavailable_reason(run)
+        score_valid = score_unavailable_reason is None
         well_intervals = None
         if intervals is not None and not intervals.empty:
             normalized = intervals["well_id"].astype(str).str.strip().str.lower()
@@ -1470,6 +1507,8 @@ def _build_score_rows(
             "detector": run.score_output.detail,
             "thresholds": asdict(thresholds),
             "n_predicted_starts": len(starts),
+            "score_valid": score_valid,
+            "score_unavailable_reason": score_unavailable_reason,
         }
         components = dict(run.score_output.components)
         components["score"] = score
@@ -1483,6 +1522,8 @@ def _build_score_rows(
                 "reference_mask": bool(run.prepared.reference_mask[idx]),
                 "stability_mask": bool(run.prepared.stability_mask[idx]),
                 "onset_allowed_mask": bool(run.prepared.onset_allowed_mask[idx]),
+                "score_valid": bool(score_valid),
+                "score_unavailable_reason": score_unavailable_reason or "",
             }
             if len(status_frame) == len(score):
                 for name in STATUS_COLUMNS:
@@ -1597,46 +1638,67 @@ def run_detection(
     output = ensure_parent(Path(output_path) if output_path else results_path(spec, detector_key))
     device = _resolve_torch_device(detector_key, verbose=True)
 
-    df = load_anomaly_data(spec, source_path=source_path)
-    intervals = load_intervals(spec, required=True)
-    if df.empty or intervals.empty:
-        raise RuntimeError("Empty data or intervals for detection.")
+    if detector_key == "paano_global":
+        from alma_service.global_normality import prepare_global_normality_runtime
 
-    # Keep only first interval per well (data is truncated at first anomaly end)
-    intervals = (
-        intervals
-        .sort_values(["well_id", "start_date", "interval_idx"])
-        .groupby("well_id", as_index=False)
-        .first()
-    )
+        runtime = prepare_global_normality_runtime(
+            spec.anomaly_key,
+            device=device,
+            verbose=verbose,
+            source_path=source_path,
+        )
+        prepared_runs = runtime.prepared_runs
+        intervals = runtime.intervals
+        shared_state = runtime.shared_state
+        if verbose:
+            print(f"  Global encoder ready: {shared_state.detail}")
+        detector_runs = _build_global_runs(
+            prepared_runs,
+            device=device,
+            verbose=verbose,
+            shared_state=shared_state,
+        )
+    else:
+        df = load_anomaly_data(spec, source_path=source_path)
+        intervals = load_intervals(spec, required=True)
+        if df.empty or intervals.empty:
+            raise RuntimeError("Empty data or intervals for detection.")
 
-    prepared_runs = _prepare_all_wells(
-        spec, df, intervals, verbose=verbose,
-        zone_aware=True,
-        reference_policy=reference_policy,
-    )
-    if not prepared_runs:
-        raise RuntimeError("No wells survived engineered preprocessing.")
+        # Keep only first interval per well (data is truncated at first anomaly end)
+        intervals = (
+            intervals
+            .sort_values(["well_id", "start_date", "interval_idx"])
+            .groupby("well_id", as_index=False)
+            .first()
+        )
 
-    from alma_service.shared_encoder import load_or_train_shared_encoder
+        prepared_runs = _prepare_all_wells(
+            spec, df, intervals, verbose=verbose,
+            zone_aware=True,
+            reference_policy=reference_policy,
+        )
+        if not prepared_runs:
+            raise RuntimeError("No wells survived engineered preprocessing.")
 
-    runtime_cfg = _runtime_config(anomaly_key)
-    shared_state = load_or_train_shared_encoder(
-        prepared_wells=prepared_runs,
-        patch_short=int(runtime_cfg.get("paano_patch_short", SHORT_PATCH)),
-        patch_long=int(runtime_cfg.get("paano_patch_long", LONG_PATCH)),
-        anomaly_key=anomaly_key,
-        device=device,
-        verbose=verbose,
-    )
-    if verbose:
-        print(f"  Shared encoder ready: {shared_state.detail}")
+        from alma_service.shared_encoder import load_or_train_shared_encoder
 
-    detector_runs = _build_local_runs(
-        spec.anomaly_key, detector_key, prepared_runs,
-        device=device, verbose=verbose,
-        shared_state=shared_state,
-    )
+        runtime_cfg = _runtime_config(anomaly_key)
+        shared_state = load_or_train_shared_encoder(
+            prepared_wells=prepared_runs,
+            patch_short=int(runtime_cfg.get("paano_patch_short", SHORT_PATCH)),
+            patch_long=int(runtime_cfg.get("paano_patch_long", LONG_PATCH)),
+            anomaly_key=anomaly_key,
+            device=device,
+            verbose=verbose,
+        )
+        if verbose:
+            print(f"  Shared encoder ready: {shared_state.detail}")
+
+        detector_runs = _build_local_runs(
+            spec.anomaly_key, detector_key, prepared_runs,
+            device=device, verbose=verbose,
+            shared_state=shared_state,
+        )
 
     train_runs = {well_id: run for well_id, run in detector_runs.items() if run.prepared.split == "train"}
     train_intervals = intervals[intervals["split"].astype(str).str.lower() == "train"].copy()

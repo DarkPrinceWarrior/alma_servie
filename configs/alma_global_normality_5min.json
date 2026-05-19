@@ -1,0 +1,111 @@
+{
+    "name": "alma_global_normality_5min",
+    "status": "candidate_requires_short_well_fallback",
+    "created_at": "2026-05-18",
+    "description": "Research candidate for one global PaAno normality encoder across negermet, pritok, salt, and norm_work on a common 5min grid. This is not a production default yet. Wells shorter than patch_long*2 are marked as invalid score and must use a short-window fallback before promotion.",
+    "common_source_freq": "5min",
+    "patch_short": 192,
+    "patch_long": 384,
+    "global_iters": 200,
+    "feature_schema": "configs/alma_global_feature_schema.json",
+    "include_norm_work": true,
+    "norm_work_profile": "pritok",
+    "reference_policy": "normal_windows",
+    "balance": {
+        "enabled": true,
+        "source_policy": "equal_min",
+        "rows_per_source": 48000,
+        "rows_per_well": 8000,
+        "seed": 20260518
+    },
+    "prepare_patch_size_overrides": {
+        "negermet": 52,
+        "pritok": 384,
+        "salt": 384
+    },
+    "invalid_score_policy": {
+        "reason": "not_enough_points",
+        "action": "do_not_emit_detection_start",
+        "report_message": "score unavailable, zero score does not mean normal operation",
+        "known_impact": "short negermet wells are not valid for patch=(192,384) without a short-window fallback"
+    },
+    "selection_basis": {
+        "no_retune_benchmark": "artifacts/results/global_normality_detector/5min_no_retune_patch192_384/global_normality_benchmark_summary.csv",
+        "retune_benchmark": "artifacts/results/global_normality_detector/5min_retune_patch192_384/global_normality_benchmark_summary.csv",
+        "retune": true,
+        "reason": "Best checked 5min global normality candidate before invalid-score guard. After the guard, pritok and salt remain valid on patch=(192,384), while short negermet wells require a short-window fallback.",
+        "interval_review": "artifacts/results/global_normality_detector/5min_retune_patch192_384/global_vs_production_interval_review.md"
+    },
+    "no_retune_metrics_all": {
+        "negermet": {
+            "interval_count": 5,
+            "hit_count": 5,
+            "hit_rate": 1.0,
+            "false_alarms_per_day": 0.0,
+            "start_count": 5,
+            "median_abs_delay_hours": 0.05,
+            "p90_abs_delay_hours": 0.72,
+            "p90_delay_ratio": 0.06887679366650173
+        },
+        "pritok": {
+            "interval_count": 24,
+            "hit_count": 24,
+            "hit_rate": 1.0,
+            "false_alarms_per_day": 0.0,
+            "start_count": 54,
+            "median_abs_delay_hours": 1.6020833333333333,
+            "p90_abs_delay_hours": 5.327444444444443,
+            "p90_delay_ratio": 0.017804202416025115
+        },
+        "salt": {
+            "interval_count": 8,
+            "hit_count": 8,
+            "hit_rate": 1.0,
+            "false_alarms_per_day": 0.0,
+            "start_count": 16,
+            "median_abs_delay_hours": 1.0,
+            "p90_abs_delay_hours": 12.066666666666661,
+            "p90_delay_ratio": 0.02019036221871298
+        }
+    },
+    "retune_metrics_all": {
+        "negermet": {
+            "interval_count": 5,
+            "hit_count": 1,
+            "hit_rate": 0.2,
+            "false_alarms_per_day": 0.0,
+            "start_count": 1,
+            "median_abs_delay_hours": 0.0,
+            "p90_abs_delay_hours": 0.0,
+            "p90_delay_ratio": 0.0,
+            "invalid_score_wells": [
+                "1123\u043b",
+                "3509\u0433",
+                "524",
+                "5271\u0433",
+                "\u044e-\u044f 39-651"
+            ]
+        },
+        "pritok": {
+            "interval_count": 24,
+            "hit_count": 24,
+            "hit_rate": 1.0,
+            "false_alarms_per_day": 0.0,
+            "start_count": 45,
+            "median_abs_delay_hours": 1.6020833333333333,
+            "p90_abs_delay_hours": 5.327444444444443,
+            "p90_delay_ratio": 0.017804202416025115
+        },
+        "salt": {
+            "interval_count": 8,
+            "hit_count": 8,
+            "hit_rate": 1.0,
+            "false_alarms_per_day": 0.0,
+            "start_count": 14,
+            "median_abs_delay_hours": 1.0,
+            "p90_abs_delay_hours": 12.066666666666661,
+            "p90_delay_ratio": 0.02019036221871298
+        }
+    },
+    "next_step": "Physically inspect the weakest interval-level cases, especially salt/3245(2) and pritok/5144\u0433, before promoting anything to production defaults."
+}

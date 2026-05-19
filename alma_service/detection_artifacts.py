@@ -7,7 +7,7 @@ from typing import Any
 from alma_service.anomaly_specs import DetectionSpec
 from alma_service.paths import DB_DIR, MODELS_DIR, REPORTS_DIR, RESULTS_DIR
 
-DETECTOR_KEYS = ("paano_shared",)
+DETECTOR_KEYS = ("paano_shared", "paano_global")
 DEFAULT_DETECTOR = "paano_shared"
 ANOMALY_DEFAULT_DETECTOR = {
     "negermet": "paano_shared",

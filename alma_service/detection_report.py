@@ -44,14 +44,22 @@ SPLIT_SHORT_LABELS = {"train": "Обучение", "test": "Тест", "all": "�
 STATUS_LABELS = {"Detected": "Обнаружено", "Not found": "Не обнаружено"}
 DETECTOR_LABELS = {
     "paano_shared": "PaAno Shared Encoder",
+    "paano_global": "PaAno Global Encoder",
 }
 
 
-def _pick_existing_source(spec, source_path: str | None) -> Path:
+def _pick_existing_source(spec, source_path: str | None, detector_key: str | None = None) -> Path:
     if source_path:
         src = Path(source_path)
         if not src.exists():
             raise FileNotFoundError(f"Source file not found: {src}")
+        return src
+    if detector_key == "paano_global":
+        from alma_service.global_normality import configured_anomaly_source_path
+
+        src = configured_anomaly_source_path(spec.anomaly_key)
+        if not src.exists():
+            raise FileNotFoundError(f"Global detector source file not found: {src}")
         return src
 
     candidates = [DB_DIR / name for name in spec.dataset.source_candidates]
@@ -131,6 +139,39 @@ def _score_column(scores_df: pd.DataFrame | None) -> str | None:
         if column.endswith("_score"):
             return column
     return None
+
+
+def _score_unavailable_reason(scores_df: pd.DataFrame | None) -> str | None:
+    if scores_df is None or scores_df.empty or "score_valid" not in scores_df.columns:
+        return None
+    valid_raw = scores_df["score_valid"]
+    if valid_raw.dtype == object:
+        valid = valid_raw.fillna("true").astype(str).str.lower().isin({"1", "true", "yes"})
+    else:
+        valid = valid_raw.fillna(True).astype(bool)
+    if bool(valid.any()):
+        return None
+    if "score_unavailable_reason" not in scores_df.columns:
+        return "unknown"
+    reasons = (
+        scores_df["score_unavailable_reason"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    reasons = reasons[reasons != ""]
+    if reasons.empty:
+        return "unknown"
+    return str(reasons.mode().iloc[0])
+
+
+def _score_unavailable_text(reason: str | None) -> str:
+    if reason == "not_enough_points":
+        return (
+            "Отклонение от нормы не рассчитано: недостаточно точек в ряду или reference "
+            "для выбранного окна PaAno. Нулевой score здесь не означает норму."
+        )
+    return "Отклонение от нормы не рассчитано. Нулевой score здесь не означает норму."
 
 
 def _format_dt(value: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
@@ -222,12 +263,14 @@ def _create_plot_html(
 ) -> str | None:
     well_id = str(result_row["well_id"])
     score_col = _score_column(scores_df)
+    score_unavailable_reason = _score_unavailable_reason(scores_df)
     has_scores = score_col is not None
-    has_paano_tail = scores_df is not None and "paano_tail_score" in scores_df.columns
-    has_pressure_trend = scores_df is not None and "pressure_trend_score" in scores_df.columns
-    has_negermet_signature = scores_df is not None and "negermet_signature_score" in scores_df.columns
-    has_salt_trend = scores_df is not None and "salt_deposition_score" in scores_df.columns
-    has_salt_shift = scores_df is not None and "salt_distribution_shift_score" in scores_df.columns
+    score_components_available = has_scores and score_unavailable_reason is None
+    has_paano_tail = score_components_available and scores_df is not None and "paano_tail_score" in scores_df.columns
+    has_pressure_trend = score_components_available and scores_df is not None and "pressure_trend_score" in scores_df.columns
+    has_negermet_signature = score_components_available and scores_df is not None and "negermet_signature_score" in scores_df.columns
+    has_salt_trend = score_components_available and scores_df is not None and "salt_deposition_score" in scores_df.columns
+    has_salt_shift = score_components_available and scores_df is not None and "salt_distribution_shift_score" in scores_df.columns
 
     x_min = result_row["data_start"] if pd.notna(result_row.get("data_start")) else well_df["timestamp"].min()
     x_max = result_row["data_end"] if pd.notna(result_row.get("data_end")) else well_df["timestamp"].max()
@@ -299,7 +342,20 @@ def _create_plot_html(
             score_view = scores_df.copy()
             if pd.notna(x_min) and pd.notna(x_max):
                 score_view = score_view[(score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)]
-            if not score_view.empty:
+            if score_unavailable_reason is not None:
+                ax.text(
+                    0.5,
+                    0.5,
+                    _score_unavailable_text(score_unavailable_reason),
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#92400e",
+                    bbox=dict(boxstyle="round,pad=0.45", fc="#fffbeb", ec="#f59e0b", alpha=0.95),
+                )
+                ax.set_yticks([])
+            elif not score_view.empty:
                 sts = pd.to_datetime(score_view["timestamp"])
                 vals = score_view[score_col].values
                 ax.fill_between(sts, 0, vals, color=accent, alpha=0.18)
@@ -411,6 +467,7 @@ def _create_unlabeled_plot_html(
 ) -> str | None:
     """Create a plot for a well with no labeled anomaly interval."""
     score_col = _score_column(scores_df)
+    score_unavailable_reason = _score_unavailable_reason(scores_df)
     has_scores = score_col is not None
     if well_df.empty and not has_scores:
         return None
@@ -446,7 +503,20 @@ def _create_unlabeled_plot_html(
                 score_view = score_view[
                     (score_view["timestamp"] >= x_min) & (score_view["timestamp"] <= x_max)
                 ]
-            if not score_view.empty:
+            if score_unavailable_reason is not None:
+                ax.text(
+                    0.5,
+                    0.5,
+                    _score_unavailable_text(score_unavailable_reason),
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    color="#92400e",
+                    bbox=dict(boxstyle="round,pad=0.45", fc="#fffbeb", ec="#f59e0b", alpha=0.95),
+                )
+                ax.set_yticks([])
+            elif not score_view.empty:
                 sts = pd.to_datetime(score_view["timestamp"])
                 vals = score_view[score_col].values
                 ax.fill_between(sts, 0, vals, color=accent, alpha=0.18)
@@ -513,7 +583,7 @@ def generate_report(
     theme = COLOR_THEMES[anomaly_key]
     detector_key = _resolve_detector(spec, detector)
 
-    source = _pick_existing_source(spec, source_path)
+    source = _pick_existing_source(spec, source_path, detector_key=detector_key)
     results_path_value = Path(results_path_override) if results_path_override else results_path(spec, detector_key)
     scores_path_value = Path(scores_path_override) if scores_path_override else scores_path(spec, detector_key)
     output = ensure_parent(
@@ -571,11 +641,18 @@ def generate_report(
     for idx, result_row in results_df.iterrows():
         well_id = str(result_row["well_id"])
         print(f"  График {idx + 1}/{len(results_df)}: скв. {well_id}, интервал {int(result_row['interval_idx'])}")
+        well_scores = scores_by_well.get(well_id)
+        score_unavailable_reason = _score_unavailable_reason(well_scores)
+        score_warning_html = (
+            f'<p class="score-warning">{escape(_score_unavailable_text(score_unavailable_reason))}</p>'
+            if score_unavailable_reason is not None
+            else ""
+        )
         well_ts = data_df[data_df["well_id"] == well_id].copy()
         plot_html = _create_plot_html(
             well_df=well_ts,
             result_row=result_row,
-            scores_df=scores_by_well.get(well_id),
+            scores_df=well_scores,
             accent=theme["accent"],
             fi_data=fi_data,
         )
@@ -598,6 +675,7 @@ def generate_report(
                 <span><b>Задержка:</b> {_format_float(result_row.get('delay_hours'), 2, ' ч')}</span>
               </div>
               <p class="note">Зелёная линия — начало аномалии, красная зона — длительность, фиолетовая пунктирная — момент обнаружения.</p>
+              {score_warning_html}
               <div class="plot-wrap">{plot_html if plot_html else '<p>Нет данных для графика</p>'}</div>
             </article>
             """
@@ -626,12 +704,19 @@ def generate_report(
                 well_preds = [pd.Timestamp(t) for t in wp["detected_time"].dropna()]
 
             well_ts = data_df[data_df["well_id"] == well_id].copy()
+            well_scores = scores_by_well.get(well_id)
+            score_unavailable_reason = _score_unavailable_reason(well_scores)
+            score_warning_html = (
+                f'<p class="score-warning">{escape(_score_unavailable_text(score_unavailable_reason))}</p>'
+                if score_unavailable_reason is not None
+                else ""
+            )
             print(f"  \u0413\u0440\u0430\u0444\u0438\u043a (\u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438): \u0441\u043a\u0432. {well_id}, \u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0439: {len(well_preds)}")
 
             plot_html = _create_unlabeled_plot_html(
                 well_df=well_ts,
                 well_id=well_id,
-                scores_df=scores_by_well.get(well_id),
+                scores_df=well_scores,
                 predicted_starts=well_preds,
                 accent=theme["accent"],
                 fi_data=fi_data,
@@ -654,6 +739,7 @@ def generate_report(
                     <span><b>\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043d\u044b\u0435 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438:</b> {escape(starts_text)}</span>
                   </div>
                   <p class="note">\u0424\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440\u043d\u0430\u044f \u043b\u0438\u043d\u0438\u044f \u2014 \u043c\u043e\u043c\u0435\u043d\u0442 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u044f \u0430\u043b\u0433\u043e\u0440\u0438\u0442\u043c\u043e\u043c. \u0420\u0430\u0437\u043c\u0435\u0442\u043a\u0430 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442.</p>
+                  {score_warning_html}
                   <div class="plot-wrap">{plot_html if plot_html else '<p>\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0434\u043b\u044f \u0433\u0440\u0430\u0444\u0438\u043a\u0430</p>'}</div>
                 </article>
                 """
@@ -731,6 +817,16 @@ def generate_report(
           .note {{
             margin: 0 0 12px;
             color: var(--muted);
+            font-size: 13px;
+          }}
+          .score-warning {{
+            margin: 0 0 12px;
+            padding: 10px 12px;
+            border: 1px solid #f59e0b;
+            border-radius: 12px;
+            background: #fffbeb;
+            color: #92400e;
+            font-weight: 600;
             font-size: 13px;
           }}
           .pill {{

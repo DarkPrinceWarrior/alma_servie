@@ -553,6 +553,8 @@ def load_or_train_shared_encoder(
     anomaly_key: str,
     device: torch.device,
     verbose: bool = False,
+    num_iter: int = PAANO_NUM_ITERS,
+    enable_reduction: bool | None = None,
 ) -> SharedEncoderState:
     """Load a saved shared encoder if one exists in models/ and is compatible
     with the current train pool; otherwise train from scratch.
@@ -564,11 +566,13 @@ def load_or_train_shared_encoder(
     force_retrain = os.environ.get("ALMA_FORCE_RETRAIN_ENCODER", "0") == "1"
     cache_path = shared_encoder_path(anomaly_key)
     meta = _peek_saved_encoder_meta(cache_path) if not force_retrain else None
+    if enable_reduction is None:
+        enable_reduction = anomaly_key != "negermet"
 
     if meta is not None:
         pool, shared_channels, train_well_ids = collect_shared_train_pool(
             prepared_wells,
-            enable_reduction=anomaly_key != "negermet",
+            enable_reduction=bool(enable_reduction),
         )
         channels_match = list(meta["shared_channels"]) == list(shared_channels)
         patch_match = (
@@ -607,14 +611,18 @@ def load_or_train_shared_encoder(
     elif force_retrain and cache_path.exists():
         print(f"  Shared encoder cache OVERRIDE (ALMA_FORCE_RETRAIN_ENCODER=1): retraining {cache_path.name}")
 
-    return train_shared_encoder(
+    state = train_shared_encoder(
         prepared_wells=prepared_wells,
         patch_short=patch_short,
         patch_long=patch_long,
         anomaly_key=anomaly_key,
         device=device,
         verbose=verbose,
+        num_iter=int(num_iter),
+        enable_reduction=bool(enable_reduction),
     )
+    save_shared_encoder_state(state, cache_path)
+    return state
 
 
 def fine_tune_shared_encoder(
