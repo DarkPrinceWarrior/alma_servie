@@ -1861,6 +1861,49 @@ artifacts/results/global_normality_detector/5min_domain_decision_layer/
 - отдельно проверить `negermet`, потому что резкий реальный скачок может быть
   похож на regime event по текущей эвристике.
 
+### Файлы, которые нужно сохранить и развивать
+
+Эти untracked Python-файлы относятся к текущему направлению и не являются
+мусором:
+
+- `alma_service/domain_decision_layer.py` - post-detection verdict по найденным
+  стартам: pressure/frequency/load/temperature/imbalance признаки вокруг
+  `detected_time`;
+- `alma_service/domain_rule_diagnostics.py` - interval-level диагностика вокруг
+  `actual_start` для проверки экспертных правил на размеченных данных;
+- `tests/test_domain_decision_layer.py` - unit-тесты логики verdict;
+- `tests/test_domain_rule_diagnostics.py` - unit-тесты диагностики тренда и
+  missing pressure-channel cases.
+
+Текущая связь с benchmark:
+
+- `scripts/evaluation/benchmark_global_normality_detector.py` уже импортирует
+  `attach_domain_decisions_to_starts`,
+  `attach_domain_decisions_to_incidents` и
+  `attach_domain_rule_diagnostics`;
+- поэтому эти файлы нужно либо коммитить вместе с изменением benchmark, либо
+  откатывать benchmark. Удалять их отдельно нельзя, иначе benchmark станет
+  неработоспособным.
+
+Правильное развитие:
+
+1. Оставить слой как offline/review layer, не как production score.
+2. Убрать hard reject по одиночному `telemetry_status` в одной точке старта.
+3. Считать режимные события по окну до/после старта: устойчивость частоты,
+   остановка, восстановление, длительность переходного режима.
+4. Для `pritok` подтверждать stable-frequency pressure trend.
+5. Для `salt` подтверждать local trend reversal / pressure-up pattern и
+   многоканальную поддержку токов/нагрузки.
+6. Для `negermet` подтверждать быстрый pressure/temperature step и реакцию
+   токов, но не отклонять реальный скачок только потому, что он похож на
+   regime event.
+7. Добавить в выходные CSV/HTML понятные поля для эксперта: `verdict`,
+   `action`, `reason`, ключевые изменения давления, частоты, нагрузки,
+   температуры.
+
+До отдельной валидации этот слой не должен подавлять alerts. Его задача -
+объяснить и разметить кандидаты для review.
+
 ## 13. Короткие ряды, нулевой score и правильный fallback для global PaAno
 
 Дата фиксации вывода: 2026-05-19.
