@@ -19,6 +19,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from alma_service.anomaly_specs import get_detection_spec
 from alma_service.benchmark_metrics import predicted_from_mapping, summarize_splits
 from alma_service.detection_artifacts import summary_path
+from alma_service.domain_decision_layer import (
+    attach_domain_decisions_to_incidents,
+    attach_domain_decisions_to_starts,
+)
+from alma_service.domain_rule_diagnostics import attach_domain_rule_diagnostics
 from alma_service.engineered_features import (
     ANOMALY_PATCH_SIZE,
     REFERENCE_POLICIES,
@@ -596,8 +601,15 @@ def _evaluate_global_runs(
         pred_df,
         merge_window_hours=_incident_merge_window_hours(cfg),
     )
-    pred_df = incident_result.starts
-    incident_df = incident_result.incidents
+    pred_df = attach_domain_decisions_to_starts(
+        incident_result.starts,
+        detector_runs,
+        anomaly_key=anomaly_key,
+    )
+    incident_df = attach_domain_decisions_to_incidents(
+        incident_result.incidents,
+        pred_df,
+    )
     eval_pred_df = filter_actionable_starts(pred_df)
 
     split_summaries, split_frames = summarize_splits(
@@ -620,8 +632,26 @@ def _evaluate_global_runs(
             "incidents": int(len(incident_df)),
             "incident_merge_window_hours": _incident_merge_window_hours(cfg),
         },
+        "domain_decision": {
+            "starts_by_action": (
+                pred_df["domain_action"].value_counts(dropna=False).to_dict()
+                if "domain_action" in pred_df.columns
+                else {}
+            ),
+            "starts_by_verdict": (
+                pred_df["domain_verdict"].value_counts(dropna=False).to_dict()
+                if "domain_verdict" in pred_df.columns
+                else {}
+            ),
+        },
         "detail_map": detail_map,
-        "interval_results": split_frames.get("all", pd.DataFrame()).to_dict("records"),
+        "interval_results": attach_domain_rule_diagnostics(
+            split_frames.get("all", pd.DataFrame()).to_dict("records"),
+            {well_id: run.prepared for well_id, run in detector_runs.items()},
+            anomaly_key,
+        ),
+        "predicted_starts": pred_df.to_dict("records"),
+        "incidents": incident_df.to_dict("records"),
     }
 
 
@@ -799,6 +829,14 @@ def main() -> None:
         interval_path = output_dir / f"global_normality_{anomaly_key}_intervals.csv"
         pd.DataFrame(class_payload["interval_results"]).to_csv(interval_path, index=False)
         print(f"Wrote {interval_path}")
+
+        starts_path = output_dir / f"global_normality_{anomaly_key}_starts.csv"
+        pd.DataFrame(class_payload["predicted_starts"]).to_csv(starts_path, index=False)
+        print(f"Wrote {starts_path}")
+
+        incidents_path = output_dir / f"global_normality_{anomaly_key}_incidents.csv"
+        pd.DataFrame(class_payload["incidents"]).to_csv(incidents_path, index=False)
+        print(f"Wrote {incidents_path}")
 
     payload_path = output_dir / "global_normality_benchmark.json"
     payload_path.write_text(
