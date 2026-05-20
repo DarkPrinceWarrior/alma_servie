@@ -12,22 +12,55 @@ inference unless verified locally.
 
 ## Tooling rules
 
+Code navigation uses three MCP servers with a strict division of labour:
+`fff` to locate, `codegraph` to understand structure, `serena` to read a
+symbol precisely and edit it. Do not duplicate them — each owns one job.
+
+### fff — locate files and literal text
+
 For any file search or grep in the current git repository, use fff first.
 Do not use shell `find`, `grep`, or `rg` when fff can express the query.
 
 Use fff for:
 
 - finding files by name or pattern;
-- searching code across the repository;
+- searching literal text — strings, comments, log messages;
 - discovering entry points, routers, services, scripts, and module structure;
-- narrowing the area to inspect before using Serena.
+- narrowing the area to inspect before using codegraph or Serena.
 
-After fff identifies the relevant area, use Serena for symbolic code navigation
-and symbol-level edits:
+Search one bare identifier per query; after two grep calls, read the code
+instead of grepping variations.
+
+### codegraph — structural questions over the symbol graph
+
+`codegraph` is a tree-sitter knowledge graph (SQLite) of every symbol, edge,
+and file. Use it for structural questions, not literal text:
+
+- `codegraph_context "<task>"` — PRIMARY: entry points + related symbols +
+  code in one call. Start here for any feature, bug, or unfamiliar area.
+- `codegraph_search` — find a symbol by name (kind + signature + location);
+  prefer this over `fff grep` when looking up a symbol by name.
+- `codegraph_callers` / `codegraph_callees` — who calls / what is called.
+- `codegraph_impact <symbol>` — blast radius before a refactor.
+- `codegraph_node` — a symbol's source / signature / docstring.
+- `codegraph_explore` — survey an unfamiliar module (token-heavy; onboarding
+  only, not for narrow questions).
+- `codegraph_files` / `codegraph_status` — directory layout / index health.
+
+Trust codegraph results — they come from a full AST parse; do not re-verify
+with grep. Do not query the index in the same turn as a file edit — the
+watcher debounces ~500 ms behind writes.
+
+### serena — symbolic navigation and symbol-level edits
+
+After fff/codegraph identify the relevant area, use Serena for LSP-precise
+navigation and symbol-level edits — Serena is the only one of the three that
+edits code:
 
 - `get_symbols_overview`;
 - `find_symbol`;
-- `find_referencing_symbols`;
+- `find_referencing_symbols` — LSP-accurate references; final check before
+  `rename_symbol` (use `codegraph_impact` for the quick blast-radius estimate);
 - `replace_symbol_body`;
 - `insert_before_symbol`;
 - `insert_after_symbol`;
@@ -36,6 +69,23 @@ and symbol-level edits:
 
 Prefer Serena tools over reading or rewriting full source files when symbolic
 tools are sufficient.
+
+### codegraph index sync
+
+The MCP server watches the project and auto-syncs the graph (~2 s debounce).
+Still, keep the index fresh explicitly:
+
+- at the start of a work session, run `codegraph status` — if it reports
+  pending changes, run `codegraph sync`;
+- after any bulk external change the watcher may have missed — `git pull`,
+  branch switch, mass file generation, returning from the server — run
+  `codegraph sync` before relying on codegraph answers;
+- if a codegraph result contradicts what you see in a file, the index is
+  stale: `codegraph sync` and re-query.
+
+Standard cycle: locate (`fff` / `codegraph_search`) → understand
+(`codegraph_context`) → assess risk (`codegraph_impact`) → read and edit
+(`serena`) → verify (run the affected script; `playwright` smoke for UI).
 
 Use Context7 before relying on memory for version-sensitive framework/library
 behavior, especially FastAPI, Starlette, Pydantic, SQLAlchemy, Alembic, HTTPX,

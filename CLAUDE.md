@@ -4,7 +4,36 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Tooling
 
-For any file search or grep in the current git indexed directory use fff tools.
+Code navigation uses three MCP servers, each with one job — do not duplicate them:
+
+- **fff** — locate files and literal text (strings, comments, log messages).
+  Use fff instead of shell `find`/`grep`/`rg`. One bare identifier per query;
+  after two greps, read the code.
+- **codegraph** — structural questions over a tree-sitter symbol graph.
+  `codegraph_context "<task>"` is the primary tool (entry points + related
+  symbols + code in one call). Also `codegraph_search` (symbol by name —
+  prefer over `fff grep`), `codegraph_callers`/`codegraph_callees`,
+  `codegraph_impact` (blast radius before a refactor), `codegraph_node`,
+  `codegraph_explore` (unfamiliar module — token-heavy, onboarding only).
+  Trust its results — full AST parse; do not re-verify with grep.
+- **serena** — LSP-precise symbol navigation and the only tool that *edits*
+  at symbol level (`find_symbol`, `get_symbols_overview`,
+  `find_referencing_symbols`, `replace_symbol_body`, `insert_*`,
+  `rename_symbol`, `safe_delete_symbol`). Prefer over reading whole files.
+
+Cycle: locate (fff / `codegraph_search`) → understand (`codegraph_context`)
+→ assess risk (`codegraph_impact`) → read and edit (serena) → verify.
+
+**codegraph index sync** — the MCP server auto-syncs (~2 s debounce), but keep
+it fresh explicitly: run `codegraph status` at the start of a session and
+`codegraph sync` if it reports pending changes, or after any bulk change the
+watcher may miss (`git pull`, branch switch, mass file generation). If a
+codegraph answer contradicts the file, the index is stale — `codegraph sync`
+and re-query. Do not query the index in the same turn as an edit (~500 ms lag).
+
+Other MCP: **context7** for version-sensitive library docs (Next.js, React,
+FastAPI, PyTorch — prefer over web search); **tavily** for general web search;
+**playwright** for browser smoke-checks after UI changes.
 
 ## Project Purpose
 
@@ -213,37 +242,3 @@ The Petrobras 3W Dataset 2.0.0 is an oil-domain pretrain/benchmark for ALMA — 
 - Model weights: `models/`
 
 `db/`, `artifacts/`, and `models/` are gitignored — do not commit their contents.
-
-<!-- CODEGRAPH_START -->
-## CodeGraph
-
-This project has a CodeGraph MCP server (`codegraph_*` tools) configured. CodeGraph is a tree-sitter-parsed knowledge graph of every symbol, edge, and file. Reads are sub-millisecond and return structural information grep cannot.
-
-### When to prefer codegraph over native search
-
-Use codegraph for **structural** questions — what calls what, what would break, where is X defined, what is X's signature. Use native grep/read only for **literal text** queries (string contents, comments, log messages) or after you already have a specific file open.
-
-| Question | Tool |
-|---|---|
-| "Where is X defined?" / "Find symbol named X" | `codegraph_search` |
-| "What calls function Y?" | `codegraph_callers` |
-| "What does Y call?" | `codegraph_callees` |
-| "What would break if I changed Z?" | `codegraph_impact` |
-| "Show me Y's signature / source / docstring" | `codegraph_node` |
-| "Give me focused context for a task/area" | `codegraph_context` |
-| "Survey an unfamiliar module/topic" | `codegraph_explore` |
-| "What files exist under path/" | `codegraph_files` |
-| "Is the index healthy?" | `codegraph_status` |
-
-### Rules of thumb
-
-- **Trust codegraph results.** They come from a full AST parse. Do NOT re-verify them with grep — that's slower, less accurate, and wastes context.
-- **Don't grep first** when looking up a symbol by name. `codegraph_search` is faster and returns kind + location + signature in one call.
-- **Don't chain `codegraph_search` + `codegraph_node`** when you just want context — `codegraph_context` is one call.
-- **`codegraph_explore` is the heavy hitter** for unfamiliar areas — it returns full source from all relevant files in one call, but is token-heavy. If your harness supports parallel subagents (e.g., Claude Code's Task tool), spawn one for explore-class questions to keep main session context clean.
-- **Index lag**: the file watcher debounces ~500ms behind writes; don't re-query immediately after editing a file in the same turn.
-
-### If `.codegraph/` doesn't exist
-
-The MCP server returns "not initialized." Ask the user: *"I notice this project doesn't have CodeGraph initialized. Want me to run `codegraph init -i` to build the index?"*
-<!-- CODEGRAPH_END -->

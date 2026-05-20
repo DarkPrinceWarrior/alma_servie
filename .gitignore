@@ -34,6 +34,7 @@ salym_prepared/
 
 # Tool working dirs
 .serena/
+.codegraph/
 
 # Legacy generated files
 salt_anomaly_report_original.html
