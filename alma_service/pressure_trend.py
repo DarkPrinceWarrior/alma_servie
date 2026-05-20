@@ -91,8 +91,8 @@ def _rolling_slope(values: np.ndarray, window: int) -> np.ndarray:
 
     Slope at index i is OLS fit of values[i-window+1..i] against local time
     indices 0..window-1. Indices < window-1 yield 0 (insufficient data).
-    Mirrors scripts.detection.physical_branches_3w._rolling_slope so the
-    physical-trend signal stays consistent between 3W class 5 and ALMA pritok.
+    Used by the pritok pressure-trend branch; kept local so this production
+    path does not depend on retired experiment modules.
     """
     n = len(values)
     w = int(window)

@@ -61,8 +61,6 @@ python scripts/datasets/build_pritok_dataset.py --freq 10min
 python scripts/datasets/build_salt_dataset.py --freq 2min
 # Or all at once:
 bash scripts/run_full_dataset_build.sh
-# Petrobras 3W domain pretrain/benchmark:
-python scripts/datasets/build_3w_dataset.py --config configs/3w_paano.json
 ```
 `build_pritok_dataset.py` defaults to `--freq 10min`, which must match the
 production detect grid `db/pritok_anomaly_database_10min.parquet`. A freq
@@ -70,13 +68,19 @@ mismatch silently yields `n_channels=0` (wells not detected).
 
 ### Run detection
 ```bash
-# Production stack: only paano_shared
+# Current production/default detector
 python scripts/detection/detect_negermet.py --detector paano_shared
 python scripts/detection/detect_pritok.py --detector paano_shared
 python scripts/detection/detect_salt.py --detector paano_shared
 
-# Full benchmark:
+# Production-candidate global detector
+python scripts/detection/detect_negermet.py --detector paano_global
+python scripts/detection/detect_pritok.py --detector paano_global
+python scripts/detection/detect_salt.py --detector paano_global
+
+# Full current benchmarks:
 bash scripts/run_full_detection_benchmark.sh
+bash scripts/evaluation/run_global_candidate_benchmark.sh
 ```
 
 ### Generate reports
@@ -195,13 +199,22 @@ The shared library that all scripts import from. Key modules:
 - `generic_detection.py` — `run_detection()` unified entry point; onset config, tune grids, runtime config per anomaly type
 - `onset_detection.py` — `detect_causal_onsets()`, numba-JIT compiled CUSUM + EMA; calibrated via `CausalThresholds`
 
-### Production detector
-The public detector key is `paano_shared`.
+### Current detectors
+
+The active detector keys are:
+
+- `paano_shared` — current production/default detector.
+- `paano_global` — production-candidate global normality detector.
+
 `SharedPaAnoDetector` scores each well with a frozen/shared PaAno encoder and a local memory bank.
-Anomaly-specific physics is fused inside this same detector:
+For `paano_shared`, anomaly-specific physics is fused inside the same detector:
 - `pritok`: pressure trend branch
 - `salt`: grouped multichannel deposition/residual branch
 - `negermet`: pressure-step/load-response signature branch
+
+`paano_global` uses a common 5min schema, shared/global encoder, `edge_hold`
+input contract, local memory bank, coverage-aware statuses, and domain decision
+layer. It is benchmarked but not default.
 
 ### Staged blind pipeline (all three anomaly types)
 1. Causal preprocessing
@@ -214,12 +227,13 @@ Anomaly-specific physics is fused inside this same detector:
 ### `paano/` submodule
 The PaAno neural library (ICLR 2026 paper). The repository uses it through `SharedPaAnoDetector` and `alma_service/shared_encoder.py`. Entry points: `paano/main.py`, `paano/train.py`, `paano/model.py`.
 
-### 3W domain pretrain & transfer (`docs/3w_pipeline.md`)
-The Petrobras 3W Dataset 2.0.0 is an oil-domain pretrain/benchmark for ALMA — not a replacement for customer data. Full report and roadmap live in `docs/3w_pipeline.md`.
-- **Build/detect/tune/report**: `scripts/datasets/build_3w_dataset.py` (+ `configs/3w_paano.json`), `scripts/detection/detect_3w.py`, `scripts/evaluation/optuna_sweep_3w.py`, `scripts/reports/generate_3w_report.py`. Nine per-class PaAno encoders in `artifacts/3w/checkpoints/`.
-- **Physical branches**: `scripts/detection/physical_branches_3w.py` — per-class physics scorers (oscillation / trend-slope / choke-step). On weak 3W classes explicit physics beats encoder-side tricks.
-- **Transfer mechanism**: `alma_service/shared_encoder.load_or_train_shared_encoder()` (P10 hook) validates `anomaly_key`/patch/channels and reuses a cached encoder. `scripts/evaluation/transfer_3w_to_alma.py` transplants conv2..N + heads (skips channel-dependent `convblocks[0]`) and fine-tunes on ALMA normals. Deployed: 3W class 9 → negermet (FAR/day 0.250→0.188) and pritok (train delay −3.3h). Salt is encoder-invariant — physics dominates score fusion.
-- 3W/transfer artifacts (`artifacts/3w/`, `models/3w_class_9_transfer/`) are gitignored and live on the server.
+### Removed experiment families
+
+The repository was cleaned to keep only the active `paano_shared` and
+`paano_global` pipelines. Old 3W transfer, external-model comparisons,
+Salym-only package generators, and one-off ablation scripts are intentionally
+removed from source control. Do not reintroduce them unless there is a new
+explicit research task.
 
 ## Conventions
 

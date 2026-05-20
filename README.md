@@ -7,7 +7,7 @@
 - `alma_service/` — общие модули проекта, включая `onset_detection.py` и централизованные пути.
 - `alma_service/dataset_config.py` — единая конфигурация исходных скважин, test-split и списка параметров модели.
 - `scripts/datasets/` — сборка Parquet-датасетов и интервалов из исходных Excel-файлов.
-- `scripts/detection/` — единый production-стек `paano_shared`.
+- `scripts/detection/` — текущие детекторы `paano_shared` и `paano_global`.
 - `scripts/reports/` — HTML-отчёты по результатам blind-детекции и отчёты важности признаков.
 - `scripts/evaluation/` — метрики качества детекции стартов аномалий.
 - `data/raw/` — исходные Excel-файлы по типам аномалий.
@@ -58,7 +58,7 @@ python scripts/datasets/build_salt_dataset.py --freq 2min
 
 ### 2. Запуск детекции
 
-Единственный production CLI:
+Текущий production/default CLI:
 
 ```bash
 python scripts/detection/detect_negermet.py --detector paano_shared
@@ -66,9 +66,20 @@ python scripts/detection/detect_pritok.py --detector paano_shared
 python scripts/detection/detect_salt.py --detector paano_shared
 ```
 
-Публичный detector key один: `paano_shared`. Физические ветки для `pritok`,
-`salt` и `negermet` встроены внутрь этого пайплайна и настраиваются через
-train-only tuning.
+Production-candidate global detector:
+
+```bash
+python scripts/detection/detect_negermet.py --detector paano_global
+python scripts/detection/detect_pritok.py --detector paano_global
+python scripts/detection/detect_salt.py --detector paano_global
+```
+
+`paano_shared` остаётся default. `paano_global` — проверенный candidate с общей
+5min-схемой, `edge_hold` input contract, local memory bank и domain decision
+layer. Автоматически default он не становится.
+
+Физические ветки для `pritok`, `salt` и `negermet` встроены внутрь
+`paano_shared` и настраиваются через train-only tuning.
 
 Результат:
 

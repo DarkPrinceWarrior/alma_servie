@@ -118,19 +118,22 @@ Excel exports -> Parquet datasets -> blind detection -> interactive HTML reports
 Root research code:
 
 - `alma_service/` - shared research library used by scripts;
-- `scripts/datasets/` - dataset builders (`build_*_dataset.py`, `build_3w_dataset.py`);
-- `scripts/detection/` - anomaly detection entry points (`detect_*.py`, `detect_3w.py`, `physical_branches_3w.py`);
+- `scripts/datasets/` - dataset builders for `negermet`, `pritok`, `salt`, and `norm_work`;
+- `scripts/detection/` - anomaly detection entry points (`detect_negermet.py`, `detect_pritok.py`, `detect_salt.py`);
 - `scripts/reports/` - HTML report generators;
-- `scripts/evaluation/` - evaluation utilities, 3W sweeps, 3W -> ALMA transfer;
+- `scripts/evaluation/` - onset metrics and current global-candidate benchmark;
 - `paano/` - PaAno neural library/submodule;
-- `configs/3w_paano.json` - Petrobras 3W pipeline config;
+- `configs/alma_global_feature_schema.json`, `configs/alma_global_normality_5min.json` - current global pipeline configs;
 - `db/`, `artifacts/`, `models/` - generated outputs, gitignored.
 
-The Petrobras 3W Dataset 2.0.0 is used as an oil-domain pretrain/benchmark for
-ALMA (not a replacement for customer data). The transfer hook
-`alma_service.shared_encoder.load_or_train_shared_encoder()` warm-starts the
-production `paano_shared` encoder from a 3W per-class encoder. The single public
-detector key stays `paano_shared`. Full report and roadmap: `docs/3w_pipeline.md`.
+Active detector keys:
+
+- `paano_shared` - current production/default detector.
+- `paano_global` - production-candidate global normality detector.
+
+Old 3W transfer, external-model comparisons, Salym-only package generators, and
+one-off ablation scripts were removed. Do not reintroduce them unless the user
+explicitly starts a new research task for that family.
 
 Backend code:
 
@@ -159,7 +162,6 @@ python scripts/datasets/build_negermet_dataset.py --freq 15s
 python scripts/datasets/build_pritok_dataset.py --freq 10min
 python scripts/datasets/build_salt_dataset.py --freq 2min
 bash scripts/run_full_dataset_build.sh
-python scripts/datasets/build_3w_dataset.py --config configs/3w_paano.json
 ```
 
 `build_pritok_dataset.py` defaults to `--freq 10min`; it must match the
@@ -173,6 +175,11 @@ python scripts/detection/detect_negermet.py --detector paano_shared
 python scripts/detection/detect_pritok.py --detector paano_shared
 python scripts/detection/detect_salt.py --detector paano_shared
 bash scripts/run_full_detection_benchmark.sh
+
+python scripts/detection/detect_negermet.py --detector paano_global
+python scripts/detection/detect_pritok.py --detector paano_global
+python scripts/detection/detect_salt.py --detector paano_global
+bash scripts/evaluation/run_global_candidate_benchmark.sh
 ```
 
 Generate reports:

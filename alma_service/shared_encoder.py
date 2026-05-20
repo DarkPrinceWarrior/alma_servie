@@ -340,42 +340,13 @@ def _train_encoder_single_scale(
     init_model: nn.Module | None = None,
     num_iter: int = PAANO_NUM_ITERS,
     label_prefix: str = "SharedEncoder",
-    inject_cfg: Any = None,
-    inject_seed: int = 12345,
 ) -> tuple[nn.Module, np.ndarray, np.ndarray]:
-    """Train PaAno encoder on a combined pool at a single patch scale.
-
-    When ``inject_cfg`` is supplied, a fraction of the standardized training
-    pool is replaced by synthetic-anomaly windows (spike / scale-shift /
-    collective-flip / jitter) so the encoder is exposed to anomaly-like
-    perturbations during pretrain. Returns (model, train_mean, train_std).
-    """
+    """Train PaAno encoder on a combined clean-normal pool at one patch scale."""
     train_mean = np.mean(pool, axis=0, keepdims=True).astype(np.float32)
     train_std = np.std(pool, axis=0, keepdims=True).astype(np.float32)
     train_std = np.where(train_std < 1e-8, 1e-8, train_std)
 
     pool_norm = (pool - train_mean) / train_std
-
-    if inject_cfg is not None and getattr(inject_cfg, "rate", 0.0) > 0.0:
-        from alma_service.anomaly_injection import inject_pool
-
-        inject_window = max(int(patch_size) * 4, 128)
-        pool_norm_injected, counter = inject_pool(
-            pool_norm,
-            inject_cfg,
-            rng=np.random.default_rng(inject_seed + int(patch_size)),
-            window_len=inject_window,
-        )
-        if verbose:
-            print(
-                f"    Injection patch={patch_size}: rate={inject_cfg.rate:.2f} "
-                f"window={inject_window} windows={counter.get('windows', 0)} "
-                f"spike={counter.get('spike', 0)} scale_shift={counter.get('scale_shift', 0)} "
-                f"collective={counter.get('collective', 0)} jitter={counter.get('jitter', 0)}",
-                flush=True,
-            )
-        pool_norm = pool_norm_injected.astype(np.float32)
-
     dummy_labels = np.zeros(len(pool), dtype=np.float32)
 
     patch_creator = PatchCreator(L=patch_size, s=1, random_seed=SEED)
@@ -459,7 +430,6 @@ def train_shared_encoder(
     anomaly_key: str,
     device: torch.device,
     verbose: bool = False,
-    inject_cfg: Any = None,
     num_iter: int = PAANO_NUM_ITERS,
     enable_reduction: bool | None = None,
 ) -> SharedEncoderState:
@@ -490,10 +460,10 @@ def train_shared_encoder(
         )
 
     model_short, mean_short, std_short = _train_encoder_single_scale(
-        pool, patch_short, device, verbose=verbose, inject_cfg=inject_cfg, num_iter=num_iter,
+        pool, patch_short, device, verbose=verbose, num_iter=num_iter,
     )
     model_long, mean_long, std_long = _train_encoder_single_scale(
-        pool, patch_long, device, verbose=verbose, inject_cfg=inject_cfg, num_iter=num_iter,
+        pool, patch_long, device, verbose=verbose, num_iter=num_iter,
     )
 
     detail = {
@@ -502,16 +472,6 @@ def train_shared_encoder(
         "train_wells": train_well_ids,
         "iterations": int(num_iter),
     }
-    if inject_cfg is not None and getattr(inject_cfg, "rate", 0.0) > 0.0:
-        detail["anomaly_injection"] = {
-            "rate": float(inject_cfg.rate),
-            "spike_prob": float(inject_cfg.spike_prob),
-            "scale_shift_prob": float(inject_cfg.scale_shift_prob),
-            "collective_prob": float(inject_cfg.collective_prob),
-            "jitter_prob": float(inject_cfg.jitter_prob),
-            "jitter_sigma": float(inject_cfg.jitter_sigma),
-            "spike_magnitude": float(inject_cfg.spike_magnitude),
-        }
 
     return SharedEncoderState(
         model_short=model_short,
