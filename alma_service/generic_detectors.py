@@ -23,6 +23,10 @@ PAANO_TOP_K = 5
 PAANO_MEMORY_BANK_RATIO = 0.10
 
 ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
+PAANO_INPUT_PADDING_ENV = "ALMA_PAANO_INPUT_PADDING"
+PAANO_INPUT_PADDING_NONE = "none"
+PAANO_INPUT_PADDING_EDGE_HOLD = "edge_hold"
+PAANO_INPUT_PADDING_MODES = {PAANO_INPUT_PADDING_NONE, PAANO_INPUT_PADDING_EDGE_HOLD}
 
 try:  # pragma: no branch - simple runtime guard
     torch.set_float32_matmul_precision("high")
@@ -70,6 +74,32 @@ def _ensure_2d_float32(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
 
+def _paano_input_padding_mode() -> str:
+    mode = os.getenv(PAANO_INPUT_PADDING_ENV, PAANO_INPUT_PADDING_NONE).strip().lower()
+    if mode not in PAANO_INPUT_PADDING_MODES:
+        raise ValueError(
+            f"Unsupported {PAANO_INPUT_PADDING_ENV}={mode!r}. "
+            f"Expected one of: {', '.join(sorted(PAANO_INPUT_PADDING_MODES))}."
+        )
+    return mode
+
+
+def _edge_hold_pad_prefix(values: np.ndarray, target_len: int) -> tuple[np.ndarray, int]:
+    arr = _ensure_2d_float32(values)
+    if len(arr) == 0 or len(arr) >= int(target_len):
+        return arr, 0
+    pad_count = int(target_len) - len(arr)
+    pad = np.repeat(arr[:1], pad_count, axis=0)
+    return np.concatenate([pad, arr], axis=0).astype(np.float32), pad_count
+
+
+def _trim_prefix_padding(scores: np.ndarray, pad_count: int, original_len: int) -> np.ndarray:
+    arr = np.asarray(scores, dtype=np.float32)
+    if pad_count <= 0:
+        return arr[:original_len].astype(np.float32)
+    return arr[int(pad_count) : int(pad_count) + int(original_len)].astype(np.float32)
+
+
 class SharedPaAnoDetector:
     """PaAno detector that uses a **shared** pre-trained encoder.
 
@@ -108,35 +138,75 @@ class SharedPaAnoDetector:
             raise RuntimeError("Detector is not fitted.")
         X = _ensure_2d_float32(X_all)
         st = self.shared_state
+        padding_mode = _paano_input_padding_mode()
 
         if len(self.train_ref_) < st.patch_long * 2 or len(X) < st.patch_long * 2:
-            zeros = np.zeros(len(X), dtype=np.float32)
-            return DetectorScoreOutput(
-                primary=zeros,
-                components={"paano_short": zeros.copy(), "paano_long": zeros.copy()},
-                detail={"reason": "not_enough_points"},
-            )
+            if padding_mode != PAANO_INPUT_PADDING_EDGE_HOLD or len(self.train_ref_) == 0 or len(X) == 0:
+                zeros = np.zeros(len(X), dtype=np.float32)
+                return DetectorScoreOutput(
+                    primary=zeros,
+                    components={"paano_short": zeros.copy(), "paano_long": zeros.copy()},
+                    detail={"reason": "not_enough_points"},
+                )
+
+        padding_detail: dict[str, Any] = {
+            "mode": padding_mode,
+            "enabled": padding_mode == PAANO_INPUT_PADDING_EDGE_HOLD,
+            "short": {"well_prefix_points": 0, "reference_prefix_points": 0},
+            "long": {"well_prefix_points": 0, "reference_prefix_points": 0},
+        }
+
+        short_well = X
+        short_ref = self.train_ref_
+        short_well_pad = 0
+        short_ref_pad = 0
+        if padding_mode == PAANO_INPUT_PADDING_EDGE_HOLD:
+            short_target = st.patch_short * 2
+            short_well, short_well_pad = _edge_hold_pad_prefix(X, short_target)
+            short_ref, short_ref_pad = _edge_hold_pad_prefix(self.train_ref_, short_target)
+            padding_detail["short"] = {
+                "well_prefix_points": int(short_well_pad),
+                "reference_prefix_points": int(short_ref_pad),
+            }
 
         short_score = _score_well_single_scale(
             model=st.model_short,
-            well_data=X,
-            ref_data=self.train_ref_,
+            well_data=short_well,
+            ref_data=short_ref,
             train_mean=st.train_mean_short,
             train_std=st.train_std_short,
             patch_size=st.patch_short,
             device=self.device,
             verbose=self.verbose,
         )
+
+        short_score = _trim_prefix_padding(short_score, short_well_pad, len(X))
+
+        long_well = X
+        long_ref = self.train_ref_
+        long_well_pad = 0
+        long_ref_pad = 0
+        if padding_mode == PAANO_INPUT_PADDING_EDGE_HOLD:
+            long_target = st.patch_long * 2
+            long_well, long_well_pad = _edge_hold_pad_prefix(X, long_target)
+            long_ref, long_ref_pad = _edge_hold_pad_prefix(self.train_ref_, long_target)
+            padding_detail["long"] = {
+                "well_prefix_points": int(long_well_pad),
+                "reference_prefix_points": int(long_ref_pad),
+            }
+
         long_score = _score_well_single_scale(
             model=st.model_long,
-            well_data=X,
-            ref_data=self.train_ref_,
+            well_data=long_well,
+            ref_data=long_ref,
             train_mean=st.train_mean_long,
             train_std=st.train_std_long,
             patch_size=st.patch_long,
             device=self.device,
             verbose=self.verbose,
         )
+        long_score = _trim_prefix_padding(long_score, long_well_pad, len(X))
+
         fused = self.fusion_weight_short * short_score + (1.0 - self.fusion_weight_short) * long_score
         return DetectorScoreOutput(
             primary=fused.astype(np.float32),
@@ -150,5 +220,6 @@ class SharedPaAnoDetector:
                 "fusion_weight_short": self.fusion_weight_short,
                 "shared_encoder": True,
                 "train_wells": st.train_wells,
+                "input_padding": padding_detail,
             },
         )

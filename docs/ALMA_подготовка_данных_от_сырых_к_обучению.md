@@ -2336,3 +2336,82 @@ artifacts/reports/salt/salt_paano_global_report.html
 
 Следующий шаг по плану: эксперимент `global_long + edge/hold padding` для
 коротких `negermet`-рядов, без включения `Salym/test35` и без cascade scale.
+
+### Прогресс реализации 2026-05-20: edge/hold padding для коротких рядов
+
+Шаг 3 выполнен как контролируемый эксперимент, а не как безусловная замена
+production-поведения.
+
+В код добавлен input-contract:
+
+```text
+ALMA_PAANO_INPUT_PADDING=none       # поведение по умолчанию: короткие ряды -> Not assessed
+ALMA_PAANO_INPUT_PADDING=edge_hold  # эксперимент: дополнить начало ряда первым валидным значением
+```
+
+Математически это не cascade scale: модель остается той же
+`global_long=192/384`, encoder и memory-bank размерность не меняются. Если
+истории меньше, чем требуется для патчей, в начало ряда добавляются копии
+первого валидного состояния. После scoring искусственный префикс отбрасывается,
+и в artifacts остаются score только исходных реальных timestamp.
+
+Проверка:
+
+```bash
+ALMA_PAANO_INPUT_PADDING=edge_hold \
+CUDA_VISIBLE_DEVICES=1 \
+uv run python scripts/detection/detect_negermet.py --detector paano_global
+
+uv run python scripts/evaluation/evaluate_onset_metrics.py \
+  --anomaly negermet \
+  --detector paano_global \
+  --name negermet_paano_global_edge_hold_padding
+```
+
+Результат на размеченном `negermet`:
+
+```text
+interval_count              = 5
+assessed_interval_count     = 5
+not_assessed_interval_count = 0
+coverage_rate               = 1.00
+hit_count                   = 5
+hit_rate_on_assessed        = 1.00
+false_alarms_per_day        = 0.00
+median_abs_delay_hours      = 0.05
+p90_abs_delay_hours         = 0.72
+```
+
+По интервалам:
+
+```text
+1123л  -> detected 2025-06-21 08:35:00, actual_start 2025-06-21 08:32:00
+172г   -> detected 2025-05-03 11:30:00, actual_start 2025-05-03 11:30:00
+3509г  -> detected 2025-08-10 10:50:00, actual_start 2025-08-10 09:40:00
+524    -> detected 2025-06-09 19:40:00, actual_start 2025-06-09 19:38:00
+5271г  -> detected 2025-08-15 00:40:00, actual_start 2025-08-15 00:37:00
+```
+
+Важная оговорка: blind/unlabeled скважина `ю-я 39-651` после включения
+`edge_hold` получила 1 candidate-start:
+
+```text
+ю-я 39-651 -> 2026-03-04 11:55:00
+```
+
+Это не входит в interval hit-rate, потому что у нее нет разметки. Но для
+production-решения это обязательно надо разобрать как потенциальный false
+positive на чистом/слепом ряду.
+
+Вывод по шагу:
+
+- `edge_hold` решает проблему silent zero-score и резко повышает coverage на
+  коротком `negermet`;
+- метрики на размеченных интервалах стали сильными: `5/5`, задержки минуты,
+  FAR/day по размеченной оценке `0.0`;
+- включать `edge_hold` по умолчанию рано: сначала нужно визуально и доменно
+  разобрать `ю-я 39-651`, а также проверить padded-контракт отдельно от
+  обычного real-window-контракта;
+- следующий технический шаг: записывать в отчеты/score detail, что конкретная
+  скважина оценена по `edge_hold_padded` контракту, и затем сравнить padded vs
+  non-padded на чистом пуле.
