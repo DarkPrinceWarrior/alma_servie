@@ -2265,5 +2265,74 @@ hit_rate_on_assessed        = 1.00
 artifacts/reports/negermet/negermet_paano_global_report.html
 ```
 
+### Прогресс реализации 2026-05-20: coverage-аудит `paano_global`
+
+Шаг 2 выполнен: текущий `paano_global` прогнан без изменения алгоритма на
+размеченных `negermet`, `pritok`, `salt`. `Salym` и `test35` не использовались.
+Цель шага была не улучшить метрики, а честно измерить, где модель реально
+оценивает интервалы, а где должна писать `Not assessed`.
+
+Команды выполнялись на сервере с GPU:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_negermet.py --detector paano_global
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_pritok.py --detector paano_global
+CUDA_VISIBLE_DEVICES=1 uv run python scripts/detection/detect_salt.py --detector paano_global
+```
+
+Итог по coverage-aware метрикам:
+
+```text
+negermet / paano_global
+  interval_count              = 5
+  assessed_interval_count     = 1
+  not_assessed_interval_count = 4
+  coverage_rate               = 0.20
+  hit_count                   = 1
+  hit_rate_on_assessed        = 1.00
+  false_alarms_per_day        = 0.00
+
+pritok / paano_global
+  interval_count              = 27
+  assessed_interval_count     = 27
+  not_assessed_interval_count = 0
+  coverage_rate               = 1.00
+  hit_count                   = 25
+  hit_rate_on_assessed        = 0.926
+  false_alarms_per_day        = 0.00
+  median_abs_delay_hours      = 1.67
+
+salt / paano_global
+  interval_count              = 9
+  assessed_interval_count     = 9
+  not_assessed_interval_count = 0
+  coverage_rate               = 1.00
+  hit_count                   = 8
+  hit_rate_on_assessed        = 0.889
+  false_alarms_per_day        = 0.00
+  median_abs_delay_hours      = 1.00
+```
+
+Вывод:
+
+- для `pritok` и `salt` текущий `global_long=192/384` применим по coverage;
+- для `negermet` текущий `global_long=192/384` применим только к длинной
+  `172г`;
+- `pritok` не нашел вторые интервалы `602` и `691`; это не coverage-проблема,
+  а именно `Not found` на оцененных рядах;
+- `salt` не нашел второй интервал `408`; это тоже `Not found` при валидном
+  score;
+- короткие `negermet`-ряды требуют следующего шага: `global_long +
+  edge/hold padding` и/или population memory bank;
+- cascade scale по-прежнему не внедряем, пока не доказана необходимость.
+
+Сгенерированные отчеты:
+
+```text
+artifacts/reports/negermet/negermet_paano_global_report.html
+artifacts/reports/pritok/pritok_paano_global_report.html
+artifacts/reports/salt/salt_paano_global_report.html
+```
+
 Следующий шаг по плану: эксперимент `global_long + edge/hold padding` для
-коротких рядов, без включения `Salym/test35` и без cascade scale.
+коротких `negermet`-рядов, без включения `Salym/test35` и без cascade scale.
