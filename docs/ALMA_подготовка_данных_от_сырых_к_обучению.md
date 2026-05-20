@@ -1973,6 +1973,66 @@ bad_data/regime_event в точке старта = контекстный фла
 frequency-transition случаях `305г`, `1996л`, `1995`, потому что текущий
 простоватый `pritok` verdict слишком легко принимает слабые pressure trends.
 
+### Прогресс 2026-05-20: первый `pritok` guard для hard-negative нормы
+
+Выполнена первая правка `domain decision layer` для `pritok`.
+
+Проблема предыдущей версии: слой принимал почти любой локальный pressure slope
+как `pritok_candidate`, если частота в коротком окне до/после старта выглядела
+стабильной. На hard-negative нормальных скважинах `305г`, `1996л`, `1995` это
+давало неверную уверенность: эксперт пометил эти кейсы как нормальное
+поведение, где изменение давления/токов объясняется режимом/частотой, а не
+притоком.
+
+Новое правило:
+
+```text
+для pritok уверенно принимаем только чистый pressure level-shift/trend
+при стабильной частоте и без bad_data/regime context
+
+если частотный переход виден в окне:
+  rejected_frequency_transition
+
+если pressure signal слабый:
+  uncertain/review, не уверенный приток
+
+если есть bad_data/regime context, но pressure trend есть:
+  uncertain/review, не auto-accept
+```
+
+Важно: это не hardcode по ID скважин. `305г`, `1996л`, `1995` используются как
+проверочные hard-negative cases, но правило формулируется через физику события:
+частота, контекст режима, сила изменения давления и наличие level-shift.
+
+Проверка выполнена без переобучения: сохраненные `pritok` старты последнего
+global benchmark были пропущены через новый classifier.
+
+Результат по hard-negative нормальным скважинам:
+
+| Скважина | Было | Стало | Причина |
+|---|---|---|---|
+| `305г` | `pritok_candidate / accept` | `uncertain / review` | давление меняется слишком слабо |
+| `1996л` | `pritok_candidate / accept` | `rejected_regime_event` или `uncertain` | режимный контекст или слабый pressure signal |
+| `1995` | `pritok_candidate / accept` | `uncertain / review` | сильные/слабые pressure moves есть, но есть режимный/bad-data контекст или нет устойчивого level-shift |
+
+Итоговая проверка на сохраненных `pritok` стартах:
+
+```text
+all starts:      accept=2, reject=27, uncertain=34
+labelled starts: accept=2, reject=25, uncertain=27
+hard negatives:  accept=0
+```
+
+Интерпретация: `pritok` guard теперь не подтверждает hard-negative нормальные
+кейсы как уверенный приток. При этом он стал строгим: большинство размеченных
+стартов уходит в `uncertain`, потому что слой подтверждает только чистую физику
+сильного pressure trend. Это приемлемо для diagnostic/review layer, но пока не
+годится как production suppression без ручной валидации эксперта.
+
+Решение по статусу: `pritok` guard оставить как explainability/review layer.
+Он не должен менять raw PaAno score и не должен автоматически подавлять alerts
+до отдельного экспертного review на графиках.
+
 ### Уточнение 2026-05-20: комментарии эксперта из сводной таблицы
 
 Источник данных не расширяется из сводной таблицы. Для обучения, оценки и

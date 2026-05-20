@@ -7,7 +7,9 @@ from alma_service.domain_decision_layer import (
     DOMAIN_NEGERMET_CANDIDATE,
     DOMAIN_PRITOK_CANDIDATE,
     DOMAIN_REJECTED_FREQUENCY_TRANSITION,
+    DOMAIN_REJECTED_REGIME_EVENT,
     DOMAIN_SALT_CANDIDATE,
+    DOMAIN_UNCERTAIN,
     assess_domain_start,
 )
 from alma_service.engineered_features import FREQ_COL, PRESSURE_COL, PreparedWellData
@@ -64,6 +66,48 @@ def test_pritok_frequency_transition_rejects_pressure_trend() -> None:
     )
     assert result["domain_verdict"] == DOMAIN_REJECTED_FREQUENCY_TRANSITION
     assert result["domain_action"] == "reject"
+
+
+def test_pritok_sends_tiny_pressure_move_to_review() -> None:
+    pressure = np.r_[np.full(288, 100.0), np.linspace(100.0, 100.1, 288)]
+    frequency = np.full(576, 50.0)
+    result = assess_domain_start(
+        anomaly_key="pritok",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-02"),
+    )
+    assert result["domain_verdict"] == DOMAIN_UNCERTAIN
+    assert result["domain_action"] == "uncertain"
+
+
+def test_pritok_rejects_regime_context_without_independent_pressure_trend() -> None:
+    pressure = np.r_[np.full(288, 100.0), np.linspace(100.0, 100.1, 288)]
+    frequency = np.full(576, 50.0)
+    row = _row("2026-01-02")
+    row["start_class"] = "regime_event"
+    row["is_regime_event"] = True
+    result = assess_domain_start(
+        anomaly_key="pritok",
+        prepared=_prepared(pressure, frequency),
+        start_row=row,
+    )
+    assert result["domain_verdict"] == DOMAIN_REJECTED_REGIME_EVENT
+    assert result["domain_action"] == "reject"
+
+
+def test_pritok_regime_context_with_pressure_trend_requires_review() -> None:
+    pressure = np.r_[np.full(288, 100.0), np.linspace(100.0, 104.0, 288)]
+    frequency = np.full(576, 50.0)
+    row = _row("2026-01-02")
+    row["start_class"] = "regime_event"
+    row["is_regime_event"] = True
+    result = assess_domain_start(
+        anomaly_key="pritok",
+        prepared=_prepared(pressure, frequency),
+        start_row=row,
+    )
+    assert result["domain_verdict"] == DOMAIN_UNCERTAIN
+    assert result["domain_action"] == "uncertain"
 
 
 def test_salt_uses_slope_reversal_up_not_global_median() -> None:

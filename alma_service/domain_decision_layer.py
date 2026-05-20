@@ -53,6 +53,7 @@ class DomainDecisionConfig:
     min_points: int = 3
     strong_pressure_delta_pct: float = 5.0
     support_delta_pct: float = 1.0
+    min_slope_abs_per_day: float = 0.1
 
 
 DEFAULT_CONFIGS = {
@@ -63,14 +64,16 @@ DEFAULT_CONFIGS = {
         pressure_delta_pct=1.0,
         strong_pressure_delta_pct=5.0,
         support_delta_pct=1.0,
+        min_slope_abs_per_day=1.0,
     ),
     "pritok": DomainDecisionConfig(
         pre_hours=24.0,
         post_hours=24.0,
         frequency_transition_pct=2.0,
-        pressure_delta_pct=0.5,
+        pressure_delta_pct=1.0,
         strong_pressure_delta_pct=2.0,
         support_delta_pct=1.0,
+        min_slope_abs_per_day=0.5,
     ),
     "salt": DomainDecisionConfig(
         pre_hours=72.0,
@@ -79,6 +82,7 @@ DEFAULT_CONFIGS = {
         pressure_delta_pct=0.5,
         strong_pressure_delta_pct=2.0,
         support_delta_pct=1.0,
+        min_slope_abs_per_day=0.1,
     ),
 }
 
@@ -230,6 +234,7 @@ def _classify_domain_start(
     post_slope = pressure["post_slope_per_day"]
     slope_change = pressure["slope_change_per_day"]
     pressure_abs_move = np.isfinite(pressure_delta) and abs(float(pressure_delta)) >= float(config.pressure_delta_pct)
+    pressure_slope_move = np.isfinite(post_slope) and abs(float(post_slope)) >= float(config.min_slope_abs_per_day)
     pressure_up = (
         (np.isfinite(pressure_delta) and float(pressure_delta) >= float(config.pressure_delta_pct))
         or (np.isfinite(post_slope) and float(post_slope) > 0 and np.isfinite(slope_change) and float(slope_change) > 0)
@@ -249,13 +254,17 @@ def _classify_domain_start(
     if anomaly_key == "pritok":
         if freq_unstable:
             return DOMAIN_REJECTED_FREQUENCY_TRANSITION, "reject", "pressure_change_explained_by_frequency"
-        if pressure_abs_move or (np.isfinite(post_slope) and abs(float(post_slope)) > 0):
-            return DOMAIN_PRITOK_CANDIDATE, "accept", "pressure_trend_with_stable_frequency" + context_suffix
-        if bad_data_context:
-            return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_context_without_pressure_trend"
-        if regime_context:
+        if bad_data_context or regime_context:
+            if pressure_abs_move:
+                return DOMAIN_UNCERTAIN, "uncertain", "pressure_trend_needs_review" + context_suffix
+            if bad_data_context:
+                return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_context_without_pressure_trend"
             return DOMAIN_REJECTED_REGIME_EVENT, "reject", "regime_context_without_pressure_trend"
-        return DOMAIN_UNCERTAIN, "uncertain", "weak_pressure_trend"
+        if pressure_abs_move:
+            return DOMAIN_PRITOK_CANDIDATE, "accept", "pressure_trend_with_stable_frequency"
+        if pressure_slope_move:
+            return DOMAIN_UNCERTAIN, "uncertain", "local_pressure_slope_without_level_shift"
+        return DOMAIN_UNCERTAIN, "uncertain", "weak_pressure_trend_below_pritok_threshold"
 
     if anomaly_key == "salt":
         if pressure_up or slope_reversal_up:
