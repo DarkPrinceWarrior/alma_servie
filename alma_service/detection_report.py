@@ -178,6 +178,32 @@ def _score_unavailable_text(reason: str | None) -> str:
     return "Отклонение от нормы не рассчитано. Нулевой score здесь не означает норму."
 
 
+def _input_contract(scores_df: pd.DataFrame | None) -> str:
+    if scores_df is None or scores_df.empty or "input_contract" not in scores_df.columns:
+        return "real_window"
+    values = scores_df["input_contract"].dropna().astype(str).str.strip()
+    values = values[values != ""]
+    if values.empty:
+        return "real_window"
+    return str(values.mode().iloc[0])
+
+
+def _input_contract_text(input_contract: str) -> str:
+    if input_contract == "edge_hold_padded":
+        return (
+            "Контракт входа: ряд/эталон были дополнены методом edge-hold "
+            "(удержание первого валидного значения в начале ряда). Score рассчитан "
+            "только для реальных timestamp после отбрасывания искусственного префикса."
+        )
+    return "Контракт входа: обычное окно без искусственного дополнения."
+
+
+def _input_contract_badge(scores_df: pd.DataFrame | None) -> str:
+    input_contract = _input_contract(scores_df)
+    css_class = "warn" if input_contract == "edge_hold_padded" else "info"
+    return f'<p class="contract-note {css_class}">{escape(_input_contract_text(input_contract))}</p>'
+
+
 def _format_dt(value: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
     ts = pd.to_datetime(value, errors="coerce")
     return ts.strftime(fmt) if pd.notna(ts) else "—"
@@ -664,6 +690,7 @@ def generate_report(
             if score_unavailable_reason is not None
             else ""
         )
+        input_contract_html = _input_contract_badge(well_scores)
         well_ts = data_df[data_df["well_id"] == well_id].copy()
         plot_html = _create_plot_html(
             well_df=well_ts,
@@ -692,6 +719,7 @@ def generate_report(
                 <span><b>Задержка:</b> {_format_float(result_row.get('delay_hours'), 2, ' ч')}</span>
               </div>
               <p class="note">Зелёная линия — начало аномалии, красная зона — длительность, фиолетовая пунктирная — момент обнаружения.</p>
+              {input_contract_html}
               {score_warning_html}
               <div class="plot-wrap">{plot_html if plot_html else '<p>Нет данных для графика</p>'}</div>
             </article>
@@ -728,6 +756,7 @@ def generate_report(
                 if score_unavailable_reason is not None
                 else ""
             )
+            input_contract_html = _input_contract_badge(well_scores)
             print(f"  \u0413\u0440\u0430\u0444\u0438\u043a (\u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438): \u0441\u043a\u0432. {well_id}, \u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0439: {len(well_preds)}")
 
             plot_html = _create_unlabeled_plot_html(
@@ -756,6 +785,7 @@ def generate_report(
                     <span><b>\u041e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043d\u044b\u0435 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438:</b> {escape(starts_text)}</span>
                   </div>
                   <p class="note">\u0424\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440\u043d\u0430\u044f \u043b\u0438\u043d\u0438\u044f \u2014 \u043c\u043e\u043c\u0435\u043d\u0442 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u044f \u0430\u043b\u0433\u043e\u0440\u0438\u0442\u043c\u043e\u043c. \u0420\u0430\u0437\u043c\u0435\u0442\u043a\u0430 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442.</p>
+                  {input_contract_html}
                   {score_warning_html}
                   <div class="plot-wrap">{plot_html if plot_html else '<p>\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0434\u043b\u044f \u0433\u0440\u0430\u0444\u0438\u043a\u0430</p>'}</div>
                 </article>
@@ -845,6 +875,24 @@ def generate_report(
             color: #92400e;
             font-weight: 600;
             font-size: 13px;
+          }}
+          .contract-note {{
+            margin: 0 0 12px;
+            padding: 9px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            line-height: 1.45;
+          }}
+          .contract-note.info {{
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1e3a8a;
+          }}
+          .contract-note.warn {{
+            border: 1px solid #f59e0b;
+            background: #fffbeb;
+            color: #92400e;
+            font-weight: 600;
           }}
           .pill {{
             border-radius: 999px;

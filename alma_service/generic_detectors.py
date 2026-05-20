@@ -100,6 +100,22 @@ def _trim_prefix_padding(scores: np.ndarray, pad_count: int, original_len: int) 
     return arr[int(pad_count) : int(pad_count) + int(original_len)].astype(np.float32)
 
 
+def _input_contract_from_padding(padding_detail: dict[str, Any]) -> str:
+    if not bool(padding_detail.get("enabled", False)):
+        return "real_window"
+    short = dict(padding_detail.get("short", {}))
+    long = dict(padding_detail.get("long", {}))
+    pad_points = [
+        int(short.get("well_prefix_points", 0)),
+        int(short.get("reference_prefix_points", 0)),
+        int(long.get("well_prefix_points", 0)),
+        int(long.get("reference_prefix_points", 0)),
+    ]
+    if any(value > 0 for value in pad_points):
+        return "edge_hold_padded"
+    return "real_window"
+
+
 class SharedPaAnoDetector:
     """PaAno detector that uses a **shared** pre-trained encoder.
 
@@ -221,5 +237,6 @@ class SharedPaAnoDetector:
                 "shared_encoder": True,
                 "train_wells": st.train_wells,
                 "input_padding": padding_detail,
+                "input_contract": _input_contract_from_padding(padding_detail),
             },
         )

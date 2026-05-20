@@ -7,6 +7,7 @@ from alma_service.generic_detectors import (
     DetectorScoreOutput,
     _edge_hold_pad_prefix,
     _ensure_2d_float32,
+    _input_contract_from_padding,
     _trim_prefix_padding,
 )
 
@@ -45,6 +46,25 @@ class GenericDetectorTests(unittest.TestCase):
         trimmed = _trim_prefix_padding(scores, pad_count=2, original_len=3)
 
         self.assertTrue(np.array_equal(trimmed, np.array([1.0, 2.0, 3.0], dtype=np.float32)))
+
+    def test_input_contract_marks_only_actual_padding(self) -> None:
+        self.assertEqual(_input_contract_from_padding({"enabled": False}), "real_window")
+        self.assertEqual(
+            _input_contract_from_padding({
+                "enabled": True,
+                "short": {"well_prefix_points": 0, "reference_prefix_points": 0},
+                "long": {"well_prefix_points": 0, "reference_prefix_points": 0},
+            }),
+            "real_window",
+        )
+        self.assertEqual(
+            _input_contract_from_padding({
+                "enabled": True,
+                "short": {"well_prefix_points": 0, "reference_prefix_points": 1},
+                "long": {"well_prefix_points": 0, "reference_prefix_points": 0},
+            }),
+            "edge_hold_padded",
+        )
 
 
 if __name__ == "__main__":

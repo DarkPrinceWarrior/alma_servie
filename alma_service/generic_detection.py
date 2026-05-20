@@ -1509,6 +1509,7 @@ def _build_score_rows(
             "n_predicted_starts": len(starts),
             "score_valid": score_valid,
             "score_unavailable_reason": score_unavailable_reason,
+            "input_contract": str(run.score_output.detail.get("input_contract", "real_window")),
         }
         components = dict(run.score_output.components)
         components["score"] = score
@@ -1524,6 +1525,7 @@ def _build_score_rows(
                 "onset_allowed_mask": bool(run.prepared.onset_allowed_mask[idx]),
                 "score_valid": bool(score_valid),
                 "score_unavailable_reason": score_unavailable_reason or "",
+                "input_contract": str(run.score_output.detail.get("input_contract", "real_window")),
             }
             if len(status_frame) == len(score):
                 for name in STATUS_COLUMNS:
