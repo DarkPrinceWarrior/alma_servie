@@ -124,6 +124,43 @@ def test_salt_uses_slope_reversal_up_not_global_median() -> None:
     assert result["domain_pressure_slope_change_per_day"] > 0
 
 
+def test_salt_accepts_pressure_growth_despite_frequency_increase() -> None:
+    pressure = np.r_[np.full(864, 100.0), np.linspace(100.0, 104.0, 864)]
+    frequency = np.r_[np.full(864, 50.0), np.full(864, 52.0)]
+    result = assess_domain_start(
+        anomaly_key="salt",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-04"),
+    )
+    assert result["domain_verdict"] == DOMAIN_SALT_CANDIDATE
+    assert result["domain_action"] == "accept"
+    assert "with_frequency_change" in result["domain_reason"]
+
+
+def test_salt_rejects_pressure_drop_explained_by_frequency() -> None:
+    pressure = np.r_[np.full(864, 100.0), np.linspace(100.0, 96.0, 864)]
+    frequency = np.r_[np.full(864, 50.0), np.full(864, 52.0)]
+    result = assess_domain_start(
+        anomaly_key="salt",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-04"),
+    )
+    assert result["domain_verdict"] == DOMAIN_REJECTED_FREQUENCY_TRANSITION
+    assert result["domain_action"] == "reject"
+
+
+def test_salt_weak_reversal_without_level_shift_requires_review() -> None:
+    pressure = np.r_[np.linspace(100.0, 95.0, 864), np.linspace(95.0, 95.2, 864)]
+    frequency = np.full(len(pressure), 50.0)
+    result = assess_domain_start(
+        anomaly_key="salt",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-04"),
+    )
+    assert result["domain_verdict"] == DOMAIN_UNCERTAIN
+    assert result["domain_action"] == "uncertain"
+
+
 def test_negermet_candidate_on_pressure_step_up() -> None:
     pressure = np.r_[np.full(24, 100.0), np.full(24, 130.0)]
     frequency = np.full(len(pressure), 50.0)

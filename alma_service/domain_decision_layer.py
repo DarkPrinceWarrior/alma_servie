@@ -78,7 +78,7 @@ DEFAULT_CONFIGS = {
     "salt": DomainDecisionConfig(
         pre_hours=72.0,
         post_hours=72.0,
-        frequency_transition_pct=3.0,
+        frequency_transition_pct=2.0,
         pressure_delta_pct=0.5,
         strong_pressure_delta_pct=2.0,
         support_delta_pct=1.0,
@@ -235,8 +235,10 @@ def _classify_domain_start(
     slope_change = pressure["slope_change_per_day"]
     pressure_abs_move = np.isfinite(pressure_delta) and abs(float(pressure_delta)) >= float(config.pressure_delta_pct)
     pressure_slope_move = np.isfinite(post_slope) and abs(float(post_slope)) >= float(config.min_slope_abs_per_day)
+    pressure_level_up = np.isfinite(pressure_delta) and float(pressure_delta) >= float(config.pressure_delta_pct)
+    pressure_level_down = np.isfinite(pressure_delta) and float(pressure_delta) <= -float(config.pressure_delta_pct)
     pressure_up = (
-        (np.isfinite(pressure_delta) and float(pressure_delta) >= float(config.pressure_delta_pct))
+        pressure_level_up
         or (np.isfinite(post_slope) and float(post_slope) > 0 and np.isfinite(slope_change) and float(slope_change) > 0)
     )
     slope_reversal_up = np.isfinite(slope_change) and float(slope_change) > 0 and np.isfinite(post_slope) and float(post_slope) > 0
@@ -267,10 +269,27 @@ def _classify_domain_start(
         return DOMAIN_UNCERTAIN, "uncertain", "weak_pressure_trend_below_pritok_threshold"
 
     if anomaly_key == "salt":
+        support_count = int(load_support) + int(thermal_support) + int(imbalance_support)
+        strong_salt_pressure = strong_pressure_up or (
+            np.isfinite(post_slope)
+            and float(post_slope) >= float(config.min_slope_abs_per_day)
+            and np.isfinite(slope_change)
+            and float(slope_change) > 0
+        )
+        expected_frequency_response = freq_unstable and pressure_level_down and (
+            not np.isfinite(post_slope) or float(post_slope) <= 0
+        )
+        weak_reversal_without_level = slope_reversal_up and not pressure_level_up and support_count == 0
+        if expected_frequency_response:
+            return DOMAIN_REJECTED_FREQUENCY_TRANSITION, "reject", "pressure_drop_explained_by_frequency"
         if pressure_up or slope_reversal_up:
             reason = "pressure_post_slope_or_reversal_up"
             if freq_unstable:
                 reason += "_with_frequency_change"
+            if weak_reversal_without_level and not strong_salt_pressure:
+                return DOMAIN_UNCERTAIN, "uncertain", "weak_salt_reversal_without_level_shift"
+            if (bad_data_context or regime_context) and not (strong_salt_pressure or support_count > 0):
+                return DOMAIN_UNCERTAIN, "uncertain", "salt_pressure_pattern_needs_review" + context_suffix
             return DOMAIN_SALT_CANDIDATE, "accept", reason + context_suffix
         if freq_unstable:
             return DOMAIN_REJECTED_FREQUENCY_TRANSITION, "reject", "frequency_transition_without_salt_pressure_pattern"
