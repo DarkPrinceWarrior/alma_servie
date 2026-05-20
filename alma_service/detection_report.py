@@ -50,6 +50,41 @@ DETECTOR_LABELS = {
     "paano_shared": "PaAno Shared Encoder",
     "paano_global": "PaAno Global Encoder",
 }
+EVENT_CLASS_LABELS = {
+    "labelled_anomaly": "размеченная аномалия",
+    "anomaly_candidate": "кандидат аномалии",
+    "normal_context": "нормальный контекст",
+    "regime_event": "режимное событие",
+    "bad_data": "проблема качества данных",
+}
+QUALITY_STATUS_LABELS = {
+    "ok": "качество данных в норме",
+    "sensor_stuck": "подозрение на залипание датчика",
+}
+REGIME_STATUS_LABELS = {
+    "normal": "без явного режимного перехода",
+    "regime_shift": "режимный переход",
+    "stop_start": "остановка/пуск",
+}
+ZONE_STATUS_LABELS = {
+    "labelled_anomaly": "размеченная зона аномалии",
+    "clean_normal": "подтвержденная нормальная зона",
+}
+START_CLASS_LABELS = {
+    "labelled_anomaly": "старт внутри размеченной аномалии",
+    "anomaly_candidate": "кандидат без разметки",
+    "regime_event": "режимное событие",
+    "bad_data": "плохие данные",
+}
+INCIDENT_STATE_LABELS = {
+    "open": "новый эпизод",
+    "continue": "продолжение эпизода",
+    "suppressed": "подавлено",
+}
+SUPPRESSION_REASON_LABELS = {
+    "bad_data": "подавлено по качеству данных",
+    "regime_event": "подавлено как режимное событие",
+}
 
 
 def _pick_existing_source(spec, source_path: str | None, detector_key: str | None = None) -> Path:
@@ -130,6 +165,17 @@ def _load_scores(path: Path) -> dict[str, pd.DataFrame]:
     df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
     df = df.dropna(subset=["timestamp"]).sort_values(["well_id", "timestamp"]).reset_index(drop=True)
     return {well_id: grp for well_id, grp in df.groupby("well_id")}
+
+
+def _load_predicted_starts(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        return pd.DataFrame()
+    df = read_table(path, dtypes={"well_id": str}, parse_dates=["detected_time"])
+    if df.empty:
+        return df
+    df["well_id"] = df["well_id"].astype(str).str.strip().str.lower()
+    df["detected_time"] = pd.to_datetime(df["detected_time"], errors="coerce")
+    return df
 
 
 def _score_column(scores_df: pd.DataFrame | None) -> str | None:
@@ -253,6 +299,99 @@ def _input_contract_badge(scores_df: pd.DataFrame | None) -> str:
     }
     css_class = "warn" if input_contract in warn_contracts else "info"
     return f'<p class="contract-note {css_class}">{escape(_input_contract_text(input_contract))}</p>'
+
+
+def _truthy(value: Any) -> bool:
+    if pd.isna(value):
+        return False
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _label_value(value: Any, mapping: dict[str, str]) -> str | None:
+    if pd.isna(value):
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    return mapping.get(raw, raw)
+
+
+def _prediction_for_detection(
+    pred_df: pd.DataFrame,
+    well_id: str,
+    detected_time: Any,
+) -> pd.Series | None:
+    if pred_df.empty or pd.isna(detected_time):
+        return None
+    subset = pred_df[pred_df["well_id"] == str(well_id).strip().lower()].copy()
+    if subset.empty:
+        return None
+    subset = subset.dropna(subset=["detected_time"])
+    if subset.empty:
+        return None
+    detected_ts = pd.Timestamp(detected_time)
+    exact = subset[subset["detected_time"] == detected_ts]
+    if not exact.empty:
+        return exact.iloc[0]
+    deltas = (subset["detected_time"] - detected_ts).abs()
+    if deltas.empty or deltas.min() > pd.Timedelta(seconds=1):
+        return None
+    return subset.loc[deltas.idxmin()]
+
+
+def _domain_decision_html(pred_row: pd.Series | None) -> str:
+    if pred_row is None:
+        return ""
+    actionable = _truthy(pred_row.get("actionable_alert", False))
+    css_class = "info" if actionable else "warn"
+    action_text = (
+        "Доменная проверка: алерт принят."
+        if actionable
+        else "Доменная проверка: алерт не считается уверенной детекцией."
+    )
+    details: list[str] = []
+    field_specs = [
+        ("event_class", "класс события", EVENT_CLASS_LABELS),
+        ("start_class", "тип старта", START_CLASS_LABELS),
+        ("quality_status", "качество", QUALITY_STATUS_LABELS),
+        ("regime_status", "режим", REGIME_STATUS_LABELS),
+        ("zone_status", "зона", ZONE_STATUS_LABELS),
+        ("incident_state", "эпизод", INCIDENT_STATE_LABELS),
+    ]
+    for column, label, mapping in field_specs:
+        if column not in pred_row:
+            continue
+        value = _label_value(pred_row.get(column), mapping)
+        if value:
+            details.append(f"{label}: {value}")
+    reason = _label_value(pred_row.get("suppression_reason", ""), SUPPRESSION_REASON_LABELS)
+    if reason:
+        details.append(f"причина: {reason}")
+    suffix = f" {'; '.join(details)}." if details else ""
+    return f'<p class="domain-note {css_class}">{escape(action_text + suffix)}</p>'
+
+
+def _domain_summary_html(pred_df: pd.DataFrame) -> str:
+    if pred_df.empty or "actionable_alert" not in pred_df.columns:
+        return ""
+    accepted = int(pred_df["actionable_alert"].map(_truthy).sum())
+    total = int(len(pred_df))
+    uncertain = total - accepted
+    event_counts: list[str] = []
+    if "event_class" in pred_df.columns:
+        events = pred_df["event_class"].dropna().astype(str).str.strip()
+        for event_class, count in events[events != ""].value_counts().sort_index().items():
+            label = EVENT_CLASS_LABELS.get(event_class, event_class)
+            event_counts.append(f"{label}: {int(count)}")
+    css_class = "info" if accepted == total else "warn"
+    parts = [f"Доменная проверка: принято {accepted} из {total} стартов"]
+    if uncertain:
+        parts.append(f"неуверенных/подавленных: {uncertain}")
+    if event_counts:
+        parts.append("; ".join(event_counts))
+    return f'<p class="domain-note {css_class}">{escape("; ".join(parts))}.</p>'
 
 
 def _format_dt(value: Any, fmt: str = "%Y-%m-%d %H:%M") -> str:
@@ -686,16 +825,10 @@ def generate_report(
     scores_by_well = _load_scores(scores_path_value)
     fi_data = _load_feature_importance_data(spec, detector_key)
     summary_payload = load_json(summary_path(spec, detector_key))
+    predictions_path_value = predicted_starts_path(spec, detector_key)
+    pred_df = _load_predicted_starts(predictions_path_value)
     if not summary_payload:
-        predictions_path = predicted_starts_path(spec, detector_key)
-        pred_df = (
-            read_table(predictions_path, dtypes={"well_id": str}, parse_dates=["detected_time"])
-            if predictions_path.exists()
-            else pd.DataFrame()
-        )
         if not pred_df.empty:
-            pred_df["well_id"] = pred_df["well_id"].astype(str).str.strip().str.lower()
-            pred_df["detected_time"] = pd.to_datetime(pred_df["detected_time"], errors="coerce")
             split_summaries = {}
             for split_name in ["all", "train", "test"]:
                 subset = intervals_df if split_name == "all" else intervals_df[intervals_df["split"] == split_name]
@@ -753,6 +886,9 @@ def generate_report(
         status_text = _status_label(result_row["status"])
         status_pill_class = _status_pill_class(result_row["status"])
         split_text = SPLIT_SHORT_LABELS.get(str(result_row["split"]), str(result_row["split"]))
+        domain_decision_html = _domain_decision_html(
+            _prediction_for_detection(pred_df, well_id, result_row["detected_time"])
+        )
         sections.append(
             f"""
             <article class="interval-card">
@@ -771,6 +907,7 @@ def generate_report(
               </div>
               <p class="note">Зелёная линия — начало аномалии, красная зона — длительность, фиолетовая пунктирная — момент обнаружения.</p>
               {input_contract_html}
+              {domain_decision_html}
               {score_warning_html}
               <div class="plot-wrap">{plot_html if plot_html else '<p>Нет данных для графика</p>'}</div>
             </article>
@@ -779,13 +916,6 @@ def generate_report(
 
     # --- Unlabeled wells (no interval, but have scores/predicted_starts) ---
     labeled_wells = set(results_df["well_id"].unique()) if not results_df.empty else set()
-    predictions_path_value = predicted_starts_path(spec, detector_key)
-    pred_df = pd.DataFrame()
-    if predictions_path_value.exists():
-        pred_df = read_table(predictions_path_value, dtypes={"well_id": str}, parse_dates=["detected_time"])
-        if not pred_df.empty:
-            pred_df["well_id"] = pred_df["well_id"].astype(str).str.strip().str.lower()
-
     scored_wells = set(scores_by_well.keys())
     unlabeled_wells = sorted(
         (scored_wells | set(pred_df["well_id"].unique() if not pred_df.empty else [])) - labeled_wells
@@ -795,9 +925,10 @@ def generate_report(
         sections.append('<h2 style="margin-top:32px;">\u0421\u043a\u0432\u0430\u0436\u0438\u043d\u044b \u0431\u0435\u0437 \u0440\u0430\u0437\u043c\u0435\u0442\u043a\u0438 (\u0441\u043b\u0435\u043f\u043e\u0439 \u0442\u0435\u0441\u0442)</h2>')
         for well_id in unlabeled_wells:
             well_preds = []
+            well_pred_df = pd.DataFrame()
             if not pred_df.empty:
-                wp = pred_df[pred_df["well_id"] == well_id]
-                well_preds = [pd.Timestamp(t) for t in wp["detected_time"].dropna()]
+                well_pred_df = pred_df[pred_df["well_id"] == well_id]
+                well_preds = [pd.Timestamp(t) for t in well_pred_df["detected_time"].dropna()]
 
             well_ts = data_df[data_df["well_id"] == well_id].copy()
             well_scores = scores_by_well.get(well_id)
@@ -822,6 +953,7 @@ def generate_report(
             starts_text = ", ".join(_format_dt(t) for t in well_preds) if well_preds else "\u041d\u0435 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u043e"
             n_det = len(well_preds)
             pill_label = f"{n_det} {'\u0434\u0435\u0442\u0435\u043a\u0446\u0438\u044f' if n_det == 1 else '\u0434\u0435\u0442\u0435\u043a\u0446\u0438\u0439'}"
+            domain_decision_html = _domain_summary_html(well_pred_df)
             sections.append(
                 f"""
                 <article class="interval-card">
@@ -837,6 +969,7 @@ def generate_report(
                   </div>
                   <p class="note">\u0424\u0438\u043e\u043b\u0435\u0442\u043e\u0432\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440\u043d\u0430\u044f \u043b\u0438\u043d\u0438\u044f \u2014 \u043c\u043e\u043c\u0435\u043d\u0442 \u043e\u0431\u043d\u0430\u0440\u0443\u0436\u0435\u043d\u0438\u044f \u0430\u043b\u0433\u043e\u0440\u0438\u0442\u043c\u043e\u043c. \u0420\u0430\u0437\u043c\u0435\u0442\u043a\u0430 \u0430\u043d\u043e\u043c\u0430\u043b\u0438\u0438 \u043e\u0442\u0441\u0443\u0442\u0441\u0442\u0432\u0443\u0435\u0442.</p>
                   {input_contract_html}
+                  {domain_decision_html}
                   {score_warning_html}
                   <div class="plot-wrap">{plot_html if plot_html else '<p>\u041d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445 \u0434\u043b\u044f \u0433\u0440\u0430\u0444\u0438\u043a\u0430</p>'}</div>
                 </article>
@@ -944,6 +1077,23 @@ def generate_report(
             background: #fffbeb;
             color: #92400e;
             font-weight: 600;
+          }}
+          .domain-note {{
+            margin: 0 0 12px;
+            padding: 10px 12px;
+            border-radius: 12px;
+            font-size: 13px;
+            font-weight: 600;
+          }}
+          .domain-note.info {{
+            border: 1px solid #99f6e4;
+            background: #f0fdfa;
+            color: #115e59;
+          }}
+          .domain-note.warn {{
+            border: 1px solid #fdba74;
+            background: #fff7ed;
+            color: #9a3412;
           }}
           .pill {{
             border-radius: 999px;

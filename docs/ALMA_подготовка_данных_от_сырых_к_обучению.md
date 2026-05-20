@@ -3129,3 +3129,42 @@ salt:
 ручного `ALMA_PAANO_INPUT_PADDING=edge_hold`. `paano_global` можно переводить в
 статус production-candidate рядом с `paano_shared`, но пока не делать
 автоматическим default без отдельного решения.
+
+### Прогресс реализации 2026-05-20: обвязка production-candidate `paano_global`
+
+Выполнена упаковка `paano_global` как production-candidate, без переключения
+default:
+
+1. Проверены основные CLI `scripts/detection/detect_negermet.py`,
+   `scripts/detection/detect_pritok.py`, `scripts/detection/detect_salt.py`.
+   Все три принимают `--detector paano_global`, потому что используют общий
+   список `DETECTOR_KEYS = ("paano_shared", "paano_global")`.
+2. Зафиксирована роль детекторов:
+   `paano_shared` остается текущим production/default для обычных отчетов;
+   `paano_global` является кандидатом рядом с ним: общий encoder, fixed schema,
+   единая сетка `5min`, long-input contract `edge_hold + local memory`,
+   coverage-aware статусы и доменный decision layer.
+3. Добавлен единый запуск candidate benchmark:
+   `scripts/evaluation/run_global_candidate_benchmark.sh`.
+   Он прогоняет только размеченные `negermet`, `pritok`, `salt` плюс
+   `norm_work` как чистую норму. `Salym` и `test35` не участвуют. Скрипт
+   специально снимает `ALMA_PAANO_INPUT_PADDING` и
+   `ALMA_GLOBAL_MEMORY_BANK_MODE`, чтобы проверять именно code defaults, а не
+   ручные shell-костыли.
+4. Отчетный слой дополнен выводом доменной проверки из
+   `predicted_starts`: принято/неуверенно/подавлено, класс события, качество
+   данных, режимный контекст, зона, состояние эпизода и причина подавления.
+   Ранее отчеты уже показывали `input_contract`, `Not assessed` и
+   coverage-aware метрики; теперь в HTML виден и domain decision layer.
+5. Default не переключался. Автоматический выбор по benchmark summary и
+   `DEFAULT_DETECTOR` остаются прежними. Перевод `paano_global` в default
+   должен быть отдельным решением после review.
+
+Команда для повторного запуска:
+
+```bash
+CUDA_VISIBLE_DEVICES=1 \
+ALMA_RETUNE_MODE=fast \
+ALMA_OPTUNA_N_JOBS=16 \
+bash scripts/evaluation/run_global_candidate_benchmark.sh
+```
