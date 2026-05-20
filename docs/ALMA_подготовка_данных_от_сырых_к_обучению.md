@@ -2090,6 +2090,84 @@ non-labelled:     accept=1,  uncertain=7
 это пока diagnostic/review layer: он объясняет кандидаты, но не меняет raw
 PaAno score.
 
+### Контрольный прогон 2026-05-20: `domain_decision_layer v1`
+
+После реализации первых guard-слоев для `negermet`, `pritok`, `salt` выполнен
+свежий end-to-end benchmark:
+
+```text
+global PaAno -> starts/incidents -> domain_decision_layer -> CSV review
+```
+
+Важно: первый контрольный запуск без padding:
+
+```text
+artifacts/results/global_normality_detector/5min_domain_guard_v1_20260520
+```
+
+показал деградацию `negermet` до `1/5`. Причина не в domain guard, а в
+неправильном input contract: запуск шел с `input_padding.mode=none`, поэтому
+короткие ННКТ-ряды получили `Not assessed / not_enough_points`.
+
+Корректный контрольный запуск выполнен с явным production/research-контрактом
+для коротких рядов:
+
+```text
+CUDA_VISIBLE_DEVICES=1
+ALMA_GLOBAL_MEMORY_BANK_MODE=local
+ALMA_PAANO_INPUT_PADDING=edge_hold
+ALMA_RETUNE_MODE=fast
+ALMA_OPTUNA_N_JOBS=16
+
+uv run python scripts/evaluation/benchmark_global_normality_detector.py \
+  --output-dir artifacts/results/global_normality_detector/5min_domain_guard_v1_edge_hold_20260520 \
+  --patch-short 192 \
+  --patch-long 384 \
+  --common-source-freq 5min \
+  --include-norm-work \
+  --global-iters 200
+```
+
+Результат core global PaAno:
+
+| Аномалия | Hit-rate | FAR/day | Starts | Median delay | P90 delay |
+|---|---:|---:|---:|---:|---:|
+| `negermet` | `5/5 = 1.000` | `0.000` | `5` | `0.05h` | `0.72h` |
+| `pritok` | `24/24 = 1.000` | `0.000` | `56` | `1.60h` | `5.33h` |
+| `salt` | `8/8 = 1.000` | `0.000` | `14` | `1.00h` | `12.07h` |
+
+Сравнение с сохраненным class-specific baseline:
+
+| Аномалия | Class-specific hit-rate | Global hit-rate | Class-specific p90 | Global p90 | Вывод |
+|---|---:|---:|---:|---:|---|
+| `negermet` | `4/5` | `5/5` | `0.70h` | `0.72h` | global закрывает все интервалы |
+| `pritok` | `24/24` | `24/24` | `8.83h` | `5.33h` | global раньше по p90 |
+| `salt` | `8/8` | `8/8` | `78.55h` | `12.07h` | global сильно раньше по p90 |
+
+Распределение `domain_decision_layer v1`:
+
+| Аномалия | `accept` | `uncertain` | `reject` | Интерпретация |
+|---|---:|---:|---:|---|
+| `negermet` | `5` | `1` | `0` | все размеченные ННКТ подтверждены; blind `ю-я 39-651` остается review |
+| `pritok` | `3` | `31` | `31` | guard строгий, hard-negative нормы не auto-accept; слой только review |
+| `salt` | `14` | `7` | `1` | salt-паттерны подтверждены; частотно-объяснимое падение давления отклоняется |
+
+Контрольные факты:
+
+- `domain_decision_layer` не меняет raw PaAno score.
+- Core evaluation использует те же starts/incidents; guard добавляет verdict и
+  reason для review.
+- Для global benchmark с короткими рядами `edge_hold` должен быть явным
+  input contract. Без него короткие `negermet`-ряды честно получают
+  `Not assessed`, что правильно как safety-состояние, но не является рабочим
+  production/research режимом для полной оценки.
+
+Решение: `domain_decision_layer v1` считать готовым как diagnostic/review layer
+для размеченных `negermet`, `pritok`, `salt`. Следующий практический шаг -
+показать `domain_verdict`, `domain_action`, `domain_reason` и ключевые
+pressure/frequency/load deltas в CSV/HTML отчетах для экспертного просмотра,
+не превращая guard в production suppression.
+
 ### Уточнение 2026-05-20: комментарии эксперта из сводной таблицы
 
 Источник данных не расширяется из сводной таблицы. Для обучения, оценки и
