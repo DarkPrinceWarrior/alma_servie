@@ -140,6 +140,33 @@ def _safe_metric(value: Any, large: float = 1e9) -> float:
     return numeric
 
 
+def _bool_series(values: pd.Series, *, default: bool) -> pd.Series:
+    if values.dtype == object:
+        normalized = values.fillna(str(default)).astype(str).str.strip().str.lower()
+        return normalized.isin({"1", "true", "yes", "y", "да"})
+    return values.fillna(default).astype(bool)
+
+
+def _score_assessment(scores: pd.DataFrame) -> tuple[bool, str]:
+    if scores.empty or "score_valid" not in scores.columns:
+        return True, ""
+    valid = _bool_series(scores["score_valid"], default=True)
+    if bool(valid.any()):
+        return True, ""
+    if "score_unavailable_reason" not in scores.columns:
+        return False, "unknown"
+    reasons = (
+        scores["score_unavailable_reason"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    reasons = reasons[reasons != ""]
+    if reasons.empty:
+        return False, "unknown"
+    return False, str(reasons.mode().iloc[0])
+
+
 def summary_score_key(summary: dict[str, Any]) -> tuple[float, float, float, float, float]:
     return (
         float(summary.get("hit_count", 0)),
@@ -187,6 +214,7 @@ def evaluate_predictions(
             obs_start = pd.NaT
             obs_end = pd.NaT
 
+        well_assessed, score_unavailable_reason = _score_assessment(ws)
         if pd.notna(obs_start) and pd.notna(obs_end) and obs_end > obs_start:
             observed_days_total += (obs_end - obs_start).total_seconds() / 86400.0
 
@@ -216,7 +244,7 @@ def evaluate_predictions(
             interval_duplicates = max(interval_start_count - 1, 0)
             alerts_inside_intervals += interval_start_count
             duplicate_starts_inside_interval += interval_duplicates
-            first_hit = min(interval_starts) if interval_starts else pd.NaT
+            first_hit = min(interval_starts) if well_assessed and interval_starts else pd.NaT
             delay_h = (
                 float((first_hit - start_dt).total_seconds() / 3600.0) if pd.notna(first_hit) else np.nan
             )
@@ -235,7 +263,14 @@ def evaluate_predictions(
                     "detected_time": first_hit,
                     "split": str(row.get("split", "train")).strip().lower(),
                     "hit": int(pd.notna(first_hit)),
-                    "status": "Detected" if pd.notna(first_hit) else "Not found",
+                    "status": (
+                        "Detected"
+                        if pd.notna(first_hit)
+                        else ("Not assessed" if not well_assessed else "Not found")
+                    ),
+                    "assessed": bool(well_assessed),
+                    "score_valid": bool(well_assessed),
+                    "score_unavailable_reason": score_unavailable_reason,
                     "delay_hours": delay_h,
                     "abs_delay_hours": abs(delay_h) if np.isfinite(delay_h) else np.nan,
                     "delay_ratio": delay_ratio,
@@ -254,6 +289,10 @@ def evaluate_predictions(
             "interval_count": 0,
             "hit_count": 0,
             "hit_rate": 0.0,
+            "assessed_interval_count": 0,
+            "not_assessed_interval_count": 0,
+            "coverage_rate": 0.0,
+            "hit_rate_on_assessed": 0.0,
             "start_count": start_count,
             "false_alarms": int(false_alarms),
             "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,
@@ -286,11 +325,20 @@ def evaluate_predictions(
     abs_delays = detected["abs_delay_hours"].dropna().astype(float)
     delay_ratios = detected["delay_ratio"].dropna().astype(float)
     interval_count = int(len(interval_df))
+    assessed_mask = _bool_series(interval_df.get("assessed", pd.Series(True, index=interval_df.index)), default=True)
+    assessed_interval_count = int(assessed_mask.sum())
+    not_assessed_interval_count = int(interval_count - assessed_interval_count)
     hit_count = int(interval_df["hit"].sum())
     summary = {
         "interval_count": interval_count,
         "hit_count": hit_count,
         "hit_rate": float(hit_count / interval_count) if interval_count else 0.0,
+        "assessed_interval_count": assessed_interval_count,
+        "not_assessed_interval_count": not_assessed_interval_count,
+        "coverage_rate": float(assessed_interval_count / interval_count) if interval_count else 0.0,
+        "hit_rate_on_assessed": (
+            float(hit_count / assessed_interval_count) if assessed_interval_count else 0.0
+        ),
         "start_count": start_count,
         "false_alarms": int(false_alarms),
         "false_alarms_per_day": float(false_alarms / observed_days_total) if observed_days_total > 0 else np.nan,

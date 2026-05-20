@@ -41,7 +41,11 @@ COLOR_THEMES = {
 }
 SPLIT_LABELS = {"train": "Обучающие скважины", "test": "Тестовые скважины", "all": "Все скважины"}
 SPLIT_SHORT_LABELS = {"train": "Обучение", "test": "Тест", "all": "Все"}
-STATUS_LABELS = {"Detected": "Обнаружено", "Not found": "Не обнаружено"}
+STATUS_LABELS = {
+    "Detected": "Обнаружено",
+    "Not found": "Не обнаружено",
+    "Not assessed": "Не оценено",
+}
 DETECTOR_LABELS = {
     "paano_shared": "PaAno Shared Encoder",
     "paano_global": "PaAno Global Encoder",
@@ -197,6 +201,15 @@ def _detector_label(detector_key: str) -> str:
 
 def _status_label(status: Any) -> str:
     return STATUS_LABELS.get(str(status), str(status))
+
+
+def _status_pill_class(status: Any) -> str:
+    value = str(status)
+    if value == "Detected":
+        return "ok"
+    if value == "Not assessed":
+        return "warn"
+    return "miss"
 
 
 def _fig_to_b64(fig: plt.Figure, dpi: int = 120) -> str:
@@ -627,6 +640,9 @@ def generate_report(
                 <span><b>Интервалы:</b> {escape(str(split_payload.get('interval_count', 0)))}</span>
                 <span><b>Найдено:</b> {f"{split_payload.get('hit_count', 0)}/{split_payload.get('interval_count', 0)}"}</span>
                 <span><b>Доля найденных:</b> {_format_float(100.0 * float(split_payload.get('hit_rate', 0.0)), 1, '%')}</span>
+                <span><b>Оценено моделью:</b> {f"{split_payload.get('assessed_interval_count', split_payload.get('interval_count', 0))}/{split_payload.get('interval_count', 0)}"}</span>
+                <span><b>Покрытие оценки:</b> {_format_float(100.0 * float(split_payload.get('coverage_rate', 1.0)), 1, '%')}</span>
+                <span><b>Доля найденных среди оценённых:</b> {_format_float(100.0 * float(split_payload.get('hit_rate_on_assessed', split_payload.get('hit_rate', 0.0))), 1, '%')}</span>
                 <span><b>P90 задержка:</b> {_format_float(split_payload.get('p90_abs_delay_hours'), 1, ' ч')}</span>
                 <span><b>Ложные срабатывания в сутки:</b> {_format_float(split_payload.get('false_alarms_per_day'), 3)}</span>
                 <span><b>Episode FAR:</b> {_format_float(split_payload.get('episode_far'), 3)}</span>
@@ -657,6 +673,7 @@ def generate_report(
             fi_data=fi_data,
         )
         status_text = _status_label(result_row["status"])
+        status_pill_class = _status_pill_class(result_row["status"])
         split_text = SPLIT_SHORT_LABELS.get(str(result_row["split"]), str(result_row["split"]))
         sections.append(
             f"""
@@ -666,7 +683,7 @@ def generate_report(
                   <h3>Скважина {escape(well_id)} / интервал {int(result_row['interval_idx'])}</h3>
                   <p class="meta">{escape(split_text)} | {escape(status_text)}</p>
                 </div>
-                <div class="pill {'ok' if result_row['status'] == 'Detected' else 'miss'}">{escape(status_text)}</div>
+                <div class="pill {status_pill_class}">{escape(status_text)}</div>
               </header>
               <div class="interval-meta">
                 <span><b>Фактическое начало:</b> {_format_dt(result_row['actual_start'])}</span>
@@ -837,6 +854,7 @@ def generate_report(
           }}
           .pill.ok {{ color: #027a48; background: #ecfdf3; }}
           .pill.miss {{ color: #b42318; background: #fef3f2; }}
+          .pill.warn {{ color: #92400e; background: #fffbeb; }}
           .plot-wrap {{
             width: 100%;
             margin-top: 12px;

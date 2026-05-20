@@ -2226,3 +2226,44 @@ global invariant-scale подход считается production-кандида
 
 Это сохраняет сильную сторону global model и одновременно убирает главный риск:
 ложную уверенность на коротких рядах.
+
+### Прогресс реализации 2026-05-20: `Not assessed`
+
+Шаг 1 выполнен кодово:
+
+- `evaluate_predictions` теперь различает `Not found` и `Not assessed`;
+- если в scores есть `score_valid=False` по скважине, интервалы этой скважины
+  получают статус `Not assessed`, а не `Not found`;
+- summary/evaluation теперь содержит coverage-aware поля:
+  `assessed_interval_count`, `not_assessed_interval_count`, `coverage_rate`,
+  `hit_rate_on_assessed`;
+- HTML-отчет показывает статус `Не оценено`, `Оценено моделью`, `Покрытие
+  оценки`, `Доля найденных среди оценённых`;
+- старты по invalid score по-прежнему подавляются раньше, на уровне
+  `_detect_starts_for_run`.
+
+Проверка на сохраненном `negermet/paano_global` после перезапуска detector на
+GPU:
+
+```text
+interval_count              = 5
+assessed_interval_count     = 1
+not_assessed_interval_count = 4
+coverage_rate               = 0.20
+hit_count                   = 1
+hit_rate_on_assessed        = 1.00
+```
+
+Фактический смысл результата: `paano_global` с текущим `global_long=192/384`
+честно оценивает только длинную скважину `172г`; короткие `1123л`, `3509г`,
+`524`, `5271г` теперь не маскируются как "аномалии нет", а помечаются как
+`Not assessed`.
+
+Сгенерированный отчет:
+
+```text
+artifacts/reports/negermet/negermet_paano_global_report.html
+```
+
+Следующий шаг по плану: эксперимент `global_long + edge/hold padding` для
+коротких рядов, без включения `Salym/test35` и без cascade scale.
