@@ -181,6 +181,11 @@ def _score_unavailable_text(reason: str | None) -> str:
             "поэтому начало её собственного ряда не используется как эталон нормы. "
             "Нулевой score здесь не означает норму."
         )
+    if reason == "population_reference_unavailable":
+        return (
+            "Отклонение от нормы не рассчитано: локальный reference слишком короткий, "
+            "а population memory bank недоступен. Нулевой score здесь не означает норму."
+        )
     return "Отклонение от нормы не рассчитано. Нулевой score здесь не означает норму."
 
 
@@ -195,6 +200,32 @@ def _input_contract(scores_df: pd.DataFrame | None) -> str:
 
 
 def _input_contract_text(input_contract: str) -> str:
+    if input_contract == "real_long_local_memory":
+        return (
+            "Контракт входа: обычное long-окно без искусственного дополнения; "
+            "memory bank построен из локальной размеченной нормы этой скважины."
+        )
+    if input_contract == "padded_long_local_memory":
+        return (
+            "Контракт входа: long-окно дополнено edge-hold; memory bank построен "
+            "из локальной размеченной нормы этой скважины."
+        )
+    if input_contract == "real_long_population_memory":
+        return (
+            "Контракт входа: обычное long-окно без искусственного дополнения; "
+            "memory bank взят из общего population-pool подтвержденной нормы."
+        )
+    if input_contract == "padded_long_population_memory":
+        return (
+            "Контракт входа: long-окно дополнено edge-hold; memory bank взят "
+            "из общего population-pool подтвержденной нормы. Это fallback для "
+            "короткой истории или blind-скважины."
+        )
+    if input_contract == "no_population_reference":
+        return (
+            "Контракт входа: скважина не оценивалась, потому что локальный "
+            "reference короткий, а population memory bank недоступен."
+        )
     if input_contract == "no_local_reference":
         return (
             "Контракт входа: скважина без разметки не оценивалась локальным reference. "
@@ -212,7 +243,15 @@ def _input_contract_text(input_contract: str) -> str:
 
 def _input_contract_badge(scores_df: pd.DataFrame | None) -> str:
     input_contract = _input_contract(scores_df)
-    css_class = "warn" if input_contract in {"edge_hold_padded", "no_local_reference"} else "info"
+    warn_contracts = {
+        "edge_hold_padded",
+        "padded_long_local_memory",
+        "padded_long_population_memory",
+        "real_long_population_memory",
+        "no_local_reference",
+        "no_population_reference",
+    }
+    css_class = "warn" if input_contract in warn_contracts else "info"
     return f'<p class="contract-note {css_class}">{escape(_input_contract_text(input_contract))}</p>'
 
 

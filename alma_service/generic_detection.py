@@ -79,7 +79,11 @@ STATUS_COLUMNS = [
     "is_pre_anomaly_zone",
     "is_labelled_anomaly",
 ]
-INVALID_SCORE_REASONS = {"not_enough_points", "unlabeled_no_reference"}
+INVALID_SCORE_REASONS = {
+    "not_enough_points",
+    "unlabeled_no_reference",
+    "population_reference_unavailable",
+}
 
 
 def _incident_merge_window_hours(cfg: dict[str, Any]) -> float:
@@ -482,6 +486,7 @@ def _build_global_runs(
     verbose: bool,
     shared_state: Any,
     intervals: pd.DataFrame | None = None,
+    population_pool: dict[str, Any] | None = None,
 ) -> dict[str, PreparedDetectorRun]:
     if shared_state is None:
         raise ValueError("paano_global requires a trained or loaded global encoder state.")
@@ -501,6 +506,7 @@ def _build_global_runs(
         device,
         verbose=verbose,
         labelled_wells=labelled_wells,
+        population_pool=population_pool,
     )
 
 
@@ -1669,6 +1675,7 @@ def run_detection(
             verbose=verbose,
             shared_state=shared_state,
             intervals=intervals,
+            population_pool=runtime.population_pool,
         )
     else:
         df = load_anomaly_data(spec, source_path=source_path)

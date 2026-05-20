@@ -5,9 +5,13 @@ import unittest
 
 from alma_service.generic_detectors import (
     DetectorScoreOutput,
+    PAANO_INPUT_PADDING_EDGE_HOLD,
+    PAANO_INPUT_PADDING_ENV,
+    PAANO_INPUT_PADDING_NONE,
     _edge_hold_pad_prefix,
     _ensure_2d_float32,
     _input_contract_from_padding,
+    _paano_input_padding_mode,
     _trim_prefix_padding,
 )
 
@@ -65,6 +69,20 @@ class GenericDetectorTests(unittest.TestCase):
             }),
             "edge_hold_padded",
         )
+
+    def test_explicit_input_padding_mode_does_not_depend_on_environment(self) -> None:
+        import os
+
+        old_value = os.environ.get(PAANO_INPUT_PADDING_ENV)
+        try:
+            os.environ[PAANO_INPUT_PADDING_ENV] = PAANO_INPUT_PADDING_NONE
+
+            self.assertEqual(_paano_input_padding_mode(PAANO_INPUT_PADDING_EDGE_HOLD), PAANO_INPUT_PADDING_EDGE_HOLD)
+        finally:
+            if old_value is None:
+                os.environ.pop(PAANO_INPUT_PADDING_ENV, None)
+            else:
+                os.environ[PAANO_INPUT_PADDING_ENV] = old_value
 
 
 if __name__ == "__main__":

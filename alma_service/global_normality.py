@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import json
 import math
+import os
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +23,13 @@ from alma_service.feature_schema import (
     load_feature_schema,
     restrict_prepared_mapping_to_schema,
 )
-from alma_service.generic_detectors import DetectorScoreOutput, SharedPaAnoDetector
+from alma_service.generic_detectors import (
+    DetectorScoreOutput,
+    PAANO_INPUT_PADDING_EDGE_HOLD,
+    PAANO_INPUT_PADDING_ENV,
+    PAANO_INPUT_PADDING_MODES,
+    SharedPaAnoDetector,
+)
 from alma_service.paano_defaults import PATCH_SIZES
 from alma_service.shared_encoder import (
     collect_shared_train_pool,
@@ -44,6 +51,13 @@ DEFAULT_NORM_WORK_PROFILE = "pritok"
 DEFAULT_BALANCE_ROWS_PER_SOURCE = 48_000
 DEFAULT_BALANCE_ROWS_PER_WELL = 8_000
 DEFAULT_BALANCE_SOURCE_POLICY = "equal_min"
+GLOBAL_MEMORY_BANK_MODE_ENV = "ALMA_GLOBAL_MEMORY_BANK_MODE"
+GLOBAL_MEMORY_BANK_LOCAL = "local"
+GLOBAL_MEMORY_BANK_POPULATION_FALLBACK = "population_fallback"
+GLOBAL_MEMORY_BANK_MODES = {
+    GLOBAL_MEMORY_BANK_LOCAL,
+    GLOBAL_MEMORY_BANK_POPULATION_FALLBACK,
+}
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,7 @@ class GlobalNormalityRuntime:
     prepared_runs: dict[str, Any]
     intervals: pd.DataFrame
     shared_state: Any
+    population_pool: dict[str, Any]
     detail: dict[str, Any]
 
 
@@ -208,6 +223,7 @@ def prepare_global_normality_runtime(
         prepared_runs=prepared_by_class[anomaly_key],
         intervals=intervals_by_class[anomaly_key],
         shared_state=shared_state,
+        population_pool=global_pool,
         detail=detail,
     )
 
@@ -219,55 +235,120 @@ def build_global_core_runs(
     *,
     verbose: bool,
     labelled_wells: set[str] | None = None,
+    population_pool: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from alma_service.generic_detection import PreparedDetectorRun
 
     detector_runs: dict[str, Any] = {}
+    memory_bank_mode = _global_memory_bank_mode()
+    input_padding_mode = _global_paano_input_padding_mode()
     for well_id, prepared in prepared_runs.items():
         normalized_well_id = _normalize_well_id(well_id)
-        if labelled_wells is not None and normalized_well_id not in labelled_wells:
-            if verbose:
-                print(
-                    f"    Skip local reference for blind well {well_id}: "
-                    "no labelled normal interval"
-                )
-            zeros = np.zeros(len(prepared.timestamps), dtype=np.float32)
-            score_output = DetectorScoreOutput(
-                primary=zeros,
-                components={
-                    "score": zeros.copy(),
-                    "paano_score": zeros.copy(),
-                    "global_paano_score": zeros.copy(),
-                },
-                detail={
-                    "reason": "unlabeled_no_reference",
-                    "input_contract": "no_local_reference",
-                    "global_normality_detector": True,
-                    "class_fine_tune": False,
-                    "physical_branches": False,
-                    "blind_unlabeled": True,
-                    "local_reference_used": False,
-                },
-            )
-            detector_runs[well_id] = PreparedDetectorRun(
-                prepared=prepared,
-                score_output=score_output,
-            )
-            continue
-
         x_projected = select_shared_columns(
             prepared.feature_columns,
             prepared.feature_matrix,
             shared_state.shared_channels,
         )
+        local_ref = x_projected[np.asarray(prepared.reference_mask, dtype=bool)]
+        is_labelled = labelled_wells is None or normalized_well_id in labelled_wells
+        use_population = (
+            memory_bank_mode == GLOBAL_MEMORY_BANK_POPULATION_FALLBACK
+            and ((not is_labelled) or len(local_ref) < shared_state.patch_long * 2)
+        )
+
+        population_ref: np.ndarray | None = None
+        if use_population and population_pool:
+            population_ref = _population_reference_matrix(
+                population_pool,
+                shared_state.shared_channels,
+                exclude_well_id=normalized_well_id,
+            )
+
+        if labelled_wells is not None and normalized_well_id not in labelled_wells:
+            if population_ref is not None and len(population_ref) > 0:
+                if verbose:
+                    print(
+                        f"    Use population memory bank for blind well {well_id}: "
+                        f"population_ref={len(population_ref)}"
+                    )
+            else:
+                detector_runs[well_id] = PreparedDetectorRun(
+                    prepared=prepared,
+                    score_output=_unavailable_global_output(
+                        prepared=prepared,
+                        reason="unlabeled_no_reference",
+                        input_contract="no_local_reference",
+                        detail={
+                            "blind_unlabeled": True,
+                            "local_reference_used": False,
+                            "population_memory_used": False,
+                            "memory_bank_source": "none",
+                            "memory_bank_mode": memory_bank_mode,
+                            "local_reference_points": int(len(local_ref)),
+                            "population_reference_points": 0,
+                        },
+                    ),
+                )
+                if verbose:
+                    print(
+                        f"    Skip scoring blind well {well_id}: "
+                        "no labelled normal interval and no population memory bank"
+                    )
+                continue
+
+        if use_population:
+            if population_ref is None or len(population_ref) == 0:
+                detector_runs[well_id] = PreparedDetectorRun(
+                    prepared=prepared,
+                    score_output=_unavailable_global_output(
+                        prepared=prepared,
+                        reason="population_reference_unavailable",
+                        input_contract="no_population_reference",
+                        detail={
+                            "blind_unlabeled": not is_labelled,
+                            "local_reference_used": False,
+                            "population_memory_used": False,
+                            "memory_bank_source": "none",
+                            "memory_bank_mode": memory_bank_mode,
+                            "local_reference_points": int(len(local_ref)),
+                            "population_reference_points": 0,
+                        },
+                    ),
+                )
+                if verbose:
+                    print(
+                        f"    Skip scoring {well_id}: local_ref={len(local_ref)}, "
+                        "population memory bank unavailable"
+                    )
+                continue
+            reference = population_ref
+            memory_bank_source = "population"
+        else:
+            reference = local_ref
+            memory_bank_source = "local_reference"
+
+        if labelled_wells is not None and normalized_well_id not in labelled_wells:
+            if verbose:
+                print(
+                    f"    Score blind well {well_id} with population memory bank "
+                    f"({len(reference)} reference points)"
+                )
+        elif use_population and verbose:
+            print(
+                f"    Use population memory bank for {well_id}: "
+                f"local_ref={len(local_ref)}, population_ref={len(reference)}"
+            )
+
         detector = SharedPaAnoDetector(
             shared_state=shared_state,
             device=device,
             verbose=verbose,
+            input_padding_mode=input_padding_mode,
         )
-        detector.fit_reference(x_projected[prepared.reference_mask])
+        detector.fit_reference(reference)
         raw_output = detector.score_stream(x_projected, mask_all=prepared.stability_mask)
         primary = np.asarray(raw_output.primary, dtype=np.float32)
+        raw_contract = str(raw_output.detail.get("input_contract", "real_window"))
         score_output = DetectorScoreOutput(
             primary=primary,
             components={
@@ -279,8 +360,15 @@ def build_global_core_runs(
                 "global_normality_detector": True,
                 "class_fine_tune": False,
                 "physical_branches": False,
-                "blind_unlabeled": False,
-                "local_reference_used": True,
+                "blind_unlabeled": not is_labelled,
+                "local_reference_used": memory_bank_source == "local_reference",
+                "population_memory_used": memory_bank_source == "population",
+                "memory_bank_source": memory_bank_source,
+                "memory_bank_mode": memory_bank_mode,
+                "local_reference_points": int(len(local_ref)),
+                "population_reference_points": int(len(reference)) if memory_bank_source == "population" else 0,
+                "window_input_contract": raw_contract,
+                "input_contract": _compose_input_contract(raw_contract, memory_bank_source),
             },
         )
         detector_runs[well_id] = PreparedDetectorRun(
@@ -288,6 +376,81 @@ def build_global_core_runs(
             score_output=score_output,
         )
     return detector_runs
+
+
+def _unavailable_global_output(
+    *,
+    prepared: Any,
+    reason: str,
+    input_contract: str,
+    detail: dict[str, Any],
+) -> DetectorScoreOutput:
+    zeros = np.zeros(len(prepared.timestamps), dtype=np.float32)
+    return DetectorScoreOutput(
+        primary=zeros,
+        components={
+            "score": zeros.copy(),
+            "paano_score": zeros.copy(),
+            "global_paano_score": zeros.copy(),
+        },
+        detail={
+            "reason": reason,
+            "input_contract": input_contract,
+            "global_normality_detector": True,
+            "class_fine_tune": False,
+            "physical_branches": False,
+            **detail,
+        },
+    )
+
+
+def _population_reference_matrix(
+    population_pool: dict[str, Any],
+    shared_channels: list[str],
+    *,
+    exclude_well_id: str,
+) -> np.ndarray | None:
+    parts: list[np.ndarray] = []
+    for pool_key, prepared in sorted(population_pool.items()):
+        if _normalize_well_id(getattr(prepared, "well_id", "")) == exclude_well_id:
+            continue
+        projected = select_shared_columns(
+            prepared.feature_columns,
+            prepared.feature_matrix,
+            shared_channels,
+        )
+        ref = projected[np.asarray(prepared.reference_mask, dtype=bool)]
+        if len(ref) > 0:
+            parts.append(ref.astype(np.float32))
+    if not parts:
+        return None
+    return np.concatenate(parts, axis=0).astype(np.float32)
+
+
+def _compose_input_contract(window_contract: str, memory_bank_source: str) -> str:
+    prefix = "padded_long" if window_contract == "edge_hold_padded" else "real_long"
+    suffix = "population_memory" if memory_bank_source == "population" else "local_memory"
+    return f"{prefix}_{suffix}"
+
+
+def _global_memory_bank_mode() -> str:
+    mode = os.getenv(GLOBAL_MEMORY_BANK_MODE_ENV, GLOBAL_MEMORY_BANK_LOCAL).strip().lower()
+    if mode not in GLOBAL_MEMORY_BANK_MODES:
+        raise ValueError(
+            f"Unsupported {GLOBAL_MEMORY_BANK_MODE_ENV}={mode!r}. "
+            f"Expected one of: {', '.join(sorted(GLOBAL_MEMORY_BANK_MODES))}."
+        )
+    return mode
+
+
+def _global_paano_input_padding_mode() -> str:
+    mode = os.getenv(PAANO_INPUT_PADDING_ENV, PAANO_INPUT_PADDING_EDGE_HOLD).strip().lower()
+    if mode not in PAANO_INPUT_PADDING_MODES:
+        raise ValueError(
+            f"Unsupported {PAANO_INPUT_PADDING_ENV}={mode!r}. "
+            f"Expected one of: {', '.join(sorted(PAANO_INPUT_PADDING_MODES))}."
+        )
+    return mode
 
 
 def _normalize_well_id(value: Any) -> str:

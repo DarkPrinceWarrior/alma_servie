@@ -74,8 +74,8 @@ def _ensure_2d_float32(values: np.ndarray) -> np.ndarray:
     return np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def _paano_input_padding_mode() -> str:
-    mode = os.getenv(PAANO_INPUT_PADDING_ENV, PAANO_INPUT_PADDING_NONE).strip().lower()
+def _paano_input_padding_mode(mode: str | None = None) -> str:
+    mode = (os.getenv(PAANO_INPUT_PADDING_ENV, PAANO_INPUT_PADDING_NONE) if mode is None else mode).strip().lower()
     if mode not in PAANO_INPUT_PADDING_MODES:
         raise ValueError(
             f"Unsupported {PAANO_INPUT_PADDING_ENV}={mode!r}. "
@@ -132,6 +132,7 @@ class SharedPaAnoDetector:
         device: torch.device,
         fusion_weight_short: float = 0.60,
         verbose: bool = False,
+        input_padding_mode: str | None = None,
     ) -> None:
         from alma_service.shared_encoder import SharedEncoderState
 
@@ -141,6 +142,7 @@ class SharedPaAnoDetector:
         self.device = device
         self.fusion_weight_short = float(fusion_weight_short)
         self.verbose = verbose
+        self.input_padding_mode = _paano_input_padding_mode(input_padding_mode) if input_padding_mode is not None else None
         self.train_ref_: np.ndarray | None = None
 
     def fit_reference(self, X_ref: np.ndarray, mask_ref: np.ndarray | None = None) -> "SharedPaAnoDetector":
@@ -154,7 +156,7 @@ class SharedPaAnoDetector:
             raise RuntimeError("Detector is not fitted.")
         X = _ensure_2d_float32(X_all)
         st = self.shared_state
-        padding_mode = _paano_input_padding_mode()
+        padding_mode = _paano_input_padding_mode(self.input_padding_mode)
 
         if len(self.train_ref_) < st.patch_long * 2 or len(X) < st.patch_long * 2:
             if padding_mode != PAANO_INPUT_PADDING_EDGE_HOLD or len(self.train_ref_) == 0 or len(X) == 0:

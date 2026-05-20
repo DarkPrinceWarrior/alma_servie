@@ -2696,8 +2696,8 @@ production-поведения.
 В код добавлен input-contract:
 
 ```text
-ALMA_PAANO_INPUT_PADDING=none       # поведение по умолчанию: короткие ряды -> Not assessed
-ALMA_PAANO_INPUT_PADDING=edge_hold  # эксперимент: дополнить начало ряда первым валидным значением
+ALMA_PAANO_INPUT_PADDING=none       # отрицательный контроль: короткие ряды -> Not assessed
+ALMA_PAANO_INPUT_PADDING=edge_hold  # safe default для paano_global: дополнить начало ряда первым валидным значением
 ```
 
 Математически это не cascade scale: модель остается той же
@@ -2760,9 +2760,9 @@ positive на чистом/слепом ряду.
   коротком `negermet`;
 - метрики на размеченных интервалах стали сильными: `5/5`, задержки минуты,
   FAR/day по размеченной оценке `0.0`;
-- включать `edge_hold` по умолчанию рано: сначала нужно визуально и доменно
-  разобрать `ю-я 39-651`, а также проверить padded-контракт отдельно от
-  обычного real-window-контракта;
+- на этом шаге включать `edge_hold` по умолчанию было рано: сначала нужно было
+  визуально и доменно разобрать `ю-я 39-651`, а также проверить
+  padded-контракт отдельно от обычного real-window-контракта;
 - следующий технический шаг: записывать в отчеты/score detail, что конкретная
   скважина оценена по `edge_hold_padded` контракту, и затем сравнить padded vs
   non-padded на чистом пуле.
@@ -3014,3 +3014,46 @@ research only:
 production default**. Его нельзя включать автоматически. Безопасный путь -
 оставить `local` default, а population держать как диагностический режим для
 следующих controlled experiments.
+
+### Прогресс реализации 2026-05-20: safe default input contract для `paano_global`
+
+Пункт 1 следующего этапа выполнен кодово: безопасный контракт для
+`paano_global` теперь задается в коде, а не держится только в shell-командах.
+
+Новый default для `paano_global`:
+
+```text
+memory bank = local
+input padding = edge_hold
+```
+
+Что важно:
+
+- изменение относится к `paano_global`, а не к обычному `paano_shared`;
+- `paano_shared` по-прежнему не получает `edge_hold` автоматически;
+- `ALMA_GLOBAL_MEMORY_BANK_MODE=local` остается default, потому что
+  `population_fallback` отдельной калибровкой не доказан;
+- `ALMA_PAANO_INPUT_PADDING=edge_hold` стал default именно для global pipeline;
+- `ALMA_PAANO_INPUT_PADDING=none` сохранен как явный отрицательный контроль,
+  чтобы воспроизводить `Not assessed`-поведение коротких рядов;
+- `ALMA_GLOBAL_MEMORY_BANK_MODE=population_fallback` сохранен только как
+  research/diagnostic opt-in.
+
+Зачем это сделано: предыдущий сильный benchmark `global PaAno + edge_hold +
+local memory + domain_decision_layer` зависел от того, что оператор руками
+выставил env-переменные. Теперь критический input contract закреплен в коде,
+поэтому обычный запуск `paano_global` не откатится случайно в режим
+`input_padding=none`, где короткие `negermet`-ряды становятся `Not assessed`.
+
+Итоговый смысл:
+
+```text
+обычный global benchmark:
+    edge_hold + local memory
+
+negative control:
+    ALMA_PAANO_INPUT_PADDING=none
+
+population research:
+    ALMA_GLOBAL_MEMORY_BANK_MODE=population_fallback
+```
