@@ -4,6 +4,7 @@ import argparse
 from contextlib import contextmanager
 import json
 import math
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -48,7 +49,13 @@ from alma_service.generic_detection import (
     load_anomaly_data,
     load_intervals,
 )
-from alma_service.generic_detectors import DetectorScoreOutput, SharedPaAnoDetector
+from alma_service.generic_detectors import (
+    DetectorScoreOutput,
+    PAANO_INPUT_PADDING_EDGE_HOLD,
+    PAANO_INPUT_PADDING_ENV,
+    PAANO_INPUT_PADDING_MODES,
+    SharedPaAnoDetector,
+)
 from alma_service.paano_defaults import PATCH_SIZES
 from alma_service.prediction_postprocess import build_incidents, filter_actionable_starts
 from alma_service.shared_encoder import (
@@ -291,6 +298,16 @@ def _compact_metrics(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _global_paano_input_padding_mode() -> str:
+    mode = os.getenv(PAANO_INPUT_PADDING_ENV, PAANO_INPUT_PADDING_EDGE_HOLD).strip().lower()
+    if mode not in PAANO_INPUT_PADDING_MODES:
+        raise ValueError(
+            f"Unsupported {PAANO_INPUT_PADDING_ENV}={mode!r}. "
+            f"Expected one of: {', '.join(sorted(PAANO_INPUT_PADDING_MODES))}."
+        )
+    return mode
+
+
 def _load_saved_baseline(anomaly_key: str) -> dict[str, Any]:
     path = summary_path(get_detection_spec(anomaly_key), "paano_shared")
     if not path.exists():
@@ -502,6 +519,7 @@ def _build_global_core_runs(
     verbose: bool,
 ) -> dict[str, PreparedDetectorRun]:
     detector_runs: dict[str, PreparedDetectorRun] = {}
+    input_padding_mode = _global_paano_input_padding_mode()
     for well_id, prepared in prepared_runs.items():
         X = select_shared_columns(
             prepared.feature_columns,
@@ -512,6 +530,7 @@ def _build_global_core_runs(
             shared_state=shared_state,
             device=device,
             verbose=verbose,
+            input_padding_mode=input_padding_mode,
         )
         detector.fit_reference(X[prepared.reference_mask])
         raw_output = detector.score_stream(X, mask_all=prepared.stability_mask)

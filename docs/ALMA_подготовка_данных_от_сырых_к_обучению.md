@@ -3057,3 +3057,75 @@ negative control:
 population research:
     ALMA_GLOBAL_MEMORY_BANK_MODE=population_fallback
 ```
+
+### Прогресс реализации 2026-05-20: полный benchmark safe default
+
+Пункт 2 выполнен: `paano_global` прогнан полным benchmark на размеченных
+`negermet`, `pritok`, `salt` и `norm_work` как части normal pool. `Salym` и
+`test35` не использовались.
+
+Важная техническая находка: первый запуск benchmark оказался невалидным,
+потому что `scripts/evaluation/benchmark_global_normality_detector.py` содержал
+собственную старую сборку `SharedPaAnoDetector` и обходил safe default из
+`alma_service/global_normality.py`. Из-за этого `negermet` снова получал
+`input_padding=none` и падал до `1/5`. Wrapper исправлен: теперь benchmark
+использует тот же default `edge_hold`, а `ALMA_PAANO_INPUT_PADDING=none`
+остается явным negative-control override.
+
+Валидный запуск:
+
+```bash
+env -u ALMA_PAANO_INPUT_PADDING \
+    -u ALMA_GLOBAL_MEMORY_BANK_MODE \
+    CUDA_VISIBLE_DEVICES=1 \
+    ALMA_RETUNE_MODE=fast \
+    ALMA_OPTUNA_N_JOBS=16 \
+    OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    OPENBLAS_NUM_THREADS=1 \
+    NUMEXPR_NUM_THREADS=1 \
+    uv run python scripts/evaluation/benchmark_global_normality_detector.py \
+      --output-dir artifacts/results/global_normality_detector/5min_safe_default_20260520_r2 \
+      --patch-short 192 \
+      --patch-long 384 \
+      --common-source-freq 5min \
+      --include-norm-work \
+      --global-iters 200
+```
+
+Результат `global_normality`:
+
+| Аномалия | Интервалы | Hit-rate | FAR/day | Starts | Median delay | P90 delay | Вывод |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `negermet` | `5` | `5/5 = 1.000` | `0.000` | `5` | `0.05h` | `0.72h` | короткие ряды закрыты через `edge_hold` |
+| `pritok` | `24` | `24/24 = 1.000` | `0.000` | `55` | `1.60h` | `5.33h` | воспроизводит сильный результат |
+| `salt` | `8` | `8/8 = 1.000` | `0.000` | `14` | `1.00h` | `12.07h` | заметно лучше saved class-specific по задержке |
+
+Сравнение с сохраненным class-specific baseline из этого же benchmark:
+
+| Аномалия | Class-specific | Global safe default | Практический вывод |
+|---|---:|---:|---|
+| `negermet` | `4/5`, starts `4` | `5/5`, starts `5` | global лучше по coverage/hit-rate |
+| `pritok` | `24/24`, starts `53` | `24/24`, starts `55` | качество сопоставимо, p90 delay лучше у global |
+| `salt` | `8/8`, starts `22` | `8/8`, starts `14` | global чище и раньше по p90 delay |
+
+Domain guard по starts:
+
+```text
+negermet:
+  accept=5, uncertain=1
+  blind ю-я 39-651 остается uncertain, не уверенная детекция
+
+pritok:
+  accept=3, uncertain=35, reject=26
+  hard-negative нормальные случаи не auto-accept
+
+salt:
+  accept=14, uncertain=7, reject=1
+  frequency-transition guard работает
+```
+
+Вывод: code default `edge_hold + local memory` доказан полным benchmark без
+ручного `ALMA_PAANO_INPUT_PADDING=edge_hold`. `paano_global` можно переводить в
+статус production-candidate рядом с `paano_shared`, но пока не делать
+автоматическим default без отдельного решения.
