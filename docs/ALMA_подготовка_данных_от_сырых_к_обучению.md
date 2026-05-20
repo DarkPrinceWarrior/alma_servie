@@ -1980,42 +1980,104 @@ score_valid = False -> score нельзя использовать для дет
 Если `score_valid=False`, результат должен быть не `Not found`, а отдельный
 статус `Not assessed` / `Не оценено`.
 
-### Профессиональное решение
+### Корректировка решения после экспертной проверки 2026-05-20
 
-Правильная схема не в том, чтобы "разрешить PaAno детектить по нулю" и не в
-том, чтобы просто уменьшить patch size для всех. Нужен coverage-aware cascade.
+Первичная идея `long -> medium -> short` признана рискованной как основной путь.
+Причина: разные `patch_size` меняют физический масштаб анализа, частотную
+характеристику encoder и распределение anomaly score. Это создает риск
+`score shattering`: одна и та же нормальная динамика может выглядеть по-разному
+на `long` и `short` окнах.
 
-Целевая архитектура:
+Особенно опасный сценарий:
 
 ```text
-global encoder
-  -> largest valid scale
-  -> calibrated score
+ряд физически стабилен
+-> локальной истории не хватает для long window
+-> система переключается на short window
+-> short encoder видит только локальный кусок суточной/режимной динамики
+-> score скачет из-за смены масштаба, а не из-за изменения состояния скважины
+```
+
+Поэтому каскад разных scale не является первым production-планом. Он остается
+только резервным research-вариантом для быстрых `negermet`-событий, если более
+консервативный invariant-scale подход не сработает.
+
+Новый основной принцип:
+
+```text
+сначала сохранить один физический масштаб анализа,
+потом честно обработать короткую историю,
+и только потом думать о short-scale fallback.
+```
+
+Целевая архитектура первого этапа:
+
+```text
+global_long encoder
+  -> local reference если достаточно истории
+  -> иначе edge/hold padded long-window contract
+  -> population memory bank если локальный memory bank слабый
+  -> calibrated score под конкретный input contract
   -> onset logic
   -> domain decision layer / explanation
 ```
 
-Масштабы:
+То есть основной путь теперь не `multi-scale cascade`, а `invariant-scale
+global_long` с аккуратным fallback по reference/memory bank.
 
-- `global_long`: длинные окна, например `192/384` на `5min`; хорошо подходит
-  для `salt` и `pritok`, где есть длинная история.
-- `global_medium`: средние окна, например `52/104` или близкий масштаб после
-  проверки; нужен для рядов, где `192/384` уже слишком длинно.
-- `global_short`: короткие окна для быстрых событий, прежде всего `negermet`;
-  конкретные значения нужно подобрать на train-only benchmark, а не вручную под
-  одну скважину.
+### Почему не reflective padding
 
-Правило выбора:
+`Reflective padding` выглядит математически аккуратно, но физически опасен для
+нефтяной телеметрии.
+
+Пример риска:
 
 ```text
-1. Берем самый длинный масштаб, который валиден по длине ряда и reference.
-2. Если long невалиден, пробуем medium.
-3. Если medium невалиден, пробуем short.
-4. Если short тоже невалиден, ставим "Не оценено", а не "аномалии нет".
+в начале доступного ряда давление снижалось
+reflective padding дорисовывает в прошлом рост давления
+получается искусственный V-образный разворот тренда
+PaAno может воспринять этот излом как abnormal local pattern
 ```
 
-Это сохраняет главное преимущество длинных окон там, где они допустимы, и не
-ломает короткие негерметы.
+Для наших рядов это особенно плохо, потому что телеметрия часто event-like:
+значение держится до изменения, а не является гладким лабораторным сигналом.
+
+Более безопасный первый вариант: `Edge/Hold Padding`, то есть ZOH-экстраполяция
+первого валидного значения назад во времени.
+
+Физический смысл:
+
+```text
+до начала наблюдений скважина находилась в стабильном установившемся режиме
+```
+
+Это не доказывает, что padding всегда будет корректен, но это более
+консервативный prior, чем зеркальное рисование обратного тренда.
+
+### Почему не attention masking и не global pooling сейчас
+
+`Temporal Attention Masking` и `Global Temporal Pooling` теоретически подходят
+для variable-length time series, но для текущего PaAno это уже изменение
+архитектуры.
+
+Текущая реализация PaAno в ALMA:
+
+```text
+CNN/patch encoder -> patch embeddings -> local/population memory bank -> distance score
+```
+
+Поэтому:
+
+- attention masking не добавляется напрямую, потому что текущий encoder не
+  Transformer с attention mask;
+- masked convolution потребует отдельной архитектурной разработки;
+- adaptive/global pooling изменит embedding contract и может сломать
+  сопоставимость с уже обученным memory bank;
+- это не короткий фикс, а отдельный research-проект.
+
+Решение: не раздувать архитектуру на этом этапе. Сначала проверить более
+локальные изменения: честный статус, edge/hold padding, population memory bank,
+раздельная калибровка.
 
 ### Что делать с memory bank
 
@@ -2025,7 +2087,15 @@ global encoder
 - memory bank / reference for scoring: источник нормальных patch-окон, с
   которым сравнивается конкретная скважина.
 
-Приоритет reference:
+Подтвержденный факт: в текущем `paano_global` encoder уже глобальный, но memory
+bank при scoring остается локальным, потому что строится из
+`prepared.reference_mask` конкретной скважины.
+
+Это хорошо для длинных рядов: локальный memory bank учитывает индивидуальный
+режим скважины. Но для коротких `negermet`-рядов это слабое место: reference
+может быть слишком коротким, вырожденным или вообще непригодным для long patch.
+
+Приоритет reference/memory bank:
 
 1. Локальный reference конкретной скважины, если он достаточно длинный и
    качественный.
@@ -2034,20 +2104,47 @@ global encoder
 3. `Не оценено`, если не хватает данных даже для короткого масштаба или слишком
    слабое покрытие каналов.
 
-Для production это значит: global model должен уметь работать не только как
-`shared encoder + local reference`, но и как `shared encoder + population normal
-memory bank`.
+Для production это значит: global model должен уметь работать в двух режимах:
+
+```text
+shared encoder + local memory bank
+shared encoder + population normal memory bank
+```
+
+Population memory bank не должен заменять локальный режим всегда. Он нужен как
+fallback для коротких рядов и cold-start случаев.
 
 ### Калибровка score
 
-Нельзя сравнивать raw distance разных scales напрямую. У `long`, `medium` и
-`short` будут разные распределения score.
+Калибровка нужна не только для разных `patch_size`. Даже при одном `global_long`
+scale разные способы подачи входа дают разные распределения score:
 
-Поэтому каждый scale должен отдавать calibrated score:
+- реальные long windows;
+- edge/hold padded long windows;
+- local memory bank;
+- population memory bank.
 
-- tail score / p-value / conformal-like score;
-- калибровка на нормальном reference или global normal pool;
-- единая шкала для onset tuning.
+Поэтому нельзя смешивать все raw distance в одну таблицу порогов.
+
+Минимальные input contracts для калибровки:
+
+```text
+real_long_local_memory
+padded_long_local_memory
+real_long_population_memory
+padded_long_population_memory
+```
+
+На первом этапе можно начать проще:
+
+```text
+real_long_windows
+padded_long_windows
+```
+
+Но в любом случае score должен быть интерпретируемым как tail score /
+p-value-like score внутри своего контракта, а не как сырое расстояние в
+embedding space.
 
 Это совпадает с современной практикой anomaly detection: score должен быть
 интерпретируемым и калиброванным, особенно при переносе между рядами и
@@ -2084,27 +2181,33 @@ step и реакцию токов, а не заменять PaAno score без �
 2. В onset/evaluation добавить coverage-aware метрики:
    `assessed_interval_count`, `not_assessed_interval_count`,
    `coverage_rate`, `hit_rate_on_assessed`.
-3. Реализовать cascade `long -> medium -> short`.
-4. Добавить population/global memory bank fallback для короткого локального
+3. Зафиксировать отказ от cascade scale как первого решения.
+4. Реализовать и проверить `global_long + edge/hold padding` на коротких
+   `negermet`-рядах.
+5. Добавить population/global memory bank fallback для короткого локального
    reference.
-5. Калибровать score каждого scale в tail/conformal-like шкалу.
-6. Прогнать benchmark только на размеченных `negermet`, `pritok`, `salt` и
+6. Разделить калибровку минимум на `real_long_windows` и
+   `padded_long_windows`.
+7. Прогнать benchmark только на размеченных `negermet`, `pritok`, `salt` и
    `norm_work`; `Salym` и `test35` в этот этап не входят.
-7. Не делать `paano_global` default, пока cascade не пройдет сравнение с текущим
-   `paano_shared` по coverage-aware метрикам.
+8. Рассматривать `global_short` только как резервный validated fallback для
+   быстрых `negermet`, если invariant-scale подход не закроет короткие ряды.
+9. Не делать `paano_global` default, пока новый подход не пройдет сравнение с
+   текущим `paano_shared` по coverage-aware метрикам.
 
 Критерий готовности:
 
 ```text
-global cascade считается production-кандидатом только если:
+global invariant-scale подход считается production-кандидатом только если:
 - нет silent zero-score;
 - все invalid случаи явно видны как "Не оценено";
 - coverage достаточно высокий;
 - FAR/day не хуже текущего baseline;
 - hit-rate на assessed intervals не хуже baseline;
 - задержки по salt/pritok не деградируют;
-- negermet короткие ряды либо оцениваются short-scale fallback, либо честно
-  помечаются как "Не оценено".
+- negermet короткие ряды либо оцениваются через hold padding/population memory,
+  либо честно помечаются как "Не оценено";
+- padded-window контракты калиброваны отдельно от real-window контрактов.
 ```
 
 ### Итоговое решение
@@ -2114,8 +2217,11 @@ global cascade считается production-кандидатом только �
 ```text
 не скрывать невозможность оценки,
 не считать нулевой score нормой,
-не подгонять один patch size под все,
-а сделать multi-scale, calibrated, coverage-aware global PaAno cascade.
+не переключать scale без необходимости,
+сохранить global_long как основной физический масштаб,
+для короткой истории проверить edge/hold padding,
+для короткого reference добавить population memory bank,
+калибровать padded и real контракты отдельно.
 ```
 
 Это сохраняет сильную сторону global model и одновременно убирает главный риск:
