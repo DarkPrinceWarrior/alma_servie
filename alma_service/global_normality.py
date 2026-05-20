@@ -218,11 +218,43 @@ def build_global_core_runs(
     device: torch.device,
     *,
     verbose: bool,
+    labelled_wells: set[str] | None = None,
 ) -> dict[str, Any]:
     from alma_service.generic_detection import PreparedDetectorRun
 
     detector_runs: dict[str, Any] = {}
     for well_id, prepared in prepared_runs.items():
+        normalized_well_id = _normalize_well_id(well_id)
+        if labelled_wells is not None and normalized_well_id not in labelled_wells:
+            if verbose:
+                print(
+                    f"    Skip local reference for blind well {well_id}: "
+                    "no labelled normal interval"
+                )
+            zeros = np.zeros(len(prepared.timestamps), dtype=np.float32)
+            score_output = DetectorScoreOutput(
+                primary=zeros,
+                components={
+                    "score": zeros.copy(),
+                    "paano_score": zeros.copy(),
+                    "global_paano_score": zeros.copy(),
+                },
+                detail={
+                    "reason": "unlabeled_no_reference",
+                    "input_contract": "no_local_reference",
+                    "global_normality_detector": True,
+                    "class_fine_tune": False,
+                    "physical_branches": False,
+                    "blind_unlabeled": True,
+                    "local_reference_used": False,
+                },
+            )
+            detector_runs[well_id] = PreparedDetectorRun(
+                prepared=prepared,
+                score_output=score_output,
+            )
+            continue
+
         x_projected = select_shared_columns(
             prepared.feature_columns,
             prepared.feature_matrix,
@@ -247,6 +279,8 @@ def build_global_core_runs(
                 "global_normality_detector": True,
                 "class_fine_tune": False,
                 "physical_branches": False,
+                "blind_unlabeled": False,
+                "local_reference_used": True,
             },
         )
         detector_runs[well_id] = PreparedDetectorRun(
@@ -254,6 +288,10 @@ def build_global_core_runs(
             score_output=score_output,
         )
     return detector_runs
+
+
+def _normalize_well_id(value: Any) -> str:
+    return str(value).strip().lower()
 
 
 def _freq_label(freq: str) -> str:

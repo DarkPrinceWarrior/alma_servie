@@ -175,6 +175,12 @@ def _score_unavailable_text(reason: str | None) -> str:
             "Отклонение от нормы не рассчитано: недостаточно точек в ряду или reference "
             "для выбранного окна PaAno. Нулевой score здесь не означает норму."
         )
+    if reason == "unlabeled_no_reference":
+        return (
+            "Отклонение от нормы не рассчитано: у скважины нет размеченного интервала, "
+            "поэтому начало её собственного ряда не используется как эталон нормы. "
+            "Нулевой score здесь не означает норму."
+        )
     return "Отклонение от нормы не рассчитано. Нулевой score здесь не означает норму."
 
 
@@ -189,6 +195,12 @@ def _input_contract(scores_df: pd.DataFrame | None) -> str:
 
 
 def _input_contract_text(input_contract: str) -> str:
+    if input_contract == "no_local_reference":
+        return (
+            "Контракт входа: скважина без разметки не оценивалась локальным reference. "
+            "Для blind-инференса нужен population memory bank или внешний подтвержденный "
+            "эталон нормы."
+        )
     if input_contract == "edge_hold_padded":
         return (
             "Контракт входа: ряд/эталон были дополнены методом edge-hold "
@@ -200,7 +212,7 @@ def _input_contract_text(input_contract: str) -> str:
 
 def _input_contract_badge(scores_df: pd.DataFrame | None) -> str:
     input_contract = _input_contract(scores_df)
-    css_class = "warn" if input_contract == "edge_hold_padded" else "info"
+    css_class = "warn" if input_contract in {"edge_hold_padded", "no_local_reference"} else "info"
     return f'<p class="contract-note {css_class}">{escape(_input_contract_text(input_contract))}</p>'
 
 

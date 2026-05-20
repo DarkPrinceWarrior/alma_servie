@@ -79,7 +79,7 @@ STATUS_COLUMNS = [
     "is_pre_anomaly_zone",
     "is_labelled_anomaly",
 ]
-INVALID_SCORE_REASONS = {"not_enough_points"}
+INVALID_SCORE_REASONS = {"not_enough_points", "unlabeled_no_reference"}
 
 
 def _incident_merge_window_hours(cfg: dict[str, Any]) -> float:
@@ -481,17 +481,26 @@ def _build_global_runs(
     device: torch.device,
     verbose: bool,
     shared_state: Any,
+    intervals: pd.DataFrame | None = None,
 ) -> dict[str, PreparedDetectorRun]:
     if shared_state is None:
         raise ValueError("paano_global requires a trained or loaded global encoder state.")
 
     from alma_service.global_normality import build_global_core_runs
 
+    labelled_wells: set[str] | None = None
+    if intervals is not None and not intervals.empty:
+        labelled_wells = {
+            str(well_id).strip().lower()
+            for well_id in intervals["well_id"].dropna().tolist()
+        }
+
     return build_global_core_runs(
         prepared_runs,
         shared_state,
         device,
         verbose=verbose,
+        labelled_wells=labelled_wells,
     )
 
 
@@ -1659,6 +1668,7 @@ def run_detection(
             device=device,
             verbose=verbose,
             shared_state=shared_state,
+            intervals=intervals,
         )
     else:
         df = load_anomaly_data(spec, source_path=source_path)
