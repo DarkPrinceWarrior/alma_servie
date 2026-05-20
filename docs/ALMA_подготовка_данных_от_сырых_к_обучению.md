@@ -1924,6 +1924,142 @@ artifacts/results/global_normality_detector/5min_domain_decision_layer/
 До отдельной валидации этот слой не должен подавлять alerts. Его задача -
 объяснить и разметить кандидаты для review.
 
+### Прогресс 2026-05-20: первый `negermet` domain guard
+
+Выполнена первая правка `domain decision layer` для `negermet`.
+
+Проблема предыдущей версии: слой делал hard reject, если точка старта была
+помечена как `bad_data` или `regime_event`. Для ННКТ это оказалось неверно:
+реальный резкий скачок давления может выглядеть как режимное/качество-событие
+по простой эвристике telemetry status. Из-за этого реальные интервалы
+`1123л`, `172г`, `3509г`, `524`, `5271г` в diagnostic layer уходили в reject,
+хотя global core их нашел.
+
+Новое правило:
+
+```text
+bad_data/regime_event в точке старта = контекстный флаг, не hard reject
+
+для negermet принимаем candidate, если есть:
+  pressure step up
+  и либо сильный рост давления, либо поддержка температуры/тока/нагрузки
+
+если pressure/temperature/load response нет:
+  uncertain/review, не уверенный ННКТ
+```
+
+Проверка выполнена без переобучения: сохраненные старты последнего
+`global_normality` benchmark были пропущены через новый classifier.
+
+Результат по `negermet`:
+
+| Скважина | Было | Стало | Причина |
+|---|---|---|---|
+| `1123л` | `rejected_bad_data` | `negermet_candidate / accept` | сильный pressure step + temperature/load support |
+| `172г` | `rejected_regime_event` | `negermet_candidate / accept` | pressure step + temperature/load support |
+| `3509г` | `rejected_bad_data` | `negermet_candidate / accept` | pressure step + load support |
+| `524` | `rejected_regime_event` | `negermet_candidate / accept` | сильный pressure step + load/imbalance support |
+| `5271г` | `rejected_regime_event` | `negermet_candidate / accept` | сильный pressure step + temperature/load support |
+| `ю-я 39-651` | `uncertain` | `uncertain` | нет pressure/temperature/load response |
+
+Итог: первый guard-шаг для ННКТ работает в нужную сторону. Он не подавляет
+реальные резкие ННКТ из-за одиночного bad/regime-флага и одновременно не
+принимает blind-кандидат `ю-я 39-651`, где экспертная физика ННКТ отсутствует.
+
+Ограничение: это пока диагностический слой. Он не меняет raw PaAno score и не
+должен менять production alerts до отдельной валидации.
+
+Следующий шаг: аналогично доработать `pritok` guard на hard-negative нормальных
+frequency-transition случаях `305г`, `1996л`, `1995`, потому что текущий
+простоватый `pritok` verdict слишком легко принимает слабые pressure trends.
+
+### Уточнение 2026-05-20: комментарии эксперта из сводной таблицы
+
+Источник данных не расширяется из сводной таблицы. Для обучения, оценки и
+benchmark используются только фактические файлы, которые есть в `data/` и уже
+собраны в `db/*.parquet`. Если в сводной таблице есть скважина или категория,
+но соответствующего файла нет в `data/`, она не становится новой меткой и не
+попадает в расчет.
+
+Комментарии эксперта из сводной таблицы используются только как доменная
+логика для `domain decision layer`: объяснение, guard, классификация кандидата
+и разбор ложных срабатываний. Это не дополнительные labels.
+
+Что нужно обязательно учесть в правилах:
+
+1. Нормальное изменение частоты не является аномалией само по себе.
+   Если после увеличения частоты давление на приеме немного снижается, а токи
+   растут, это ожидаемая режимная реакция. Если после снижения частоты давление
+   немного растет, а токовые нагрузки снижаются, это тоже ожидаемая режимная
+   реакция. Такие события должны попадать в `rejected_frequency_transition` или
+   `review`, а не в уверенную аномалию.
+
+2. Для `pritok` основной сигнал - тренд давления на приеме вверх или вниз при
+   стабильной частоте. Если изменение давления хорошо объясняется изменением
+   частоты, это слабый кандидат на приток. Если частота стабильна, остальные
+   каналы не показывают деградации насоса, а давление устойчиво меняет тренд,
+   это сильный `pritok_candidate`.
+
+3. Для `salt` важно не простое превышение давления над старой медианой, а
+   форма процесса: рост давления, ускорение роста или разворот локального
+   тренда вверх после периода снижения. Отдельный важный экспертный паттерн:
+   если частота трендово увеличивается, но давление на приеме не снижается, а
+   продолжает расти, это признак ухудшения работы ГНО и сильный кандидат на
+   соли.
+
+4. Для `negermet` ключевой паттерн - быстрый скачок давления вверх с
+   поддержкой температуры и/или токов. Температура и токи не должны быть
+   жесткими обязательными условиями для всех скважин, но отсутствие реакции
+   давления, температуры и нагрузки одновременно делает candidate слабым и
+   должно отправлять событие в `review/suppressed`.
+
+5. Остановки скважины и восстановление после остановки нельзя считать
+   аномалией без отдельного подтверждения физики события. Для `pritok/610` в
+   сводной отдельно зафиксирована остановка, которую нужно игнорировать как
+   аномальный старт.
+
+6. `Нормальная работа` из `data/raw/norm_work` - это чистая нормальная работа
+   за весь период. Она полезна как normal pool/guard, но не должна
+   дублироваться по трем anomaly-profile.
+
+   Отдельное уточнение: `305г`, `1996л`, `1995` сейчас физически лежат в
+   `data/raw/pritok`, потому что исторически добавлялись рядом с притоком, но
+   по экспертной разметке это не приток и не аномалия. Это чистое нормальное
+   поведение с изменением частоты за весь период выгрузки. Комментарий эксперта
+   нужен именно потому, что визуально такие случаи можно спутать с аномалией:
+   при изменении частоты давление и токи меняются ожидаемо. В `db/pritok_intervals`
+   для этих скважин нет anomaly-intervals, и это правильно. Для `domain decision
+   layer` они должны использоваться как hard-negative normal/frequency-transition
+   cases. Для global-normality обучения/калибровки их нужно использовать как
+   `norm_work`-подобные normal entries за весь период, но с отдельной
+   диагностической пометкой `frequency_transition_normal`, чтобы не смешивать
+   их с "ровной" нормой при анализе ошибок.
+
+7. Категории вроде `Нехватка напора`, `Ухудшение работы ГНО`, `Забитый штуцер`
+   и прочие единичные типы не смешиваются с `negermet`, `pritok`, `salt`, если
+   под них нет фактических файлов и утвержденной схемы разметки. Для текущего
+   пайплайна это будущие `other/review` классы, а не training labels.
+
+Практический контракт для следующей итерации:
+
+```text
+PaAno/global candidate
+  -> проверить остановку и частотный переход
+  -> проверить pressure/frequency/load/temperature pattern
+  -> выдать verdict:
+       accepted
+       rejected_frequency_transition
+       rejected_stop
+       negermet_candidate
+       pritok_candidate
+       salt_candidate
+       review
+```
+
+Этот слой не меняет raw PaAno score. Он объясняет и фильтрует кандидаты после
+детекции, чтобы эксперт видел, почему событие принято, отклонено или отправлено
+на ручной разбор.
+
 ## 13. Короткие ряды, нулевой score и правильный fallback для global PaAno
 
 Дата фиксации вывода: 2026-05-19.
@@ -2512,3 +2648,174 @@ paano_long      = 0.002086
   физике для blind/clean рядов: если нет pressure/temperature/load response,
   candidate должен уходить в review/suppressed, а не становиться уверенной
   детекцией.
+
+### Прогресс реализации 2026-05-20: population memory bank fallback
+
+Шаг 5 реализован кодово как opt-in эксперимент, а не как новый default.
+
+Режим управления:
+
+```text
+ALMA_GLOBAL_MEMORY_BANK_MODE=local                # default
+ALMA_GLOBAL_MEMORY_BANK_MODE=population_fallback  # эксперимент
+```
+
+До этого `paano_global` был глобальным только по encoder, но memory bank для
+scoring строился из локального reference конкретной скважины. Это давало две
+проблемы:
+
+- короткий `negermet` мог иметь слишком мало локальных нормальных patch-окон;
+- blind/unlabeled скважина могла быть оценена только ценой ошибочного
+  предположения, что начало её собственного ряда - это норма.
+
+Новая экспериментальная логика:
+
+```text
+если локальный reference достаточно длинный:
+    использовать local memory bank
+иначе:
+    использовать population memory bank из balanced normal pool
+если population memory bank недоступен:
+    Not assessed
+```
+
+Для blind/unlabeled скважины локальный reference не используется вообще. Если
+есть population memory bank, такая скважина сравнивается с донорским банком
+подтвержденной нормы. Если population memory bank недоступен, скважина остается
+`Not assessed`.
+
+Почему это не default: первый контрольный прогон `negermet/paano_global` с
+автоматическим population fallback показал деградацию размеченных интервалов:
+короткие `1123л`, `3509г`, `524`, `5271г` перестали находиться при старом
+onset config. Это ожидаемый риск: population memory bank меняет распределение
+score, поэтому старые пороги, подобранные для local memory bank, нельзя
+считать валидными.
+
+Population memory bank строится из уже подготовленного `global_pool`:
+
+- размеченная нормальная работа train-скважин `negermet`, `pritok`, `salt`;
+- `norm_work`, где весь период экспертно считается нормальной работой;
+- fixed feature schema;
+- balanced source/well sampling.
+
+При scoring текущая скважина исключается из population reference по `well_id`,
+чтобы не сравнивать ряд с самим собой.
+
+В `input_contract` теперь отражаются два независимых факта: был ли padding и
+какой memory bank использован:
+
+```text
+real_long_local_memory
+padded_long_local_memory
+real_long_population_memory
+padded_long_population_memory
+no_local_reference
+no_population_reference
+```
+
+Практический смысл:
+
+- `real_long_local_memory` - обычный и самый чистый контракт;
+- `padded_long_local_memory` - короткая история, но локальная норма есть;
+- `real_long_population_memory` - локальный reference не используется, сравнение
+  идет с фондовой нормой;
+- `padded_long_population_memory` - самый осторожный fallback: короткая история
+  плюс population memory bank;
+- `no_*` - оценка не выполнена, нулевой score не означает норму.
+
+Ограничение: population memory bank решает проблему "с чем сравнить короткий
+ряд", но не решает сам по себе проблему ложных кандидатов на blind/clean рядах.
+Для production-пути после этого всё равно нужен domain decision layer/guard:
+если у candidate нет pressure/temperature/load response, он должен уходить в
+review/suppressed, а не считаться уверенной аномалией.
+
+Следствие: следующий обязательный шаг после реализации fallback - отдельная
+калибровка/retune для контрактов `*_population_memory`, минимум отдельно от
+`*_local_memory`.
+
+### Проверка 2026-05-20: отдельная калибровка population memory bank
+
+Отдельная калибровка была выполнена как изолированный эксперимент, без
+перезаписи production-артефактов. После запуска экспериментальные результаты
+были сохранены отдельно, а текущие default config/results восстановлены.
+
+Условия запуска:
+
+```text
+ALMA_GLOBAL_MEMORY_BANK_MODE=population_fallback
+ALMA_PAANO_INPUT_PADDING=edge_hold
+ALMA_RETUNE_MODE=fast
+ALMA_OPTUNA_N_JOBS=8
+CUDA_VISIBLE_DEVICES=1
+```
+
+Папка эксперимента на сервере:
+
+```text
+artifacts/results/global_population_calibration_20260520_103510
+```
+
+Смысл проверки: не сравнивать population fallback со старыми local-порогами, а
+дать ему честную отдельную калибровку через `--retune`. Это важно, потому что
+population memory bank меняет распределение score: старые пороги local memory
+bank математически не обязаны подходить.
+
+Результат отдельной population-калибровки:
+
+| Аномалия | Population hit-rate | Coverage | Starts | FAR/day | Median delay | P90 delay | Вывод |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `negermet` | `1/5 = 0.200` | `1.000` | `1` | `0.000` | `0.00h` | `0.00h` | провал |
+| `pritok` | `25/27 = 0.926` | `1.000` | `45` | `0.000` | `1.67h` | `7.21h` | рабоче, но не лучше default |
+| `salt` | `8/9 = 0.889` | `1.000` | `14` | `0.000` | `1.00h` | `12.07h` | рабоче, но не лучше default |
+
+Контрольный current default после восстановления артефактов:
+
+| Аномалия | Current default hit-rate | Starts | FAR/day | Median delay | P90 delay |
+|---|---:|---:|---:|---:|---:|
+| `negermet` | `5/5 = 1.000` | `5` | `0.000` | `0.05h` | `0.72h` |
+| `pritok` | `24/24 = 1.000` | `45` | `0.000` | `1.60h` | `5.33h` |
+| `salt` | `8/8 = 1.000` | `14` | `0.000` | `1.00h` | `12.07h` |
+
+Главный факт: отдельный retune не спас `negermet`. Population fallback нашёл
+только `172г`; короткие размеченные интервалы `1123л`, `3509г`, `524`,
+`5271г` не были найдены. Значит, текущий population memory bank нельзя
+включать как production fallback для всех аномалий.
+
+Интерпретация:
+
+- Population memory bank технически полезен как способ оценить blind/unlabeled
+  ряд без ложного предположения "первые точки - это норма".
+- Но текущий общий donor-pool не является корректной заменой локального memory
+  bank для короткого `negermet`.
+- Для `pritok` и `salt` population fallback работает приемлемо, но не даёт
+  доказанного выигрыша относительно current default.
+- Поэтому доказательство production-пользы не получено: режим остаётся
+  research/diagnostic opt-in, а default должен оставаться
+  `ALMA_GLOBAL_MEMORY_BANK_MODE=local`.
+
+Решение по архитектуре:
+
+```text
+default:
+    local memory bank
+
+research only:
+    population_fallback
+```
+
+Что можно развивать дальше, если population всё же нужен:
+
+- делать не один общий population bank, а отдельные donor banks по
+  технологическому профилю/классу события;
+- калибровать onset отдельно по `real_long_population_memory` и
+  `padded_long_population_memory`;
+- отдельно проверять короткие `negermet`-ряды, потому что именно там общий
+  population bank сейчас ломает hit-rate;
+- добавлять domain decision layer после candidate detection, чтобы blind
+  candidate без pressure/temperature/load response уходили в `review` или
+  `suppressed`, а не считались уверенной аномалией.
+
+Текущий вывод: population отдельной калибровкой проверен и **не доказан как
+production default**. Его нельзя включать автоматически. Безопасный путь -
+оставить `local` default, а population держать как диагностический режим для
+следующих controlled experiments.

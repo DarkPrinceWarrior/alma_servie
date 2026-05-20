@@ -90,3 +90,31 @@ def test_negermet_candidate_on_pressure_step_up() -> None:
     )
     assert result["domain_verdict"] == DOMAIN_NEGERMET_CANDIDATE
     assert result["domain_action"] == "accept"
+
+
+def test_negermet_does_not_reject_supported_step_by_regime_flag_only() -> None:
+    pressure = np.r_[np.full(24, 100.0), np.full(24, 130.0)]
+    frequency = np.full(len(pressure), 50.0)
+    row = _row("2026-01-01 02:00:00")
+    row["start_class"] = "regime_event"
+    row["is_regime_event"] = True
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=row,
+    )
+    assert result["domain_verdict"] == DOMAIN_NEGERMET_CANDIDATE
+    assert result["domain_action"] == "accept"
+    assert "despite_regime_context" in result["domain_reason"]
+
+
+def test_negermet_weak_candidate_without_physical_response_stays_uncertain() -> None:
+    pressure = np.r_[np.full(24, 100.0), np.full(24, 100.2)]
+    frequency = np.full(len(pressure), 50.0)
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:00:00"),
+    )
+    assert result["domain_verdict"] == "uncertain"
+    assert result["domain_action"] == "uncertain"

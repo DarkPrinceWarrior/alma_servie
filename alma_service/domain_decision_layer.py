@@ -51,6 +51,8 @@ class DomainDecisionConfig:
     frequency_transition_pct: float
     pressure_delta_pct: float
     min_points: int = 3
+    strong_pressure_delta_pct: float = 5.0
+    support_delta_pct: float = 1.0
 
 
 DEFAULT_CONFIGS = {
@@ -59,18 +61,24 @@ DEFAULT_CONFIGS = {
         post_hours=2.0,
         frequency_transition_pct=3.0,
         pressure_delta_pct=1.0,
+        strong_pressure_delta_pct=5.0,
+        support_delta_pct=1.0,
     ),
     "pritok": DomainDecisionConfig(
         pre_hours=24.0,
         post_hours=24.0,
         frequency_transition_pct=2.0,
         pressure_delta_pct=0.5,
+        strong_pressure_delta_pct=2.0,
+        support_delta_pct=1.0,
     ),
     "salt": DomainDecisionConfig(
         pre_hours=72.0,
         post_hours=72.0,
         frequency_transition_pct=3.0,
         pressure_delta_pct=0.5,
+        strong_pressure_delta_pct=2.0,
+        support_delta_pct=1.0,
     ),
 }
 
@@ -206,14 +214,14 @@ def _classify_domain_start(
     start_row: pd.Series,
     pressure: dict[str, float],
     frequency_delta_pct: float,
+    load_delta_pct: float,
+    temperature_delta_pct: float,
+    imbalance_delta_pct: float,
     config: DomainDecisionConfig,
 ) -> tuple[str, str, str]:
-    if _flag(start_row, "is_bad_data") or str(start_row.get("start_class", "")) == "bad_data":
-        return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_at_start"
-
-    if _flag(start_row, "is_regime_event") or str(start_row.get("start_class", "")) == "regime_event":
-        return DOMAIN_REJECTED_REGIME_EVENT, "reject", "regime_event_at_start"
-
+    start_class = str(start_row.get("start_class", "")).strip().lower()
+    bad_data_context = _flag(start_row, "is_bad_data") or start_class == "bad_data"
+    regime_context = _flag(start_row, "is_regime_event") or start_class == "regime_event"
     freq_unstable = (
         np.isfinite(frequency_delta_pct)
         and abs(float(frequency_delta_pct)) >= float(config.frequency_transition_pct)
@@ -227,12 +235,26 @@ def _classify_domain_start(
         or (np.isfinite(post_slope) and float(post_slope) > 0 and np.isfinite(slope_change) and float(slope_change) > 0)
     )
     slope_reversal_up = np.isfinite(slope_change) and float(slope_change) > 0 and np.isfinite(post_slope) and float(post_slope) > 0
+    strong_pressure_up = np.isfinite(pressure_delta) and float(pressure_delta) >= float(config.strong_pressure_delta_pct)
+    load_support = np.isfinite(load_delta_pct) and float(load_delta_pct) >= float(config.support_delta_pct)
+    thermal_support = np.isfinite(temperature_delta_pct) and float(temperature_delta_pct) >= float(config.support_delta_pct)
+    imbalance_support = np.isfinite(imbalance_delta_pct) and float(imbalance_delta_pct) >= float(config.support_delta_pct)
+    any_physical_support = pressure_abs_move or load_support or thermal_support or imbalance_support
+    context_suffix = ""
+    if bad_data_context:
+        context_suffix = "_despite_bad_data_context"
+    elif regime_context:
+        context_suffix = "_despite_regime_context"
 
     if anomaly_key == "pritok":
         if freq_unstable:
             return DOMAIN_REJECTED_FREQUENCY_TRANSITION, "reject", "pressure_change_explained_by_frequency"
         if pressure_abs_move or (np.isfinite(post_slope) and abs(float(post_slope)) > 0):
-            return DOMAIN_PRITOK_CANDIDATE, "accept", "pressure_trend_with_stable_frequency"
+            return DOMAIN_PRITOK_CANDIDATE, "accept", "pressure_trend_with_stable_frequency" + context_suffix
+        if bad_data_context:
+            return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_context_without_pressure_trend"
+        if regime_context:
+            return DOMAIN_REJECTED_REGIME_EVENT, "reject", "regime_context_without_pressure_trend"
         return DOMAIN_UNCERTAIN, "uncertain", "weak_pressure_trend"
 
     if anomaly_key == "salt":
@@ -240,14 +262,33 @@ def _classify_domain_start(
             reason = "pressure_post_slope_or_reversal_up"
             if freq_unstable:
                 reason += "_with_frequency_change"
-            return DOMAIN_SALT_CANDIDATE, "accept", reason
+            return DOMAIN_SALT_CANDIDATE, "accept", reason + context_suffix
         if freq_unstable:
             return DOMAIN_REJECTED_FREQUENCY_TRANSITION, "reject", "frequency_transition_without_salt_pressure_pattern"
+        if bad_data_context:
+            return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_context_without_salt_pressure_pattern"
+        if regime_context:
+            return DOMAIN_REJECTED_REGIME_EVENT, "reject", "regime_context_without_salt_pressure_pattern"
         return DOMAIN_UNCERTAIN, "uncertain", "weak_salt_pressure_pattern"
 
     if anomaly_key == "negermet":
-        if pressure_up:
-            return DOMAIN_NEGERMET_CANDIDATE, "accept", "pressure_step_up_pattern"
+        support_count = int(load_support) + int(thermal_support) + int(imbalance_support)
+        if pressure_up and (strong_pressure_up or support_count > 0):
+            reason_parts = ["pressure_step_up_pattern"]
+            if strong_pressure_up:
+                reason_parts.append("strong_pressure")
+            if thermal_support:
+                reason_parts.append("thermal_support")
+            if load_support:
+                reason_parts.append("load_support")
+            if imbalance_support:
+                reason_parts.append("imbalance_support")
+            reason = "_".join(reason_parts) + context_suffix
+            return DOMAIN_NEGERMET_CANDIDATE, "accept", reason
+        if bad_data_context and not any_physical_support:
+            return DOMAIN_REJECTED_BAD_DATA, "reject", "bad_data_context_without_negermet_physics"
+        if regime_context and not any_physical_support:
+            return DOMAIN_REJECTED_REGIME_EVENT, "reject", "regime_context_without_negermet_physics"
         return DOMAIN_UNCERTAIN, "uncertain", "weak_negermet_pressure_step"
 
     return DOMAIN_UNCERTAIN, "uncertain", "unknown_anomaly_key"
@@ -273,6 +314,9 @@ def assess_domain_start(
         start_row=start_row,
         pressure=pressure,
         frequency_delta_pct=frequency["post_vs_pre_pct"],
+        load_delta_pct=load_delta,
+        temperature_delta_pct=temperature_delta,
+        imbalance_delta_pct=imbalance_delta,
         config=cfg,
     )
     return {
