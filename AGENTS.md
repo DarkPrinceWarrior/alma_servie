@@ -165,15 +165,18 @@ pip install -r requirements.txt
 Build datasets:
 
 ```bash
-python scripts/datasets/build_negermet_dataset.py --freq 15s
+python scripts/datasets/build_negermet_dataset.py --freq 5min
 python scripts/datasets/build_pritok_dataset.py --freq 10min
-python scripts/datasets/build_salt_dataset.py --freq 2min
+python scripts/datasets/build_pritok_dataset.py --freq 5min
+python scripts/datasets/build_salt_dataset.py --freq 10min
+python scripts/datasets/build_salt_dataset.py --freq 5min
+python scripts/datasets/build_norm_work_dataset.py --freqs 5min,10min
 bash scripts/run_full_dataset_build.sh
 ```
 
-`build_pritok_dataset.py` defaults to `--freq 10min`; it must match the
-production detect grid `db/pritok_anomaly_database_10min.parquet`. A freq
-mismatch silently yields `n_channels=0` and undetected wells.
+Current retained grids in `db/` after cleanup are: `negermet=5min`,
+`pritok=10min+5min`, `salt=10min+5min`, `norm_work=10min+5min`. Some builder
+defaults are legacy; pass explicit `--freq` / `--freqs` for reproducible runs.
 
 Run detection:
 
@@ -254,11 +257,15 @@ Rules:
    does not kill the process.
 5. GPU0 on the server is taken by another process (~8.4 GB). Use
    `CUDA_VISIBLE_DEVICES=1..5`.
-6. `.serena/` was copied to the server for this project. Treat it as local
-   tool state, not as repository source.
+6. Serena CLI is installed on the server with
+   `uv tool install -p 3.13 serena-agent@latest --prerelease=allow`; verified
+   version is `Serena 1.5.1`. `.serena/` was copied to the server for this
+   project. Treat it as local tool state, not as repository source.
 7. Current transferred runtime data on the server includes `db/`, `artifacts/`,
-   `models/`, `salym/`, and `salym_prepared/`. Sizes verified on 2026-05-06:
-   `salym` = `71894737195` bytes, `salym_prepared` = `34105867675` bytes.
+   `models/`, `salym/`, and `salym_prepared/`. After cleanup on 2026-05-21:
+   `artifacts` is ~110 MB, `db` is ~122 MB, and `models` is ~15 MB. Historical
+   raw Salym transfers remain server-local: `salym` = `71894737195` bytes,
+   `salym_prepared` = `34105867675` bytes.
 
 Commands:
 

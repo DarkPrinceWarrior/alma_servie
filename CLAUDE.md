@@ -62,15 +62,18 @@ pip install -r requirements.txt
 
 ### Build datasets
 ```bash
-python scripts/datasets/build_negermet_dataset.py --freq 15s
+python scripts/datasets/build_negermet_dataset.py --freq 5min
 python scripts/datasets/build_pritok_dataset.py --freq 10min
-python scripts/datasets/build_salt_dataset.py --freq 2min
+python scripts/datasets/build_pritok_dataset.py --freq 5min
+python scripts/datasets/build_salt_dataset.py --freq 10min
+python scripts/datasets/build_salt_dataset.py --freq 5min
+python scripts/datasets/build_norm_work_dataset.py --freqs 5min,10min
 # Or all at once:
 bash scripts/run_full_dataset_build.sh
 ```
-`build_pritok_dataset.py` defaults to `--freq 10min`, which must match the
-production detect grid `db/pritok_anomaly_database_10min.parquet`. A freq
-mismatch silently yields `n_channels=0` (wells not detected).
+Current retained grids in `db/` after cleanup are: `negermet=5min`,
+`pritok=10min+5min`, `salt=10min+5min`, `norm_work=10min+5min`. Some builder
+defaults are legacy; pass explicit `--freq` / `--freqs` for reproducible runs.
 
 ### Run detection
 ```bash
@@ -137,8 +140,8 @@ No linting, formatting, or test runner is configured. After changes, run the aff
 4. **Артефакты** (`models/`, `artifacts/`, `db/`) **остаются на серваке.** В git они и так в `.gitignore`. Финальные веса/отчёты — `scp` обратно на лэптоп.
 5. **Long-running** (тренировка PaAno, full benchmark) запускать через `tmux new -d -s <name>` чтобы SSH-разрыв не убивал процесс.
 6. **GPU0 на серваке занят чужим процессом (~8.4 ГБ)** — использовать `CUDA_VISIBLE_DEVICES=1..5`.
-7. `.serena/` перенесена на сервер для этого проекта. Это локальное состояние инструмента, не исходный код репозитория.
-8. На сервер перенесены runtime-данные `db/`, `artifacts/`, `models/`, `salym/`, `salym_prepared/`. Размеры, сверенные 2026-05-06: `salym` = `71894737195` bytes, `salym_prepared` = `34105867675` bytes.
+7. Serena CLI установлена на сервере через `uv tool install -p 3.13 serena-agent@latest --prerelease=allow`; проверенная версия — `Serena 1.5.1`. `.serena/` перенесена на сервер для этого проекта. Это локальное состояние инструмента, не исходный код репозитория.
+8. На сервер перенесены runtime-данные `db/`, `artifacts/`, `models/`, `salym/`, `salym_prepared/`. После чистки 2026-05-21: `artifacts` ≈ 110 MB, `db` ≈ 122 MB, `models` ≈ 15 MB. Исторические Salym-данные остаются локально на сервере: `salym` = `71894737195` bytes, `salym_prepared` = `34105867675` bytes.
 
 ### Команды
 
