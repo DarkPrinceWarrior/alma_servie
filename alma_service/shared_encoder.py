@@ -11,7 +11,6 @@ Provides utilities to:
 
 from __future__ import annotations
 
-import copy
 import os
 import random
 import sys
@@ -337,7 +336,6 @@ def _train_encoder_single_scale(
     patch_size: int,
     device: torch.device,
     verbose: bool = False,
-    init_model: nn.Module | None = None,
     num_iter: int = PAANO_NUM_ITERS,
     label_prefix: str = "SharedEncoder",
 ) -> tuple[nn.Module, np.ndarray, np.ndarray]:
@@ -358,14 +356,6 @@ def _train_encoder_single_scale(
     )
 
     model = PatchEncoder(in_channels=pool.shape[1], use_revin=True).to(device)
-    if init_model is not None:
-        try:
-            model.load_state_dict(copy.deepcopy(_state_dict_model(init_model).state_dict()))
-        except RuntimeError as exc:
-            raise ValueError(
-                "Cannot fine-tune shared encoder from incompatible pretrained state. "
-                "The fine-tune channel set must match the pretrained channel set."
-            ) from exc
     model = _maybe_compile_module(model, label=f"{label_prefix}_patch{patch_size}", verbose=verbose)
 
     t0 = time.time()
@@ -389,38 +379,6 @@ def _train_encoder_single_scale(
         )
 
     return model, train_mean, train_std
-
-
-def _collect_pool_for_channels(
-    prepared_wells: dict[str, Any],
-    shared_channels: list[str],
-    *,
-    only_split: str = "train",
-) -> tuple[np.ndarray, list[str]]:
-    train_wells = {
-        wid: pw for wid, pw in prepared_wells.items()
-        if pw.split == only_split
-    }
-    if not train_wells:
-        raise ValueError(f"No wells with split='{only_split}' found.")
-
-    pool_parts: list[np.ndarray] = []
-    contributing_wells: list[str] = []
-    for wid in sorted(train_wells):
-        pw = train_wells[wid]
-        missing = [ch for ch in shared_channels if ch not in pw.feature_columns]
-        if missing:
-            continue
-        col_indices = [pw.feature_columns.index(ch) for ch in shared_channels]
-        ref_rows = pw.feature_matrix[:, col_indices][pw.reference_mask]
-        if len(ref_rows) > 0:
-            pool_parts.append(ref_rows)
-            contributing_wells.append(wid)
-
-    if not pool_parts:
-        raise ValueError("No clean-normal reference data collected for pretrained channels.")
-
-    return np.concatenate(pool_parts, axis=0).astype(np.float32), contributing_wells
 
 
 def train_shared_encoder(
@@ -583,81 +541,6 @@ def load_or_train_shared_encoder(
     )
     save_shared_encoder_state(state, cache_path)
     return state
-
-
-def fine_tune_shared_encoder(
-    pretrained_state: SharedEncoderState,
-    prepared_wells: dict[str, Any],
-    anomaly_key: str,
-    device: torch.device,
-    verbose: bool = False,
-    num_iter: int = PAANO_NUM_ITERS,
-) -> SharedEncoderState:
-    """Fine-tune a global shared encoder on clean-normal data of one anomaly family.
-
-    The feature channel set is intentionally kept identical to the pretrained
-    state so model weights are transferable. Normalization statistics are
-    recalibrated on the target class clean-normal pool.
-    """
-    _set_seed()
-    pool, train_well_ids = _collect_pool_for_channels(
-        prepared_wells,
-        pretrained_state.shared_channels,
-    )
-
-    if verbose:
-        print(
-            f"  Fine-tune shared encoder pool: {len(pool)} points, "
-            f"{len(pretrained_state.shared_channels)} channels, {len(train_well_ids)} wells"
-        )
-
-    if len(pool) < pretrained_state.patch_long * 2:
-        raise ValueError(
-            f"Fine-tune pool too small: {len(pool)} points, "
-            f"need at least {pretrained_state.patch_long * 2}"
-        )
-
-    model_short, mean_short, std_short = _train_encoder_single_scale(
-        pool,
-        pretrained_state.patch_short,
-        device,
-        verbose=verbose,
-        init_model=pretrained_state.model_short,
-        num_iter=num_iter,
-        label_prefix=f"FineTune_{anomaly_key}",
-    )
-    model_long, mean_long, std_long = _train_encoder_single_scale(
-        pool,
-        pretrained_state.patch_long,
-        device,
-        verbose=verbose,
-        init_model=pretrained_state.model_long,
-        num_iter=num_iter,
-        label_prefix=f"FineTune_{anomaly_key}",
-    )
-
-    return SharedEncoderState(
-        model_short=model_short,
-        model_long=model_long,
-        train_mean_short=mean_short,
-        train_std_short=std_short,
-        train_mean_long=mean_long,
-        train_std_long=std_long,
-        shared_channels=list(pretrained_state.shared_channels),
-        patch_short=pretrained_state.patch_short,
-        patch_long=pretrained_state.patch_long,
-        anomaly_key=anomaly_key,
-        train_wells=train_well_ids,
-        detail={
-            "training_mode": "global_pretrain_class_finetune",
-            "pretrained_anomaly_key": pretrained_state.anomaly_key,
-            "pretrained_train_wells": pretrained_state.train_wells,
-            "pool_points": int(len(pool)),
-            "shared_channels": len(pretrained_state.shared_channels),
-            "train_wells": train_well_ids,
-            "fine_tune_iterations": int(num_iter),
-        },
-    )
 
 
 def _score_well_single_scale(
