@@ -29,8 +29,8 @@ models/
 !app/back/src/back/models/**
 
 # Raw / prepared data (reproducible, huge)
-salym/
-salym_prepared/
+/salym/
+/salym_prepared/
 
 # Tool working dirs
 .serena/
