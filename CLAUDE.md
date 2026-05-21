@@ -14,15 +14,19 @@ Code navigation uses three MCP servers, each with one job — do not duplicate t
   symbols + code in one call). Also `codegraph_search` (symbol by name —
   prefer over `fff grep`), `codegraph_callers`/`codegraph_callees`,
   `codegraph_impact` (blast radius before a refactor), `codegraph_node`,
-  `codegraph_explore` (unfamiliar module — token-heavy, onboarding only).
+  `codegraph_explore` (deeper architecture/module exploration after
+  `codegraph_search` or `codegraph_context` surfaces concrete symbol/file
+  names; in CodeGraph 0.8+ source sections include line numbers for direct
+  `file:line` citations).
   Trust its results — full AST parse; do not re-verify with grep.
 - **serena** — LSP-precise symbol navigation and the only tool that *edits*
   at symbol level (`find_symbol`, `get_symbols_overview`,
   `find_referencing_symbols`, `replace_symbol_body`, `insert_*`,
   `rename_symbol`, `safe_delete_symbol`). Prefer over reading whole files.
 
-Cycle: locate (fff / `codegraph_search`) → understand (`codegraph_context`)
-→ assess risk (`codegraph_impact`) → read and edit (serena) → verify.
+Cycle: locate (fff / `codegraph_search`) → understand (`codegraph_context`,
+then one precise `codegraph_explore` for deep architecture questions) → assess
+risk (`codegraph_impact`) → read and edit (serena) → verify.
 
 **codegraph index sync** — the MCP server auto-syncs (~2 s debounce), but keep
 it fresh explicitly: run `codegraph status` at the start of a session and
@@ -30,6 +34,8 @@ it fresh explicitly: run `codegraph status` at the start of a session and
 watcher may miss (`git pull`, branch switch, mass file generation). If a
 codegraph answer contradicts the file, the index is stale — `codegraph sync`
 and re-query. Do not query the index in the same turn as an edit (~500 ms lag).
+On slow or WSL `/mnt/*` filesystems, use `codegraph serve --mcp --no-watch`
+and rely on explicit `codegraph sync` or CodeGraph-installed git hooks.
 
 Other MCP: **context7** for version-sensitive library docs (Next.js, React,
 FastAPI, PyTorch — prefer over web search); **tavily** for general web search;

@@ -43,8 +43,11 @@ and file. Use it for structural questions, not literal text:
 - `codegraph_callers` / `codegraph_callees` — who calls / what is called.
 - `codegraph_impact <symbol>` — blast radius before a refactor.
 - `codegraph_node` — a symbol's source / signature / docstring.
-- `codegraph_explore` — survey an unfamiliar module (token-heavy; onboarding
-  only, not for narrow questions).
+- `codegraph_explore` — deeper architecture/module exploration. Use it after
+  `codegraph_search` or `codegraph_context` has surfaced concrete symbol or
+  file names; prefer one precise explore call over a grep/read loop. In
+  CodeGraph 0.8+, explore source sections include line numbers for direct
+  `file:line` citations.
 - `codegraph_files` / `codegraph_status` — directory layout / index health.
 
 Trust codegraph results — they come from a full AST parse; do not re-verify
@@ -82,10 +85,14 @@ Still, keep the index fresh explicitly:
   `codegraph sync` before relying on codegraph answers;
 - if a codegraph result contradicts what you see in a file, the index is
   stale: `codegraph sync` and re-query.
+- if a workspace is on a slow or WSL `/mnt/*` filesystem and watcher startup is
+  a problem, run MCP with `codegraph serve --mcp --no-watch` and rely on
+  explicit `codegraph sync` or CodeGraph-installed git hooks.
 
 Standard cycle: locate (`fff` / `codegraph_search`) → understand
-(`codegraph_context`) → assess risk (`codegraph_impact`) → read and edit
-(`serena`) → verify (run the affected script; `playwright` smoke for UI).
+(`codegraph_context`, then `codegraph_explore` for deep architecture questions)
+→ assess risk (`codegraph_impact`) → read and edit (`serena`) → verify (run
+the affected script; `playwright` smoke for UI).
 
 Use Context7 before relying on memory for version-sensitive framework/library
 behavior, especially FastAPI, Starlette, Pydantic, SQLAlchemy, Alembic, HTTPX,
