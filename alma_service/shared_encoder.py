@@ -38,6 +38,7 @@ from utils.utils import create_memory_bank
 
 from alma_service.generic_detectors import (
     PAANO_BATCH_SIZE,
+    PAANO_INFER_BATCH_SIZE,
     PAANO_LR,
     PAANO_MEMORY_BANK_RATIO,
     PAANO_NUM_ITERS,
@@ -567,12 +568,12 @@ def _score_well_single_scale(
     # DataLoader for local memory bank (from reference data)
     ref_loader, _, _ = patch_creator.create_dataloaders(
         ref_norm, ref_norm, np.zeros(len(ref_data), dtype=np.float32),
-        batch_size=PAANO_BATCH_SIZE,
+        batch_size=PAANO_INFER_BATCH_SIZE,
     )
     # DataLoader for full well scoring
     _, full_loader, _ = patch_creator.create_dataloaders(
         ref_norm, well_norm, dummy_labels,
-        batch_size=PAANO_BATCH_SIZE,
+        batch_size=PAANO_INFER_BATCH_SIZE,
     )
 
     # Local memory bank from this well's reference data

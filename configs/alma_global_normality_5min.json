@@ -8,7 +8,7 @@
     "patch_long": 384,
     "global_iters": 200,
     "feature_schema": "configs/alma_global_feature_schema.json",
-    "include_norm_work": true,
+    "include_norm_work": false,
     "norm_work_profile": "pritok",
     "reference_policy": "normal_windows",
     "balance": {
@@ -79,11 +79,11 @@
             "p90_abs_delay_hours": 0.0,
             "p90_delay_ratio": 0.0,
             "invalid_score_wells": [
-                "1123\u043b",
-                "3509\u0433",
+                "1123л",
+                "3509г",
                 "524",
-                "5271\u0433",
-                "\u044e-\u044f 39-651"
+                "5271г",
+                "ю-я 39-651"
             ]
         },
         "pritok": {
@@ -107,5 +107,5 @@
             "p90_delay_ratio": 0.02019036221871298
         }
     },
-    "next_step": "Physically inspect the weakest interval-level cases, especially salt/3245(2) and pritok/5144\u0433, before promoting anything to production defaults."
+    "next_step": "Physically inspect the weakest interval-level cases, especially salt/3245(2) and pritok/5144г, before promoting anything to production defaults."
 }

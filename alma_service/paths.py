@@ -15,7 +15,7 @@ NEGREMET_RAW_DIR = RAW_DATA_DIR / "negermet"
 PRITOK_RAW_DIR = RAW_DATA_DIR / "pritok"
 SALT_RAW_DIR = RAW_DATA_DIR / "salt"
 
-SUMMARY_INFO_PATH = REFERENCE_DATA_DIR / "Сводная информация.xlsx"
+SUMMARY_INFO_PATH = REFERENCE_DATA_DIR / "Сводная информация_новая.xlsx"
 MODEL_PARAMS_PATH = REFERENCE_DATA_DIR / "Параметры для модели.xlsx"
 
 DB_DIR = PROJECT_ROOT / "db"

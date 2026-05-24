@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from alma_service.anomaly_specs import DatasetSpec
-from alma_service.dataset_config import normalize_param_name, split_for_well
+from alma_service.dataset_config import CLIP_TO_SUMMARY_BOUNDS_WELLS, normalize_param_name, split_for_well
 from alma_service.paths import DB_DIR, RAW_CACHE_DIR, SUMMARY_INFO_PATH, ensure_dir
 from alma_service.tabular_io import read_excel_sheet, read_excel_workbook, read_table, write_dataset_tables, write_table
 
@@ -114,6 +114,21 @@ def parse_parameter_series(well_id: str, filepath: Path) -> list[pd.Series]:
     return series_list
 
 
+def _parse_summary_date(value: object) -> pd.Timestamp:
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return pd.NaT
+    if isinstance(value, (pd.Timestamp, np.datetime64)):
+        return pd.Timestamp(value)
+    text = str(value).strip()
+    if not text:
+        return pd.NaT
+    # ISO-like (YYYY-...): use default parser to avoid dayfirst quirks
+    if len(text) >= 4 and text[:4].isdigit() and (len(text) == 4 or text[4] in "-/. "):
+        return pd.to_datetime(text, errors="coerce")
+    # DD-MM-YYYY / DD.MM.YYYY / DD/MM/YYYY
+    return pd.to_datetime(text, dayfirst=True, errors="coerce")
+
+
 def build_intervals(spec: DatasetSpec) -> pd.DataFrame:
     print("Парсинг сводной информации...")
     svod = read_excel_sheet(
@@ -127,27 +142,30 @@ def build_intervals(spec: DatasetSpec) -> pd.DataFrame:
     header_row = None
     for i in range(min(10, len(svod))):
         vals = [str(v).strip() if pd.notna(v) else "" for v in svod.iloc[i]]
-        if "№" in vals and "Скважина" in vals:
+        if "Скважина" in vals and ("Аномалия" in vals or "Тип аномалии" in vals):
             header_row = i
             break
-
     if header_row is None:
         raise ValueError("Не найдена строка заголовков в сводной информации")
 
-    data = svod.iloc[header_row + 1 :].reset_index(drop=True)
+    headers = [str(v).strip() if pd.notna(v) else "" for v in svod.iloc[header_row]]
+    data = svod.iloc[header_row + 1:].reset_index(drop=True)
+    data.columns = headers + [f"_col{j}" for j in range(len(headers), data.shape[1])]
+    type_col = "Аномалия" if "Аномалия" in headers else "Тип аномалии"
+    known_wells = {str(k).strip().lower() for k in spec.well_files.keys()}
 
     intervals: list[dict[str, object]] = []
     for _, row in data.iterrows():
-        anom_type = str(row.iloc[3]).strip() if pd.notna(row.iloc[3]) else ""
+        anom_type = str(row[type_col]).strip() if pd.notna(row[type_col]) else ""
         if spec.summary_match not in anom_type.lower():
             continue
-
-        well_id = str(row.iloc[2]).strip().lower()
-        data_start = pd.to_datetime(row.iloc[4], errors="coerce")
-        data_end = pd.to_datetime(row.iloc[5], errors="coerce")
-
-        s1 = pd.to_datetime(row.iloc[7], errors="coerce")
-        e1 = pd.to_datetime(row.iloc[8], errors="coerce")
+        well_id = str(row["Скважина"]).strip().lower()
+        if well_id not in known_wells:
+            continue
+        data_start = _parse_summary_date(row["Дата начала выгрузки"])
+        data_end = _parse_summary_date(row["Дата конца выгрузки"])
+        s1 = _parse_summary_date(row["Дата начала аномалии"])
+        e1 = _parse_summary_date(row["Дата конца аномалии"])
         if pd.notna(s1) and pd.notna(e1):
             intervals.append(
                 {
@@ -160,28 +178,69 @@ def build_intervals(spec: DatasetSpec) -> pd.DataFrame:
                 }
             )
 
-        if len(row) > 10:
-            s2 = pd.to_datetime(row.iloc[9], errors="coerce")
-            e2 = pd.to_datetime(row.iloc[10], errors="coerce")
-            if pd.notna(s2) and pd.notna(e2):
-                intervals.append(
-                    {
-                        "well_id": well_id,
-                        "start_date": s2,
-                        "end_date": e2,
-                        "data_start": data_start,
-                        "data_end": data_end,
-                        "split": split_for_well(spec.anomaly_key, well_id),
-                    }
-                )
-
     idf = pd.DataFrame(intervals)
     idf = idf.sort_values(["well_id", "start_date"]).reset_index(drop=True)
     idf["interval_idx"] = idf.groupby("well_id").cumcount() + 1
     return idf
 
 
-def _build_well_frame(slist: list[pd.Series], freq: str) -> tuple[pd.DataFrame, dict[str, object]] | None:
+def _load_well_bounds(spec: DatasetSpec) -> dict[str, tuple[pd.Timestamp, pd.Timestamp]]:
+    svod = read_excel_sheet(
+        SUMMARY_INFO_PATH,
+        sheet_id=1,
+        has_header=False,
+        infer_schema_length=50,
+        raise_if_empty=False,
+    )
+    header_row = None
+    for i in range(min(10, len(svod))):
+        vals = [str(v).strip() if pd.notna(v) else "" for v in svod.iloc[i]]
+        if "Скважина" in vals and ("Аномалия" in vals or "Тип аномалии" in vals):
+            header_row = i
+            break
+    if header_row is None:
+        return {}
+    headers = [str(v).strip() if pd.notna(v) else "" for v in svod.iloc[header_row]]
+    data = svod.iloc[header_row + 1:].reset_index(drop=True)
+    data.columns = headers + [f"_col{j}" for j in range(len(headers), data.shape[1])]
+    type_col = "Аномалия" if "Аномалия" in headers else "Тип аномалии"
+    known_wells = {str(k).strip().lower() for k in spec.well_files.keys()}
+
+    bounds: dict[str, tuple[pd.Timestamp, pd.Timestamp]] = {}
+    for _, row in data.iterrows():
+        anom_type = str(row[type_col]).strip() if pd.notna(row[type_col]) else ""
+        if spec.summary_match not in anom_type.lower():
+            continue
+        well_id = str(row["Скважина"]).strip().lower()
+        if well_id not in known_wells:
+            continue
+        ds = _parse_summary_date(row["Дата начала выгрузки"])
+        de = _parse_summary_date(row["Дата конца выгрузки"])
+        if pd.notna(ds) and pd.notna(de):
+            bounds[well_id] = (ds, de)
+    return bounds
+
+
+def _build_well_frame(
+    slist: list[pd.Series],
+    freq: str,
+    clip_start: pd.Timestamp | None = None,
+    clip_end: pd.Timestamp | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]] | None:
+    if clip_start is not None or clip_end is not None:
+        clipped = []
+        for series in slist:
+            s = series
+            if clip_start is not None:
+                s = s[s.index >= clip_start]
+            if clip_end is not None:
+                s = s[s.index <= clip_end]
+            if len(s) > 0:
+                clipped.append(s)
+        if not clipped:
+            return None
+        slist = clipped
+
     starts = [series.index.min() for series in slist]
     ends = [series.index.max() for series in slist]
     union_start = min(starts)
@@ -201,8 +260,6 @@ def _build_well_frame(slist: list[pd.Series], freq: str) -> tuple[pd.DataFrame, 
             continue
         combined_idx = trimmed.index.union(grid)
         reindexed = trimmed.reindex(combined_idx).sort_index()
-        # Strictly causal fill: carry only past information forward to the
-        # resampled grid, never interpolate using future sensor values.
         causal_filled = reindexed.ffill()
         df_well[series.name] = causal_filled.reindex(grid).values
 
@@ -230,9 +287,14 @@ def build_dataset(spec: DatasetSpec, freq: str | None = None) -> tuple[pd.DataFr
 
     frames: list[pd.DataFrame] = []
     all_param_names: set[str] = set()
-    print(f"\nПостроение датасета (полный диапазон по скважине, шаг {freq})...")
+    well_bounds = _load_well_bounds(spec)
+    print(f"\nПостроение датасета (полный диапазон по скважине, шаг {freq}; обрезка по сводке для {sorted(CLIP_TO_SUMMARY_BOUNDS_WELLS)})...")
     for well_id in sorted(well_series):
-        built = _build_well_frame(well_series[well_id], freq)
+        if well_id in CLIP_TO_SUMMARY_BOUNDS_WELLS:
+            cs, ce = well_bounds.get(well_id, (None, None))
+        else:
+            cs, ce = None, None
+        built = _build_well_frame(well_series[well_id], freq, clip_start=cs, clip_end=ce)
         if built is None:
             print(f"  {well_id}: ПРОПУСК — слишком короткий диапазон")
             continue

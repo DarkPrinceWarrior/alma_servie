@@ -46,11 +46,10 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         display_name="Негерметичность НКТ",
         well_files=NEGREMET_WELL_FILES,
         output_prefix="negermet",
-        default_freq="2min",
+        default_freq="5min",
         summary_match="негерметичность",
         source_candidates=(
-            "negermet_anomaly_database_2min.parquet",
-            "negermet_anomaly_database_15s.parquet",
+            "negermet_anomaly_database_5min.parquet",
         ),
     ),
     "pritok": DatasetSpec(
@@ -62,8 +61,7 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         summary_match="приток",
         source_candidates=(
             "pritok_anomaly_database_10min.parquet",
-            "pritok_anomaly_database_2min.parquet",
-            "pritok_anomaly_database_15s.parquet",
+            "pritok_anomaly_database_5min.parquet",
         ),
     ),
     "salt": DatasetSpec(
@@ -71,12 +69,11 @@ DATASET_SPECS: dict[str, DatasetSpec] = {
         display_name="Солеотложение",
         well_files=SALT_WELL_FILES,
         output_prefix="salt",
-        default_freq="15min",
+        default_freq="10min",
         summary_match="соли",
         source_candidates=(
-            "salt_anomaly_database_15min.parquet",
-            "salt_anomaly_database_2min.parquet",
-            "salt_anomaly_database_15s.parquet",
+            "salt_anomaly_database_10min.parquet",
+            "salt_anomaly_database_5min.parquet",
         ),
     ),
 }

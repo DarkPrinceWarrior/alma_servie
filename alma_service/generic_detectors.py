@@ -17,6 +17,7 @@ from torch import nn
 SEED = 2027
 
 PAANO_BATCH_SIZE = 256
+PAANO_INFER_BATCH_SIZE = 1024  # inference батч больше — A100 свободно тянет
 PAANO_LR = 1e-3
 PAANO_NUM_ITERS = 200
 PAANO_TOP_K = 5
