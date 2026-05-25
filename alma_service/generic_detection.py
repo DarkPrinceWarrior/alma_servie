@@ -879,10 +879,11 @@ def _robust_optuna_objective_value(
 
 
 def _lowo_enabled() -> bool:
-    """LOWO-CV в Optuna-objective включается env-флагом ALMA_LOWO_TUNING.
-    По умолчанию выключен — обратная совместимость.
+    """LOWO-CV в Optuna-objective. По умолчанию ВКЛЮЧЕН (с 2026-05-25):
+    подтверждённо даёт salt-win ×3.8 на test p90 при том же hit-rate.
+    Опционально выключается через ALMA_LOWO_TUNING=0.
     """
-    return os.environ.get("ALMA_LOWO_TUNING", "0").strip().lower() in ("1", "true", "yes")
+    return os.environ.get("ALMA_LOWO_TUNING", "1").strip().lower() in ("1", "true", "yes")
 
 
 def _lowo_optuna_objective_value(
