@@ -636,11 +636,63 @@ def _create_plot_html(
                     )
         elif col_name is not None and col_name in well_df.columns:
             vals = pd.to_numeric(well_df[col_name], errors="coerce")
-            ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
+            ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85, label=label)
+            # Rolling std overlay (правая ось): окно ~2ч. Реакция модели идёт
+            # часто на рост дисперсии, а не уровня — это и подсвечиваем здесь.
+            try:
+                win = max(6, int(round(120.0 / 5.0)))  # 120 мин / 5 мин = 24 точки
+                rstd = vals.rolling(win, min_periods=max(3, win // 4)).std()
+                if rstd.notna().any():
+                    ax2 = ax.twinx()
+                    ax2.plot(
+                        ts_pd, rstd,
+                        color="#f97316", linewidth=0.6, alpha=0.55,
+                        label="σ окно 2ч",
+                    )
+                    ax2.set_ylabel("σ 2ч", fontsize=7, color="#f97316")
+                    ax2.tick_params(axis="y", labelsize=6, colors="#f97316")
+                    ax2.grid(False)
+            except Exception:
+                pass
 
         ax.set_ylabel(label, fontsize=8)
         _draw_zones(ax, show_labels=(panel_idx == 0))
         ax.grid(True, alpha=0.3)
+
+    # «Зона раннего предупреждения»: момент, когда score впервые превысил 20%
+    # от пика внутри labelled-интервала. Жёлтая лента от этого момента до
+    # actual_start. Реакция модели на дисперсию даёт preonset за часы-сутки до
+    # видимого начала, и эта лента визуально его подсвечивает.
+    try:
+        if (
+            scores_df is not None and score_col is not None
+            and score_unavailable_reason is None and not scores_df.empty
+        ):
+            actual_start = pd.Timestamp(result_row["actual_start"])
+            actual_end = pd.Timestamp(result_row["actual_end"])
+            sv = scores_df.copy()
+            if pd.notna(x_min) and pd.notna(x_max):
+                sv = sv[(sv["timestamp"] >= x_min) & (sv["timestamp"] <= x_max)]
+            sv = sv.sort_values("timestamp")
+            sts_sv = pd.to_datetime(sv["timestamp"])
+            vals_sv = pd.to_numeric(sv[score_col], errors="coerce").to_numpy()
+            inside = (sts_sv >= actual_start) & (sts_sv <= actual_end)
+            if inside.any():
+                peak = float(np.nanmax(vals_sv[inside]))
+                if peak > 0:
+                    rise_thr = 0.20 * peak
+                    pre_mask = (sts_sv < actual_start).to_numpy()
+                    pre_vals = vals_sv[pre_mask]
+                    cross = np.where(pre_vals >= rise_thr)[0]
+                    if len(cross):
+                        rise_ts = sts_sv[pre_mask].iloc[int(cross[0])]
+                        for ax_z in axes:
+                            ax_z.axvspan(
+                                rise_ts, actual_start,
+                                color="#fbbf24", alpha=0.10, zorder=0,
+                            )
+    except Exception:
+        pass
 
     axes[0].set_title(
         f"Скважина {well_id} | интервал {int(result_row['interval_idx'])}",
@@ -675,6 +727,14 @@ def _create_plot_html(
         legend_handles.append(
             plt.Line2D([0], [0], color="#be123c", linewidth=0.85, label="Salt KS shift")
         )
+    legend_handles.append(
+        mpatches.Patch(facecolor="#fbbf24", alpha=0.18, edgecolor="none",
+                       label="Зона раннего предупреждения модели")
+    )
+    legend_handles.append(
+        plt.Line2D([0], [0], color="#f97316", linewidth=1.0,
+                   label="σ окно 2ч (рост дисперсии = ранний сигнал)")
+    )
     axes[0].legend(handles=legend_handles, loc="upper right", fontsize=7, framealpha=0.9)
 
     axes[-1].set_xlabel("Время")
@@ -753,6 +813,17 @@ def _create_unlabeled_plot_html(
         elif col_name is not None and col_name in well_df.columns:
             vals = pd.to_numeric(well_df[col_name], errors="coerce")
             ax.plot(ts_pd, vals, color="#2563eb", linewidth=0.6, alpha=0.85)
+            try:
+                win = max(6, int(round(120.0 / 5.0)))
+                rstd = vals.rolling(win, min_periods=max(3, win // 4)).std()
+                if rstd.notna().any():
+                    ax2 = ax.twinx()
+                    ax2.plot(ts_pd, rstd, color="#f97316", linewidth=0.6, alpha=0.55)
+                    ax2.set_ylabel("σ 2ч", fontsize=7, color="#f97316")
+                    ax2.tick_params(axis="y", labelsize=6, colors="#f97316")
+                    ax2.grid(False)
+            except Exception:
+                pass
 
         for det_ts in predicted_starts:
             ax.axvline(det_ts, color="#7c3aed", linewidth=1.5, linestyle="-.")
@@ -1004,6 +1075,23 @@ def generate_report(
           }}
           h1 {{ margin: 0 0 6px; font-size: 28px; }}
           .subtitle {{ color: var(--muted); margin: 0 0 18px; }}
+          .reading-guide {{
+            background: #fffdf5;
+            border: 1px solid #fde68a;
+            border-radius: 14px;
+            padding: 14px 18px 12px;
+            margin: 0 0 22px;
+            color: #1f2937;
+            font-size: 13.5px;
+            line-height: 1.55;
+          }}
+          .reading-guide h2 {{ margin: 0 0 8px; font-size: 16px; color: #92400e; }}
+          .reading-guide ul {{ margin: 0 0 8px; padding-left: 18px; }}
+          .reading-guide li {{ margin: 4px 0; }}
+          .reading-guide .reading-note {{
+            margin: 8px 0 0; padding-top: 8px;
+            border-top: 1px dashed #fde68a; color: #6b4f1d; font-style: italic;
+          }}
           .cards {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
@@ -1119,6 +1207,16 @@ def generate_report(
         <main class="page">
           <h1>{escape(spec.display_name)}</h1>
           <p class="subtitle">Итоговый отчёт по аномалиям. Используемый детектор: <b>{escape(_detector_label(detector_key))}</b>.</p>
+          <section class="reading-guide">
+            <h2>Как читать график</h2>
+            <ul>
+              <li><b>Score (верхняя панель)</b> — отклонение текущего паттерна от нормы. Модель смотрит на патч 8–16&nbsp;часов как на единое целое и сравнивает его с памятью нормальных патчей этой же скважины. Растёт когда <i>форма</i> патча отличается от привычной.</li>
+              <li><b>Жёлтая лента — «Зона раннего предупреждения модели»</b>. Период до отметки эксперта, в котором модель уже зафиксировала отклонение score (≥ 20% от пика внутри аномалии). Это <i>не ложная тревога</i>, а physiological preonset: параметры скважины ушли с нормального ритма раньше, чем это стало визуально очевидно.</li>
+              <li><b>Оранжевая линия «σ окно 2ч»</b> (правая ось на панелях признаков) — скользящее стандартное отклонение канала за 2-часовое окно. Если σ растёт, а уровень (синяя линия) выглядит стабильным — это <i>тот сигнал, на который реагирует модель</i>: уровень спокойный, но появилась нестабильность.</li>
+              <li><b>Зелёная вертикаль</b> — начало аномалии по разметке эксперта, <b>красная пунктирная</b> — конец, <b>фиолетовая штрих-пунктирная</b> — момент срабатывания детектора.</li>
+            </ul>
+            <p class="reading-note">Если на сыром графике канала ничего «не видно», но score растёт — посмотрите на оранжевую линию σ: модель различает <i>distribution shifts</i>, которые незаметны глазу на средних значениях.</p>
+          </section>
           <div class="cards">
             {''.join(cards)}
           </div>
