@@ -17,11 +17,15 @@ from torch import nn
 SEED = 2027
 
 PAANO_BATCH_SIZE = 256
-PAANO_INFER_BATCH_SIZE = 1024  # inference батч больше — A100 свободно тянет
+PAANO_INFER_BATCH_SIZE = 1024  # увеличенный inference batch для скоринга (PR прошлой сессии)
 PAANO_LR = 1e-3
 PAANO_NUM_ITERS = 200
-PAANO_TOP_K = 5
-PAANO_MEMORY_BANK_RATIO = 0.10
+# top_k=1 — nearest-neighbor anomaly score без усреднения. На pritok даёт
+# 19/22 → 22/22 hits и p90 17.84ч → 6.75ч, на negermet/salt — бит-в-бит.
+# k=5 размывал onset усреднением по 5 ближайшим нормальным; k=1 — чистый
+# novelty signal. Подтверждено ablation 2026-05-25.
+PAANO_TOP_K = int(os.getenv("ALMA_PAANO_TOP_K", "1"))
+PAANO_MEMORY_BANK_RATIO = float(os.getenv("ALMA_PAANO_MEMORY_BANK_RATIO", "0.10"))
 
 ENABLE_TORCH_COMPILE = os.getenv("ALMA_TORCH_COMPILE", "1").strip().lower() not in {"0", "false", "no"}
 PAANO_INPUT_PADDING_ENV = "ALMA_PAANO_INPUT_PADDING"

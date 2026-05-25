@@ -52,6 +52,7 @@ DEFAULT_BALANCE_ROWS_PER_SOURCE = 48_000
 DEFAULT_BALANCE_ROWS_PER_WELL = 8_000
 DEFAULT_BALANCE_SOURCE_POLICY = "equal_min"
 GLOBAL_MEMORY_BANK_MODE_ENV = "ALMA_GLOBAL_MEMORY_BANK_MODE"
+GLOBAL_POOL_CLASS_ONLY_ENV = "ALMA_GLOBAL_POOL_CLASS_ONLY"
 GLOBAL_MEMORY_BANK_LOCAL = "local"
 GLOBAL_MEMORY_BANK_POPULATION_FALLBACK = "population_fallback"
 GLOBAL_MEMORY_BANK_MODES = {
@@ -150,6 +151,12 @@ def prepare_global_normality_runtime(
             common_source_freq=settings.common_source_freq,
             source_overrides={anomaly_key: source_path} if source_path else None,
         )
+        if os.getenv(GLOBAL_POOL_CLASS_ONLY_ENV, "0").strip().lower() in ("1", "true", "yes"):
+            kept = {anomaly_key: prepared_by_class.get(anomaly_key, {})}
+            if verbose:
+                excluded = [k for k in prepared_by_class if k != anomaly_key]
+                print(f"  [per_class] Global pool restricted to class={anomaly_key!r}, excluded: {excluded}")
+            prepared_by_class = kept
         prepared_by_class, schema_audit_by_class = _apply_feature_schema_by_class(
             prepared_by_class,
             schema,
