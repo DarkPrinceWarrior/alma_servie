@@ -878,6 +878,37 @@ def _robust_optuna_objective_value(
     )
 
 
+def _lowo_enabled() -> bool:
+    """LOWO-CV в Optuna-objective включается env-флагом ALMA_LOWO_TUNING.
+    По умолчанию выключен — обратная совместимость.
+    """
+    return os.environ.get("ALMA_LOWO_TUNING", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _lowo_optuna_objective_value(
+    anomaly_key: str,
+    detector_key: str,
+    summary: dict[str, Any],
+    per_well_summaries: dict[str, dict[str, Any]],
+) -> float:
+    """Цель = mean per-fold _optuna_objective_value по train-скв.
+
+    Эквивалент Leave-One-Well-Out CV: т.к. config — гиперпараметр без обучения,
+    fold = одна скв. оценивается под этим cfg, объективы усредняются. Делает
+    выбор cfg робастным — нельзя «перевесить» одну лёгкую скв., все вносят
+    равный вклад.
+    """
+    if not per_well_summaries:
+        return _robust_optuna_objective_value(
+            anomaly_key, detector_key, summary, per_well_summaries
+        )
+    per_fold = [
+        _optuna_objective_value(anomaly_key, detector_key, s)
+        for s in per_well_summaries.values()
+    ]
+    return float(np.mean(per_fold))
+
+
 def _suggest_optuna_config(trial: Any, anomaly_key: str, detector_key: str) -> dict[str, Any]:
     if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
@@ -1188,7 +1219,10 @@ def _tune_config_with_optuna(
         trial.set_user_attr("per_well_summaries", per_well_summaries)
         trial.set_user_attr("well_balance", well_balance)
         trial.set_user_attr("score_key", list(score_key))
-        return _robust_optuna_objective_value(
+        objective_fn = (
+            _lowo_optuna_objective_value if _lowo_enabled() else _robust_optuna_objective_value
+        )
+        return objective_fn(
             anomaly_key,
             detector_key,
             summary,
@@ -1197,8 +1231,12 @@ def _tune_config_with_optuna(
 
     n_jobs = _tuning_n_jobs(anomaly_key, detector_key, mode)
     backend = f"optuna_tpe_{mode}"
+    objective_mode = "lowo_mean_per_well" if _lowo_enabled() else "robust_aggregate"
     if verbose:
-        print(f"  Auto-tune backend: {backend}, trials={n_trials}, n_jobs={n_jobs}, seed={seed}")
+        print(
+            f"  Auto-tune backend: {backend}, trials={n_trials}, n_jobs={n_jobs}, "
+            f"seed={seed}, objective={objective_mode}"
+        )
     tuning_start = time.monotonic()
     study.optimize(objective, n_trials=n_trials, n_jobs=n_jobs, show_progress_bar=False)
     tuning_seconds = time.monotonic() - tuning_start
