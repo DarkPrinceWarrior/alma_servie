@@ -913,6 +913,20 @@ False alarms — 0 во всех случаях.
 
 `memory_bank_ratio` (coreset size) — нулевая чувствительность в диапазоне 0.05–0.20: при N≈18617 даже 0.05 (≈930 центроидов) обеспечивает достаточное покрытие нормальности.
 
+**Валидация на production-детекторе paano_shared (с physics-branches):**
+
+| Класс / split | k=5 (`ps` snapshot, был) | k=1 (новый default) | Дельта |
+|---|---|---|---|
+| negermet all | 3/3, p90=16.39ч | 3/3, **p90=0.06ч** | ×267 быстрее |
+| **pritok all** | 21/22, p90=204.9ч | **22/22**, **p90=10.5ч** | +1 hit, ×19.5 |
+| pritok test (3138+5021) | 1/2 | **2/2** | 3138 поймана |
+| salt all | 6/6, p90=159.3ч | 6/6, **p90=30.07ч** | ×5 быстрее |
+| salt test | 2/2, median=131ч | **2/2, median=0ч** | alert ≡ anomaly_start |
+
+False alarms: 0 во всех случаях. Wall paano_shared: **318с** (без global pool).
+Эффект на paano_shared сильнее, потому что physics-branches с k=1 PaAno-branch
+складываются конструктивно: novelty-signal резкий, physics — стабильный.
+
 ### Что отброшено по результатам ablation (НЕ принято)
 
 - **PR-4.1 aggregation kernel (gaussian/bartlett).** Гипотеза «центр-взвешенное ядро = быстрее onset для медленных трендов» **falsified**. В нашем pipeline causal-onset layer стартует по дискретному пересечению порога EMA: uniform даёт жёсткий подъём score на первом патче, gaussian рассеивает старт по центру окна и задерживает срабатывание. Замеры на paano_global: negermet p90 0.06ч → 7.99ч; pritok p90 7.21ч → 91.4ч. API удалён, дефолт оставлен как раньше (`np.ones(patch_size)`).
