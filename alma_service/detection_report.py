@@ -53,6 +53,8 @@ DETECTOR_LABELS = {
 EVENT_CLASS_LABELS = {
     "labelled_anomaly": "размеченная аномалия",
     "anomaly_candidate": "кандидат аномалии",
+    "early_warning": "раннее предупреждение",
+    "pre_anomaly_zone": "зона до аномалии",
     "normal_context": "нормальный контекст",
     "regime_event": "режимное событие",
     "bad_data": "проблема качества данных",
@@ -371,6 +373,77 @@ def _domain_decision_html(pred_row: pd.Series | None) -> str:
         details.append(f"причина: {reason}")
     suffix = f" {'; '.join(details)}." if details else ""
     return f'<p class="domain-note {css_class}">{escape(action_text + suffix)}</p>'
+
+
+def _early_warning_summary_html(pred_df: pd.DataFrame, intervals_df: pd.DataFrame) -> str:
+    if pred_df.empty or "start_class" not in pred_df.columns:
+        return ""
+    early = pred_df[pred_df["start_class"].astype(str) == "early_warning"].copy()
+    if early.empty:
+        return ""
+    early["detected_time"] = pd.to_datetime(early["detected_time"], errors="coerce")
+    early = early.dropna(subset=["detected_time"]).sort_values(["well_id", "detected_time"])
+
+    crit = pred_df[pred_df["start_class"].astype(str) == "anomaly_candidate"].copy()
+    crit["detected_time"] = pd.to_datetime(crit["detected_time"], errors="coerce")
+    crit = crit.dropna(subset=["detected_time"])
+
+    iv = intervals_df.copy() if intervals_df is not None and not intervals_df.empty else pd.DataFrame()
+    if not iv.empty:
+        iv["well_id"] = iv["well_id"].astype(str).str.strip().str.lower()
+        iv["start_date"] = pd.to_datetime(iv["start_date"], errors="coerce")
+
+    rows = []
+    leads_hours: list[float] = []
+    for _, row in early.iterrows():
+        wid = str(row["well_id"]).strip().lower()
+        et = pd.Timestamp(row["detected_time"])
+        crit_after = crit[(crit["well_id"].astype(str).str.lower() == wid) & (crit["detected_time"] > et)]
+        labelled_after = iv[(iv["well_id"] == wid) & (iv["start_date"] > et)] if not iv.empty else pd.DataFrame()
+        candidates = []
+        if not crit_after.empty:
+            candidates.append(("кандидат аномалии", crit_after["detected_time"].min()))
+        if not labelled_after.empty:
+            candidates.append(("разметка эксперта", labelled_after["start_date"].min()))
+        if candidates:
+            kind, follow_ts = min(candidates, key=lambda x: x[1])
+            lead_h = (follow_ts - et).total_seconds() / 3600.0
+            leads_hours.append(lead_h)
+            lead_text = f"{lead_h:.1f} ч"
+            follow_text = f"{kind}: {_format_dt(follow_ts)}"
+        else:
+            lead_text = "—"
+            follow_text = "нет последующего события"
+        rows.append(
+            f"<tr><td>{escape(str(row['well_id']))}</td><td>{_format_dt(et)}</td>"
+            f"<td>{escape(follow_text)}</td><td>{lead_text}</td></tr>"
+        )
+
+    n = len(early)
+    n_wells = early["well_id"].nunique()
+    if leads_hours:
+        med = float(np.median(leads_hours))
+        mx = float(np.max(leads_hours))
+        summary_line = (
+            f"Всего {n} ранних предупреждений на {n_wells} скв.; "
+            f"медиана упреждения {med:.1f} ч, максимум {mx:.1f} ч."
+        )
+    else:
+        summary_line = f"Всего {n} ранних предупреждений на {n_wells} скв.; упреждение не оценить (нет последующих событий)."
+
+    table_html = (
+        "<table class=\"early-warning-table\">"
+        "<thead><tr><th>Скважина</th><th>Раннее предупреждение</th>"
+        "<th>Последующее событие</th><th>Упреждение</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table>"
+    )
+    return (
+        "<section class=\"card early-warning-card\">"
+        "<h3>Ранние предупреждения</h3>"
+        f"<p class=\"meta\">{escape(summary_line)}</p>"
+        f"{table_html}"
+        "</section>"
+    )
 
 
 def _domain_summary_html(pred_df: pd.DataFrame) -> str:
@@ -909,6 +982,9 @@ def generate_report(
             summary_payload = {"detector": detector_key, "splits": split_summaries}
 
     cards = []
+    early_warning_html = _early_warning_summary_html(pred_df, intervals_df)
+    if early_warning_html:
+        cards.append(early_warning_html)
     for split_name in ["all", "train", "test"]:
         split_payload = summary_payload.get("splits", {}).get(split_name)
         if not split_payload:
@@ -1092,6 +1168,19 @@ def generate_report(
             margin: 8px 0 0; padding-top: 8px;
             border-top: 1px dashed #fde68a; color: #6b4f1d; font-style: italic;
           }}
+          .early-warning-card {{
+            grid-column: 1 / -1;
+            background: #fefce8;
+            border-color: #facc15;
+          }}
+          .early-warning-card h3 {{ color: #854d0e; margin: 0 0 6px; }}
+          .early-warning-card .meta {{ margin: 0 0 10px; color: #6b4f1d; font-size: 13px; }}
+          .early-warning-table {{ width: 100%; border-collapse: collapse; font-size: 12.5px; }}
+          .early-warning-table th, .early-warning-table td {{
+            text-align: left; padding: 6px 10px;
+            border-bottom: 1px solid #fde68a;
+          }}
+          .early-warning-table th {{ background: #fef9c3; color: #713f12; font-weight: 600; }}
           .cards {{
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));

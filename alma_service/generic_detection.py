@@ -32,6 +32,7 @@ from alma_service.detection_artifacts import (
     incidents_path,
     load_json,
     normalize_detector_key,
+    precursor_path,
     predicted_starts_path,
     report_path,
     results_path,
@@ -53,6 +54,14 @@ from alma_service.onset_detection import (
     CausalThresholds,
     calibrate_causal_thresholds_from_reference_mask,
     detect_causal_onsets_masked,
+)
+from alma_service.precursor_logreg import (
+    PrecursorLogregModel,
+    extract_features as precursor_extract_features,
+    load_model as load_precursor_model,
+    save_model as save_precursor_model,
+    score_proba as precursor_score_proba,
+    train_lowo as train_precursor_lowo,
 )
 from alma_service.paano_defaults import (
     LONG_PATCH,
@@ -105,7 +114,17 @@ BASE_ONSET_CONFIG = {
     "early_warning_dedupe_hours": 2.0,
     "early_warning_cooldown_hours": 3.0,
     "early_warning_rearm_minutes": 30.0,
+    "early_warning_logreg_threshold": 0.0,
+    "early_warning_logreg_min_run_points": 3,
 }
+
+ANOMALY_PRECURSOR_DEFAULT_THRESHOLD = {
+    "negermet": 0.0093,
+    "pritok": 0.815,
+    "salt": 0.539,
+}
+
+PRECURSOR_TRAIN_PRESTART_HOURS = 24.0
 
 BASE_ONSET_TUNE_GRID = {
     "target_far_per_day": [0.10, 0.25, 0.50],
@@ -221,6 +240,9 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     cfg.update(profile.get("defaults", {}))
     if _is_paano_production_detector(detector_key):
         cfg["fusion_weight_short"] = 0.60
+    default_thr = ANOMALY_PRECURSOR_DEFAULT_THRESHOLD.get(anomaly_key)
+    if default_thr is not None:
+        cfg["early_warning_logreg_threshold"] = float(default_thr)
     return cfg
 
 
@@ -537,10 +559,65 @@ def _score_for_config(run: PreparedDetectorRun, detector_key: str, cfg: dict[str
     return score.astype(np.float32)
 
 
+def _early_starts_from_precursor(
+    precursor_model: PrecursorLogregModel,
+    timestamps: np.ndarray,
+    score: np.ndarray,
+    run: PreparedDetectorRun,
+    onset_allowed_mask: np.ndarray,
+    threshold: float,
+    min_run_points: int,
+    cooldown_hours: float,
+    critical_starts: list[pd.Timestamp],
+    dedupe_hours: float,
+) -> list[pd.Timestamp]:
+    if threshold <= 0.0 or len(score) == 0:
+        return []
+    features = precursor_extract_features(
+        timestamps,
+        np.asarray(score, dtype=np.float64),
+        run.prepared.raw_columns,
+        run.prepared.raw_matrix,
+        ema_alpha=precursor_model.ema_alpha,
+        rolling_window_minutes=precursor_model.rolling_window_minutes,
+    )
+    proba = precursor_score_proba(precursor_model, features)
+    cooldown_ns = int(cooldown_hours * 3600 * 1e9)
+    last_fire_ns = -10**18
+    run_count = 0
+    fires: list[pd.Timestamp] = []
+    valid_mask = np.asarray(onset_allowed_mask, dtype=bool)
+    for i, t in enumerate(timestamps):
+        if not valid_mask[i] or proba[i] < threshold:
+            run_count = 0
+            continue
+        run_count += 1
+        if run_count < min_run_points:
+            continue
+        t_ns = pd.Timestamp(t).value
+        if t_ns - last_fire_ns < cooldown_ns:
+            continue
+        fires.append(pd.Timestamp(t))
+        last_fire_ns = t_ns
+        run_count = 0
+    if not fires:
+        return []
+    dedupe_ns = int(dedupe_hours * 3600 * 1e9)
+    crit_ns = [pd.Timestamp(t).value for t in critical_starts]
+    if not crit_ns:
+        return fires
+    return [
+        t for t in fires
+        if all(abs(pd.Timestamp(t).value - c) > dedupe_ns for c in crit_ns)
+    ]
+
+
 def _detect_starts_for_run(
     detector_key: str,
     run: PreparedDetectorRun,
     cfg: dict[str, Any],
+    *,
+    precursor_model: PrecursorLogregModel | None = None,
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp], list[pd.Timestamp]]:
     cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
@@ -569,8 +646,23 @@ def _detect_starts_for_run(
         hysteresis_scale=float(cfg["hysteresis_scale"]),
         bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
     )
-    early_scale = float(cfg.get("early_warning_threshold_scale", 0.0))
     early_starts: list[pd.Timestamp] = []
+    early_threshold_logreg = float(cfg.get("early_warning_logreg_threshold", 0.0))
+    if precursor_model is not None and early_threshold_logreg > 0.0:
+        early_starts = _early_starts_from_precursor(
+            precursor_model,
+            run.prepared.timestamps,
+            score,
+            run,
+            run.prepared.onset_allowed_mask,
+            threshold=early_threshold_logreg,
+            min_run_points=int(cfg.get("early_warning_logreg_min_run_points", 3)),
+            cooldown_hours=float(cfg.get("early_warning_cooldown_hours", 3.0)),
+            critical_starts=starts,
+            dedupe_hours=float(cfg.get("early_warning_dedupe_hours", 2.0)),
+        )
+        return score, thresholds, starts, early_starts
+    early_scale = float(cfg.get("early_warning_threshold_scale", 0.0))
     if early_scale > 0.0 and 0.0 < early_scale < 1.0:
         early_thresholds = CausalThresholds(
             score_threshold=thresholds.score_threshold * early_scale,
@@ -1528,6 +1620,112 @@ def _tune_config(
     return _tune_config_with_optuna(anomaly_key, detector_key, train_runs, train_intervals, verbose)
 
 
+def _collect_precursor_training_data(
+    detector_key: str,
+    train_runs: dict[str, PreparedDetectorRun],
+    train_intervals: pd.DataFrame,
+    cfg: dict[str, Any],
+    anomaly_key: str,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Build per-well features+target for precursor model.
+
+    target = 1 inside [start-PRESTART_TOLERANCE_HOURS, start) для labelled-интервалов;
+    target = 0 для нормальной части (lab=0). Labelled-интервалы исключены из выборки
+    через valid mask (там target неопределён — это уже зона аномалии, не precursor)."""
+    per_well: dict[str, dict[str, np.ndarray]] = {}
+    if train_intervals is None or train_intervals.empty:
+        return per_well
+
+    intervals_lookup = train_intervals.copy()
+    intervals_lookup["well_id"] = intervals_lookup["well_id"].astype(str).str.strip().str.lower()
+    intervals_lookup["start_date"] = pd.to_datetime(intervals_lookup["start_date"])
+    intervals_lookup["end_date"] = pd.to_datetime(intervals_lookup["end_date"])
+
+    pre_tol = pd.Timedelta(hours=float(PRECURSOR_TRAIN_PRESTART_HOURS))
+
+    for well_id, run in train_runs.items():
+        score = _score_for_config(run, detector_key, cfg)
+        if _score_unavailable_reason(run) is not None:
+            continue
+        timestamps = run.prepared.timestamps
+        ts = pd.to_datetime(timestamps)
+        n = len(ts)
+        if n == 0:
+            continue
+        pre_mask = np.zeros(n, dtype=bool)
+        labelled_mask = np.zeros(n, dtype=bool)
+        wid_norm = str(well_id).strip().lower()
+        w_intervals = intervals_lookup[intervals_lookup["well_id"] == wid_norm]
+        for _, row in w_intervals.iterrows():
+            start = row["start_date"]
+            end = row["end_date"]
+            if pd.isna(start) or pd.isna(end):
+                continue
+            in_label = (ts >= start) & (ts <= end)
+            labelled_mask |= in_label
+            in_pre = (ts >= start - pre_tol) & (ts < start)
+            pre_mask |= in_pre
+
+        target = pre_mask.astype(int)
+        valid = ~labelled_mask
+        features = precursor_extract_features(
+            timestamps,
+            np.asarray(score, dtype=np.float64),
+            run.prepared.raw_columns,
+            run.prepared.raw_matrix,
+        )
+        per_well[str(well_id)] = {
+            "features": features,
+            "target": target,
+            "valid": valid,
+        }
+    return per_well
+
+
+def _train_or_load_precursor(
+    spec: DetectionSpec,
+    detector_key: str,
+    train_runs: dict[str, PreparedDetectorRun],
+    train_intervals: pd.DataFrame,
+    cfg: dict[str, Any],
+    retune: bool,
+    verbose: bool,
+) -> PrecursorLogregModel | None:
+    path = precursor_path(spec, detector_key)
+    if path.exists() and not retune:
+        model = load_precursor_model(path)
+        if model is not None and verbose:
+            print(
+                f"Loaded precursor model from {path} "
+                f"(pos={model.train_pos}, neg={model.train_neg}, "
+                f"oof_auc={model.oof_auc if model.oof_auc is not None else float('nan'):.4f})"
+            )
+        return model
+    if not train_runs or train_intervals is None or train_intervals.empty:
+        return None
+    try:
+        per_well = _collect_precursor_training_data(
+            detector_key, train_runs, train_intervals, cfg, spec.anomaly_key
+        )
+        if not per_well:
+            if verbose:
+                print("Precursor training skipped: no per-well features.")
+            return None
+        model = train_precursor_lowo(per_well)
+    except Exception as exc:
+        if verbose:
+            print(f"Precursor training failed: {exc!r}")
+        return None
+    save_precursor_model(model, path)
+    if verbose:
+        oof = model.oof_auc if model.oof_auc is not None else float("nan")
+        print(
+            f"Trained precursor model: pos={model.train_pos}, neg={model.train_neg}, "
+            f"n_wells={model.n_wells}, oof_auc={oof:.4f} -> {path}"
+        )
+    return model
+
+
 def _load_or_build_config(
     spec: DetectionSpec,
     detector_key: str,
@@ -1573,6 +1771,7 @@ def _build_score_rows(
     *,
     anomaly_key: str = "",
     intervals: pd.DataFrame | None = None,
+    precursor_model: PrecursorLogregModel | None = None,
 ) -> tuple[
     list[dict[str, Any]],
     dict[str, list[pd.Timestamp]],
@@ -1585,7 +1784,9 @@ def _build_score_rows(
     detail_map: dict[str, dict[str, Any]] = {}
 
     for well_id, run in runs.items():
-        score, thresholds, starts, early_starts = _detect_starts_for_run(detector_key, run, cfg)
+        score, thresholds, starts, early_starts = _detect_starts_for_run(
+            detector_key, run, cfg, precursor_model=precursor_model
+        )
         predicted[well_id] = starts
         early_predicted[well_id] = early_starts
         score_unavailable_reason = _score_unavailable_reason(run)
@@ -1845,12 +2046,23 @@ def run_detection(
         verbose=verbose,
     )
 
+    precursor_model = _train_or_load_precursor(
+        spec=spec,
+        detector_key=detector_key,
+        train_runs=train_runs,
+        train_intervals=train_intervals,
+        cfg=cfg,
+        retune=retune,
+        verbose=verbose,
+    )
+
     score_rows, predicted, early_predicted, detail_map = _build_score_rows(
         detector_key,
         detector_runs,
         cfg,
         anomaly_key=spec.anomaly_key,
         intervals=intervals,
+        precursor_model=precursor_model,
     )
     score_df = pd.DataFrame(score_rows)
     pred_df = _predicted_with_early_warning(predicted, early_predicted)
@@ -1987,6 +2199,7 @@ def run_single_well(
 
     cfg_payload = load_json(config_path(spec, detector_key))
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
+    precursor_model = load_precursor_model(precursor_path(spec, detector_key))
 
     if save_dir is not None:
         score_rows, predicted, early_predicted, _detail_map = _build_score_rows(
@@ -1995,6 +2208,7 @@ def run_single_well(
             cfg,
             anomaly_key=spec.anomaly_key,
             intervals=intervals,
+            precursor_model=precursor_model,
         )
         score_df = pd.DataFrame(score_rows)
         pred_df = _predicted_with_early_warning(predicted, early_predicted)
@@ -2038,7 +2252,9 @@ def run_single_well(
         print(f"Detected starts: {starts_list}")
         return
 
-    score, thresholds, starts, early_starts = _detect_starts_for_run(detector_key, run, cfg)
+    score, thresholds, starts, early_starts = _detect_starts_for_run(
+        detector_key, run, cfg, precursor_model=precursor_model
+    )
     print(f"Prepared detail: {json.dumps(run.prepared.detail, ensure_ascii=False, indent=2)}")
     print(f"Detector detail: {json.dumps(run.score_output.detail, ensure_ascii=False, indent=2)}")
     print(f"Thresholds: {json.dumps(asdict(thresholds), ensure_ascii=False, indent=2)}")

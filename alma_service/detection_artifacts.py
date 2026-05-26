@@ -56,6 +56,10 @@ def tuning_path(spec: DetectionSpec, detector: str) -> Path:
     return DB_DIR / f"{detector_stem(spec, detector)}_tuning.json"
 
 
+def precursor_path(spec: DetectionSpec, detector: str) -> Path:
+    return DB_DIR / f"{detector_stem(spec, detector)}_precursor.json"
+
+
 def summary_path(spec: DetectionSpec, detector: str) -> Path:
     return results_path(spec, detector).with_suffix(".summary.json")
 
