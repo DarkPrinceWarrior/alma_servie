@@ -50,6 +50,7 @@ from alma_service.generic_detectors import (
     set_seed,
 )
 from alma_service.onset_detection import (
+    CausalThresholds,
     calibrate_causal_thresholds_from_reference_mask,
     detect_causal_onsets_masked,
 )
@@ -100,6 +101,10 @@ BASE_ONSET_CONFIG = {
     "gate_mode": "score_ema",
     "hysteresis_scale": 0.60,
     "bypass_cooldown_after_clear": True,
+    "early_warning_threshold_scale": 0.0,
+    "early_warning_dedupe_hours": 2.0,
+    "early_warning_cooldown_hours": 3.0,
+    "early_warning_rearm_minutes": 30.0,
 }
 
 BASE_ONSET_TUNE_GRID = {
@@ -536,7 +541,7 @@ def _detect_starts_for_run(
     detector_key: str,
     run: PreparedDetectorRun,
     cfg: dict[str, Any],
-) -> tuple[np.ndarray, Any, list[pd.Timestamp]]:
+) -> tuple[np.ndarray, Any, list[pd.Timestamp], list[pd.Timestamp]]:
     cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
     score_unavailable_reason = _score_unavailable_reason(run)
@@ -549,7 +554,7 @@ def _detect_starts_for_run(
         ema_alpha=float(cfg["ema_alpha"]),
     )
     if score_unavailable_reason is not None:
-        return score, thresholds, []
+        return score, thresholds, [], []
     starts = detect_causal_onsets_masked(
         scores=score,
         timestamps=run.prepared.timestamps,
@@ -564,7 +569,41 @@ def _detect_starts_for_run(
         hysteresis_scale=float(cfg["hysteresis_scale"]),
         bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
     )
-    return score, thresholds, starts
+    early_scale = float(cfg.get("early_warning_threshold_scale", 0.0))
+    early_starts: list[pd.Timestamp] = []
+    if early_scale > 0.0 and 0.0 < early_scale < 1.0:
+        early_thresholds = CausalThresholds(
+            score_threshold=thresholds.score_threshold * early_scale,
+            ema_z_threshold=thresholds.ema_z_threshold * early_scale,
+            cusum_threshold=thresholds.cusum_threshold * early_scale,
+            drift=thresholds.drift,
+            baseline_median=thresholds.baseline_median,
+            baseline_mad=thresholds.baseline_mad,
+            quantile=thresholds.quantile,
+        )
+        early_cooldown = float(cfg.get("early_warning_cooldown_hours", cfg["cooldown_hours"]))
+        early_rearm = float(cfg.get("early_warning_rearm_minutes", cfg["rearm_window_minutes"]))
+        early_all = detect_causal_onsets_masked(
+            scores=score,
+            timestamps=run.prepared.timestamps,
+            diagnostics=diagnostics,
+            thresholds=early_thresholds,
+            reference_mask=run.prepared.reference_mask,
+            onset_mask=run.prepared.onset_allowed_mask,
+            min_run_points=int(cfg["min_run_points"]),
+            cooldown_hours=early_cooldown,
+            rearm_window_minutes=early_rearm,
+            gate_mode=str(cfg["gate_mode"]),
+            hysteresis_scale=float(cfg["hysteresis_scale"]),
+            bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
+        )
+        dedupe_ns = int(float(cfg.get("early_warning_dedupe_hours", 2.0)) * 3600 * 1e9)
+        crit_ns = [pd.Timestamp(t).value for t in starts]
+        for t in early_all:
+            t_ns = pd.Timestamp(t).value
+            if all(abs(t_ns - c) > dedupe_ns for c in crit_ns):
+                early_starts.append(t)
+    return score, thresholds, starts, early_starts
 
 
 def _score_unavailable_reason(run: PreparedDetectorRun) -> str | None:
@@ -741,7 +780,7 @@ def _detect_starts_for_config(
         if starts_cache is not None and cache_key in starts_cache:
             predicted[well_id] = starts_cache[cache_key]
             continue
-        _, _, starts = _detect_starts_for_run(detector_key, run, cfg)
+        _, _, starts, _ = _detect_starts_for_run(detector_key, run, cfg)
         predicted[well_id] = starts
         if starts_cache is not None:
             starts_cache[cache_key] = starts
@@ -1534,14 +1573,21 @@ def _build_score_rows(
     *,
     anomaly_key: str = "",
     intervals: pd.DataFrame | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, list[pd.Timestamp]], dict[str, dict[str, Any]]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[pd.Timestamp]],
+    dict[str, list[pd.Timestamp]],
+    dict[str, dict[str, Any]],
+]:
     score_rows: list[dict[str, Any]] = []
     predicted: dict[str, list[pd.Timestamp]] = {}
+    early_predicted: dict[str, list[pd.Timestamp]] = {}
     detail_map: dict[str, dict[str, Any]] = {}
 
     for well_id, run in runs.items():
-        score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
+        score, thresholds, starts, early_starts = _detect_starts_for_run(detector_key, run, cfg)
         predicted[well_id] = starts
+        early_predicted[well_id] = early_starts
         score_unavailable_reason = _score_unavailable_reason(run)
         score_valid = score_unavailable_reason is None
         well_intervals = None
@@ -1561,6 +1607,7 @@ def _build_score_rows(
             "detector": run.score_output.detail,
             "thresholds": asdict(thresholds),
             "n_predicted_starts": len(starts),
+            "n_early_warning_starts": len(early_starts),
             "score_valid": score_valid,
             "score_unavailable_reason": score_unavailable_reason,
             "input_contract": str(run.score_output.detail.get("input_contract", "real_window")),
@@ -1590,7 +1637,22 @@ def _build_score_rows(
                 row[name] = float(values[idx])
             score_rows.append(row)
 
-    return score_rows, predicted, detail_map
+    return score_rows, predicted, early_predicted, detail_map
+
+
+def _predicted_with_early_warning(
+    critical: dict[str, list[pd.Timestamp]],
+    early: dict[str, list[pd.Timestamp]],
+) -> pd.DataFrame:
+    base = predicted_from_mapping(critical)
+    base["event_class"] = ""
+    if early and any(len(v) > 0 for v in early.values()):
+        early_df = predicted_from_mapping(early)
+        if not early_df.empty:
+            early_df["event_class"] = "early_warning"
+            base = pd.concat([base, early_df], ignore_index=True)
+            base = base.sort_values(["well_id", "detected_time"]).reset_index(drop=True)
+    return base
 
 
 def _attach_predicted_start_status(pred_df: pd.DataFrame, score_df: pd.DataFrame) -> pd.DataFrame:
@@ -1605,12 +1667,26 @@ def _attach_predicted_start_status(pred_df: pd.DataFrame, score_df: pd.DataFrame
     result = pred_df.copy()
     result["well_id"] = result["well_id"].astype(str).str.strip().str.lower()
     result["detected_time"] = pd.to_datetime(result["detected_time"])
-    return result.merge(
+    preserved: dict[str, pd.Series] = {}
+    for column in STATUS_COLUMNS:
+        if column in result.columns:
+            preserved[column] = result[column]
+            result = result.drop(columns=[column])
+    merged = result.merge(
         status_df,
         left_on=["well_id", "detected_time"],
         right_on=["well_id", "timestamp"],
         how="left",
     ).drop(columns=["timestamp"])
+    for column, original in preserved.items():
+        original = original.reindex(merged.index)
+        if column in merged.columns:
+            base = merged[column]
+            mask_keep = original.fillna("").astype(str).str.strip() != ""
+            merged[column] = base.where(~mask_keep, original)
+        else:
+            merged[column] = original
+    return merged
 
 
 def _merge_result_details(
@@ -1769,7 +1845,7 @@ def run_detection(
         verbose=verbose,
     )
 
-    score_rows, predicted, detail_map = _build_score_rows(
+    score_rows, predicted, early_predicted, detail_map = _build_score_rows(
         detector_key,
         detector_runs,
         cfg,
@@ -1777,7 +1853,7 @@ def run_detection(
         intervals=intervals,
     )
     score_df = pd.DataFrame(score_rows)
-    pred_df = predicted_from_mapping(predicted)
+    pred_df = _predicted_with_early_warning(predicted, early_predicted)
     pred_df = _attach_predicted_start_status(pred_df, score_df)
     if not pred_df.empty:
         pred_df["anomaly"] = spec.anomaly_key
@@ -1913,7 +1989,7 @@ def run_single_well(
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
 
     if save_dir is not None:
-        score_rows, predicted, _detail_map = _build_score_rows(
+        score_rows, predicted, early_predicted, _detail_map = _build_score_rows(
             detector_key,
             {well_id: run},
             cfg,
@@ -1921,7 +1997,7 @@ def run_single_well(
             intervals=intervals,
         )
         score_df = pd.DataFrame(score_rows)
-        pred_df = predicted_from_mapping(predicted)
+        pred_df = _predicted_with_early_warning(predicted, early_predicted)
         pred_df = _attach_predicted_start_status(pred_df, score_df)
         if not pred_df.empty:
             pred_df["anomaly"] = spec.anomaly_key
@@ -1962,11 +2038,13 @@ def run_single_well(
         print(f"Detected starts: {starts_list}")
         return
 
-    score, thresholds, starts = _detect_starts_for_run(detector_key, run, cfg)
+    score, thresholds, starts, early_starts = _detect_starts_for_run(detector_key, run, cfg)
     print(f"Prepared detail: {json.dumps(run.prepared.detail, ensure_ascii=False, indent=2)}")
     print(f"Detector detail: {json.dumps(run.score_output.detail, ensure_ascii=False, indent=2)}")
     print(f"Thresholds: {json.dumps(asdict(thresholds), ensure_ascii=False, indent=2)}")
     print(f"Detected starts: {[pd.Timestamp(ts) for ts in starts]}")
+    if early_starts:
+        print(f"Early warnings: {[pd.Timestamp(ts) for ts in early_starts]}")
     print(f"Score summary: min={float(np.min(score)):.4f}, median={float(np.median(score)):.4f}, max={float(np.max(score)):.4f}")
 
     if not intervals.empty:

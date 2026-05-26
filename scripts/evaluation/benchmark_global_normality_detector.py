@@ -43,6 +43,7 @@ from alma_service.generic_detection import (
     _build_score_rows,
     _incident_merge_window_hours,
     _load_or_build_config,
+    _predicted_with_early_warning,
     _prepare_all_wells,
     _resolve_torch_device,
     _tune_config,
@@ -600,7 +601,7 @@ def _evaluate_global_runs(
         )
         tuning_summary = {"retune": False}
 
-    score_rows, predicted, detail_map = _build_score_rows(
+    score_rows, predicted, early_predicted, detail_map = _build_score_rows(
         "paano_shared",
         detector_runs,
         cfg,
@@ -608,7 +609,7 @@ def _evaluate_global_runs(
         intervals=intervals,
     )
     score_df = pd.DataFrame(score_rows)
-    pred_df = predicted_from_mapping(predicted)
+    pred_df = _predicted_with_early_warning(predicted, early_predicted)
     pred_df = _attach_predicted_start_status(pred_df, score_df)
     if not pred_df.empty:
         pred_df["anomaly"] = anomaly_key

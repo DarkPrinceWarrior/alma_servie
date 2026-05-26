@@ -27,6 +27,7 @@ EVENT_REGIME = "regime_event"
 EVENT_PRE_ANOMALY = "pre_anomaly_zone"
 EVENT_LABELLED_ANOMALY = "labelled_anomaly"
 EVENT_ANOMALY_CANDIDATE = "anomaly_candidate"
+EVENT_EARLY_WARNING = "early_warning"
 ZONE_OPERATIONAL_EVENT = "operational_event"
 
 FREQUENCY_ALIASES = ("выходная частота", "частота")

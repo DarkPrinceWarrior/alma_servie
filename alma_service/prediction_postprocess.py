@@ -6,6 +6,7 @@ import pandas as pd
 
 from alma_service.telemetry_status import (
     EVENT_BAD_DATA,
+    EVENT_EARLY_WARNING,
     EVENT_LABELLED_ANOMALY,
     EVENT_PRE_ANOMALY,
     EVENT_REGIME,
@@ -16,11 +17,13 @@ START_BAD_DATA = "bad_data"
 START_REGIME_EVENT = "regime_event"
 START_PRE_ANOMALY_ZONE = "pre_anomaly_zone"
 START_LABELLED_ANOMALY = "labelled_anomaly"
+START_EARLY_WARNING = "early_warning"
 
 ACTIONABLE_START_CLASSES = {
     START_ANOMALY_CANDIDATE,
     START_PRE_ANOMALY_ZONE,
     START_LABELLED_ANOMALY,
+    START_EARLY_WARNING,
 }
 
 
@@ -36,6 +39,8 @@ def _start_class(event_class: object) -> str:
         return START_BAD_DATA
     if value == EVENT_REGIME:
         return START_REGIME_EVENT
+    if value == EVENT_EARLY_WARNING:
+        return START_EARLY_WARNING
     if value == EVENT_PRE_ANOMALY:
         return START_PRE_ANOMALY_ZONE
     if value == EVENT_LABELLED_ANOMALY:
