@@ -467,6 +467,20 @@ def prepare_engineered_well(
         return None
 
     normal_window_detail: dict[str, object] = {}
+    if normal_reference_fraction is not None:
+        fraction = float(normal_reference_fraction)
+        if not 0.0 < fraction <= 1.0:
+            raise ValueError(f"normal_reference_fraction must be in (0, 1], got {fraction}")
+        explicit_end = int(np.ceil(len(wd) * fraction))
+        explicit_end = max(explicit_end, min_ref_points)
+        explicit_end = min(explicit_end, len(wd) - patch_size)
+        reference_mask = np.zeros(len(wd), dtype=bool)
+        reference_mask[:explicit_end] = True
+        reference_end_idx = explicit_end
+        normal_window_detail["normal_reference_fraction"] = fraction
+        normal_window_detail["explicit_reference_end_idx"] = explicit_end
+        normal_window_detail["reference_points"] = int(reference_mask.sum())
+        normal_window_detail["bypass_stability_for_reference"] = True
     if reference_policy == REFERENCE_POLICY_NORMAL_WINDOWS:
         normal_window_detail["normal_windows_source"] = "expert_confirmed_full_pre_anomaly_normal"
         if anomaly_intervals is not None and not anomaly_intervals.empty:

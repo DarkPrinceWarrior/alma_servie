@@ -2169,6 +2169,7 @@ def run_single_well(
     retune: bool = False,
     save_dir: str | None = None,
     reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
+    normal_reference_fraction: float | None = None,
 ) -> None:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -2198,6 +2199,7 @@ def run_single_well(
         min_reference_coverage=MIN_REFERENCE_COVERAGE,
         min_total_coverage=MIN_TOTAL_COVERAGE,
         reference_policy=reference_policy,
+        normal_reference_fraction=normal_reference_fraction,
     )
     if prepared is None:
         print("No usable data after engineered preprocessing.")

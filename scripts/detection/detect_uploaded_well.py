@@ -25,17 +25,36 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from alma_service.anomaly_specs import get_dataset_spec
 from alma_service.dataset_builder import _build_well_frame, parse_parameter_series
-from alma_service.detection_artifacts import default_detector_for
+from alma_service.detection_artifacts import (
+    DETECTOR_KEYS,
+    default_detector_for,
+    normalize_detector_key,
+)
 from alma_service.generic_detection import run_single_well
 from alma_service.paths import ensure_dir
 from alma_service.tabular_io import write_table
 
 ANOMALIES = ("negermet", "pritok", "salt")
+DETECTOR_AUTO = "auto"
+PAANO_GLOBAL_COMMON_FREQ = "5min"  # paano_global uses a common 5min schema for all 3 types
+BLIND_REFERENCE_FRACTION_DEFAULT = 0.2  # blind wells: first 20% of points as reference
 
 
-def build_single_well_parquet(anomaly: str, excel_path: Path, well_id: str, out_dir: Path) -> Path:
-    spec = get_dataset_spec(anomaly)
-    freq = spec.default_freq
+def _resolve_freq(anomaly: str, detector: str, override: str | None) -> str:
+    if override:
+        return override
+    if detector == "paano_global":
+        return PAANO_GLOBAL_COMMON_FREQ
+    return get_dataset_spec(anomaly).default_freq
+
+
+def build_single_well_parquet(
+    anomaly: str,
+    excel_path: Path,
+    well_id: str,
+    out_dir: Path,
+    freq: str,
+) -> Path:
     series_list = parse_parameter_series(well_id, excel_path)
     if not series_list:
         raise RuntimeError(f"Не удалось распарсить параметры из {excel_path}")
@@ -57,17 +76,33 @@ def build_single_well_parquet(anomaly: str, excel_path: Path, well_id: str, out_
     return out_path
 
 
-def run_for_anomaly(anomaly: str, excel_path: Path, well_id: str, output_dir: Path) -> bool:
+def _resolve_detector(anomaly: str, requested: str) -> str:
+    if requested == DETECTOR_AUTO:
+        return default_detector_for(anomaly)
+    return normalize_detector_key(requested)
+
+
+def run_for_anomaly(
+    anomaly: str,
+    excel_path: Path,
+    well_id: str,
+    output_dir: Path,
+    detector_choice: str,
+    freq_override: str | None = None,
+    normal_reference_fraction: float | None = BLIND_REFERENCE_FRACTION_DEFAULT,
+) -> bool:
     anomaly_dir = output_dir / anomaly
     try:
-        detector = default_detector_for(anomaly)
-        source_parquet = build_single_well_parquet(anomaly, excel_path, well_id, anomaly_dir)
+        detector = _resolve_detector(anomaly, detector_choice)
+        freq = _resolve_freq(anomaly, detector, freq_override)
+        source_parquet = build_single_well_parquet(anomaly, excel_path, well_id, anomaly_dir, freq)
         run_single_well(
             anomaly_key=anomaly,
             well_id=well_id,
             detector=detector,
             source_path=str(source_parquet),
             save_dir=str(anomaly_dir),
+            normal_reference_fraction=normal_reference_fraction,
         )
         if not (anomaly_dir / "summary.json").exists():
             raise RuntimeError("Детектор не сформировал результат (недостаточно данных).")
@@ -93,21 +128,56 @@ def main() -> None:
     parser.add_argument("--excel", required=True, help="Path to the raw single-well xlsx")
     parser.add_argument("--well-id", required=True, help="Well identifier")
     parser.add_argument("--output-dir", required=True, help="Directory for per-class results")
+    parser.add_argument(
+        "--detector",
+        default="paano_global",
+        choices=sorted({DETECTOR_AUTO, *DETECTOR_KEYS}),
+        help="Detector key (default: paano_global; 'auto' = per-anomaly production default).",
+    )
+    parser.add_argument(
+        "--anomalies",
+        default=",".join(ANOMALIES),
+        help="Comma-separated subset of anomalies to score (default: negermet,pritok,salt).",
+    )
+    parser.add_argument(
+        "--freq",
+        default=None,
+        help="Override resampling freq (e.g. 5min). Default: 5min for paano_global, spec.default_freq otherwise.",
+    )
+    parser.add_argument(
+        "--normal-reference-fraction",
+        type=float,
+        default=BLIND_REFERENCE_FRACTION_DEFAULT,
+        help=f"Blind wells: fraction of first points used as normal reference (default: {BLIND_REFERENCE_FRACTION_DEFAULT}).",
+    )
     args = parser.parse_args()
 
     excel_path = Path(args.excel).resolve()
     if not excel_path.exists():
         raise FileNotFoundError(excel_path)
 
+    requested_anomalies = tuple(a.strip().lower() for a in args.anomalies.split(",") if a.strip())
+    unknown = [a for a in requested_anomalies if a not in ANOMALIES]
+    if unknown:
+        raise ValueError(f"Unknown anomalies: {unknown}; supported: {ANOMALIES}")
+
     output_dir = Path(args.output_dir)
     ensure_dir(output_dir)
 
     ok_count = 0
-    for anomaly in ANOMALIES:
-        if run_for_anomaly(anomaly, excel_path, args.well_id, output_dir):
+    for anomaly in requested_anomalies:
+        if run_for_anomaly(
+            anomaly,
+            excel_path,
+            args.well_id,
+            output_dir,
+            args.detector,
+            args.freq,
+            args.normal_reference_fraction,
+        ):
             ok_count += 1
 
-    print(f"Done: {ok_count}/{len(ANOMALIES)} anomaly classes scored.")
+    print(f"Done: {ok_count}/{len(requested_anomalies)} anomaly classes scored.")
     if ok_count == 0:
         sys.exit(1)
 
