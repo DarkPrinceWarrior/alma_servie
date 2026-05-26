@@ -116,6 +116,7 @@ BASE_ONSET_CONFIG = {
     "early_warning_rearm_minutes": 30.0,
     "early_warning_logreg_threshold": 0.0,
     "early_warning_logreg_min_run_points": 3,
+    "early_warning_warmup_hours": 72.0,
 }
 
 ANOMALY_PRECURSOR_DEFAULT_THRESHOLD = {
@@ -570,6 +571,8 @@ def _early_starts_from_precursor(
     cooldown_hours: float,
     critical_starts: list[pd.Timestamp],
     dedupe_hours: float,
+    labelled_mask: np.ndarray | None = None,
+    warmup_hours: float = 0.0,
 ) -> list[pd.Timestamp]:
     if threshold <= 0.0 or len(score) == 0:
         return []
@@ -586,7 +589,13 @@ def _early_starts_from_precursor(
     last_fire_ns = -10**18
     run_count = 0
     fires: list[pd.Timestamp] = []
-    valid_mask = np.asarray(onset_allowed_mask, dtype=bool)
+    valid_mask = np.ones(len(timestamps), dtype=bool)
+    if labelled_mask is not None and len(labelled_mask) == len(valid_mask):
+        valid_mask = valid_mask & ~np.asarray(labelled_mask, dtype=bool)
+    if warmup_hours > 0.0 and len(timestamps) > 0:
+        ts_arr = pd.to_datetime(np.asarray(timestamps))
+        warmup_end = ts_arr[0] + pd.Timedelta(hours=float(warmup_hours))
+        valid_mask = valid_mask & np.asarray(ts_arr >= warmup_end, dtype=bool)
     for i, t in enumerate(timestamps):
         if not valid_mask[i] or proba[i] < threshold:
             run_count = 0
@@ -618,6 +627,7 @@ def _detect_starts_for_run(
     cfg: dict[str, Any],
     *,
     precursor_model: PrecursorLogregModel | None = None,
+    labelled_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp], list[pd.Timestamp]]:
     cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
@@ -660,6 +670,8 @@ def _detect_starts_for_run(
             cooldown_hours=float(cfg.get("early_warning_cooldown_hours", 3.0)),
             critical_starts=starts,
             dedupe_hours=float(cfg.get("early_warning_dedupe_hours", 2.0)),
+            labelled_mask=labelled_mask,
+            warmup_hours=float(cfg.get("early_warning_warmup_hours", 0.0)),
         )
         return score, thresholds, starts, early_starts
     early_scale = float(cfg.get("early_warning_threshold_scale", 0.0))
@@ -1784,17 +1796,25 @@ def _build_score_rows(
     detail_map: dict[str, dict[str, Any]] = {}
 
     for well_id, run in runs.items():
+        well_intervals = None
+        if intervals is not None and not intervals.empty:
+            normalized = intervals["well_id"].astype(str).str.strip().str.lower()
+            well_intervals = intervals[normalized == str(well_id).strip().lower()]
+        labelled_mask = None
+        if well_intervals is not None and not well_intervals.empty:
+            ts_arr = pd.to_datetime(np.asarray(run.prepared.timestamps))
+            first_start = pd.to_datetime(well_intervals["start_date"]).min()
+            if pd.notna(first_start):
+                labelled_mask = np.asarray(ts_arr >= first_start, dtype=bool)
         score, thresholds, starts, early_starts = _detect_starts_for_run(
-            detector_key, run, cfg, precursor_model=precursor_model
+            detector_key, run, cfg,
+            precursor_model=precursor_model,
+            labelled_mask=labelled_mask,
         )
         predicted[well_id] = starts
         early_predicted[well_id] = early_starts
         score_unavailable_reason = _score_unavailable_reason(run)
         score_valid = score_unavailable_reason is None
-        well_intervals = None
-        if intervals is not None and not intervals.empty:
-            normalized = intervals["well_id"].astype(str).str.strip().str.lower()
-            well_intervals = intervals[normalized == str(well_id).strip().lower()]
         status_frame = build_telemetry_status(
             timestamps=run.prepared.timestamps,
             raw_columns=run.prepared.raw_columns,

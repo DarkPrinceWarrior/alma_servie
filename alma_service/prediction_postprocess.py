@@ -62,8 +62,10 @@ def annotate_predicted_starts(predictions: pd.DataFrame) -> pd.DataFrame:
     result["start_class"] = result["event_class"].map(_start_class)
     if "zone_status" in result.columns:
         zone = result["zone_status"].fillna("").astype(str).str.lower()
-        result.loc[zone == EVENT_PRE_ANOMALY, "start_class"] = START_PRE_ANOMALY_ZONE
-        result.loc[zone == EVENT_LABELLED_ANOMALY, "start_class"] = START_LABELLED_ANOMALY
+        event_clean = result["event_class"].fillna("").astype(str).str.strip().str.lower()
+        zone_overridable = event_clean.isin({"", EVENT_BAD_DATA, EVENT_REGIME})
+        result.loc[(zone == EVENT_PRE_ANOMALY) & zone_overridable, "start_class"] = START_PRE_ANOMALY_ZONE
+        result.loc[(zone == EVENT_LABELLED_ANOMALY) & zone_overridable, "start_class"] = START_LABELLED_ANOMALY
     result["actionable_alert"] = result["start_class"].isin(ACTIONABLE_START_CLASSES)
     result["suppression_reason"] = ""
     result.loc[result["start_class"] == START_BAD_DATA, "suppression_reason"] = "bad_data"
