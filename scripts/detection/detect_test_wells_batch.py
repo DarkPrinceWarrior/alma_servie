@@ -95,6 +95,11 @@ def main() -> None:
         default=BLIND_REFERENCE_FRACTION_DEFAULT,
         help=f"Blind wells: first N points fraction used as reference (default: {BLIND_REFERENCE_FRACTION_DEFAULT}).",
     )
+    parser.add_argument(
+        "--use-population-memory-bank",
+        action="store_true",
+        help="Use pre-built population memory bank instead of local reference.",
+    )
     args = parser.parse_args()
 
     xlsx_dir = Path(args.xlsx_dir)
@@ -133,6 +138,7 @@ def main() -> None:
                     args.detector,
                     args.freq,
                     args.normal_reference_fraction,
+                    args.use_population_memory_bank,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[{anomaly}] FATAL: {exc}")
@@ -154,6 +160,7 @@ def main() -> None:
         "detector_choice": args.detector,
         "freq_override": args.freq,
         "normal_reference_fraction": args.normal_reference_fraction,
+        "use_population_memory_bank": args.use_population_memory_bank,
         "anomalies": list(requested_anomalies),
         "elapsed_seconds": round(elapsed, 2),
         "wells": well_summaries,

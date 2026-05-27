@@ -90,6 +90,7 @@ def run_for_anomaly(
     detector_choice: str,
     freq_override: str | None = None,
     normal_reference_fraction: float | None = BLIND_REFERENCE_FRACTION_DEFAULT,
+    use_population_memory_bank: bool = False,
 ) -> bool:
     anomaly_dir = output_dir / anomaly
     try:
@@ -103,6 +104,7 @@ def run_for_anomaly(
             source_path=str(source_parquet),
             save_dir=str(anomaly_dir),
             normal_reference_fraction=normal_reference_fraction,
+            use_population_memory_bank=use_population_memory_bank,
         )
         if not (anomaly_dir / "summary.json").exists():
             raise RuntimeError("Детектор не сформировал результат (недостаточно данных).")
@@ -150,6 +152,11 @@ def main() -> None:
         default=BLIND_REFERENCE_FRACTION_DEFAULT,
         help=f"Blind wells: fraction of first points used as normal reference (default: {BLIND_REFERENCE_FRACTION_DEFAULT}).",
     )
+    parser.add_argument(
+        "--use-population-memory-bank",
+        action="store_true",
+        help="Use pre-built population memory bank (models/population_memory_bank_<detector>_<anomaly>.npz) instead of local reference for PaAno fit.",
+    )
     args = parser.parse_args()
 
     excel_path = Path(args.excel).resolve()
@@ -174,6 +181,7 @@ def main() -> None:
             args.detector,
             args.freq,
             args.normal_reference_fraction,
+            args.use_population_memory_bank,
         ):
             ok_count += 1
 

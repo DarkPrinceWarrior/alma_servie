@@ -74,7 +74,7 @@ from alma_service.paano_defaults import (
     REFERENCE_MIN_DAYS,
     REFERENCE_MIN_RATIO,
 )
-from alma_service.paths import DB_DIR, ensure_dir, ensure_parent
+from alma_service.paths import DB_DIR, MODELS_DIR, ensure_dir, ensure_parent
 from alma_service.prediction_postprocess import build_incidents, filter_actionable_starts
 from alma_service.tabular_io import read_table, write_table
 from alma_service.telemetry_status import build_telemetry_status
@@ -443,6 +443,7 @@ def _build_local_runs(
     device: torch.device,
     verbose: bool,
     shared_state: Any = None,
+    population_reference: np.ndarray | None = None,
 ) -> dict[str, PreparedDetectorRun]:
     if not _is_paano_production_detector(detector_key):
         raise ValueError(f"Unsupported production detector: {detector_key}")
@@ -463,7 +464,12 @@ def _build_local_runs(
             device=device,
             verbose=verbose,
         )
-        detector.fit_reference(X_proj[prepared.reference_mask], mask_ref=prepared.reference_mask)
+        if population_reference is not None:
+            if verbose:
+                print(f"  Using population memory bank: {population_reference.shape} (vs local {int(prepared.reference_mask.sum())})")
+            detector.fit_reference(population_reference)
+        else:
+            detector.fit_reference(X_proj[prepared.reference_mask], mask_ref=prepared.reference_mask)
         score_output = detector.score_stream(X_proj, mask_all=prepared.stability_mask)
         if anomaly_key == "pritok":
             from alma_service.pressure_trend import (
@@ -2170,6 +2176,7 @@ def run_single_well(
     save_dir: str | None = None,
     reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
     normal_reference_fraction: float | None = None,
+    use_population_memory_bank: bool = False,
 ) -> None:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -2209,6 +2216,19 @@ def run_single_well(
     from alma_service.shared_encoder import load_shared_encoder_state
 
     shared_state = load_shared_encoder_state(spec.anomaly_key, device=device, verbose=True)
+
+    population_reference: np.ndarray | None = None
+    if use_population_memory_bank:
+        bank_path = MODELS_DIR / f"population_memory_bank_{detector_key}_{spec.anomaly_key}.npz"
+        if not bank_path.exists():
+            raise FileNotFoundError(
+                f"Population memory bank not found: {bank_path}. "
+                f"Build it via scripts/utils/build_population_memory_bank.py."
+            )
+        bank = np.load(bank_path, allow_pickle=True)
+        population_reference = np.asarray(bank["features"], dtype=np.float32)
+        print(f"Loaded population memory bank: {bank_path.name} shape={population_reference.shape}")
+
     detector_runs = _build_local_runs(
         spec.anomaly_key,
         detector_key,
@@ -2216,6 +2236,7 @@ def run_single_well(
         device=device,
         verbose=True,
         shared_state=shared_state,
+        population_reference=population_reference,
     )
     run = detector_runs[well_id]
 
