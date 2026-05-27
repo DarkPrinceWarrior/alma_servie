@@ -41,6 +41,24 @@ Other MCP: **context7** for version-sensitive library docs (Next.js, React,
 FastAPI, PyTorch — prefer over web search); **tavily** for general web search;
 **playwright** for browser smoke-checks after UI changes.
 
+Verified local tool versions on 2026-05-26: `fff-mcp 0.8.4`, `Serena 1.5.3`,
+and `codegraph 0.9.5`.
+
+## Memory (Honcho)
+
+Use Honcho as the memory layer for this repository. Before answering questions
+about project preferences, working rules, prior decisions, or remembered
+context, consult Honcho in addition to this file and local repository docs.
+
+Current Honcho MCP tools expose peer cards, conclusions, chat over peer
+representations, and dream scheduling: `get_peer_card`, `set_peer_card`,
+`list_conclusions`, `create_conclusions`, `chat`, `schedule_dream`. Use those
+current names rather than older `search`/`create_conclusion` notes.
+
+Separate confirmed facts from inference. Treat files and command outputs as
+confirmed; treat Honcho memory and architectural guesses as inference unless
+verified locally.
+
 ## Project Purpose
 
 **alma_servie** — oil-well anomaly detection system for three anomaly types:

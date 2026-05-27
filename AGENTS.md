@@ -5,6 +5,10 @@
 Use Honcho as the memory layer for this repository. Before answering questions
 about project preferences, working rules, prior decisions, or remembered
 context, consult Honcho in addition to this file and local repository docs.
+Current Honcho MCP tools expose peer cards, conclusions, chat over peer
+representations, and dream scheduling (`get_peer_card`, `set_peer_card`,
+`list_conclusions`, `create_conclusions`, `chat`, `schedule_dream`). Use those
+current names rather than older `search`/`create_conclusion` notes.
 
 Separate confirmed facts from inference. Treat facts from files and command
 outputs as confirmed; treat remembered context and architectural guesses as
@@ -15,6 +19,9 @@ inference unless verified locally.
 Code navigation uses three MCP servers with a strict division of labour:
 `fff` to locate, `codegraph` to understand structure, `serena` to read a
 symbol precisely and edit it. Do not duplicate them — each owns one job.
+
+Verified local tool versions on 2026-05-26: `fff-mcp 0.8.4`, `Serena 1.5.3`,
+and `codegraph 0.9.5`.
 
 ### fff — locate files and literal text
 
