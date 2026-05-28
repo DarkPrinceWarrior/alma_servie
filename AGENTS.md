@@ -222,10 +222,11 @@ in `app/back/AGENTS.md`.
 
 ## Server workflow (a100)
 
-When to switch to the server: PaAno training with `epochs >= 50`, long
-benchmark runs (`run_full_detection_benchmark.sh` over all wells), Optuna/TPE
-tuning with many trials. Keep smoke tests, code edits, and debugging on the
-laptop.
+The server is the working copy and compute host for this repository. Run all
+research calculations, dataset/report generation, detector runs, benchmarks,
+training jobs, tuning jobs, and other project workloads on the server. The
+laptop/local checkout is a synchronized consumer copy used for MCP navigation,
+inspection, and handoff only; do not spend laptop compute on project runs.
 
 SSH hosts (already in global `~/.ssh/config`):
 
@@ -256,19 +257,25 @@ Rules:
 1. Source of truth is the server copy at `/root/projects/alma_servie`. Current
    active work happens on the server. The laptop/local copy is only a consumer
    that pulls/syncs changes from the server when needed.
-2. Use `uv run python ...` for server commands. For GPU-only PaAno runs, set
+2. MCP tools (`fff`, `codegraph`, `serena`) see the local checkout, not the
+   remote server filesystem directly. Before using MCP for code navigation or
+   analysis, make sure the local checkout mirrors the server state. After any
+   server-side edits, generated files, git operations, or bulk transfers, sync
+   the server state back to local first, then run `codegraph sync` if relying
+   on CodeGraph.
+3. Use `uv run python ...` for server commands. For GPU-only PaAno runs, set
    `CUDA_VISIBLE_DEVICES=1` or another non-zero GPU explicitly.
-3. Artifacts (`models/`, `artifacts/`, `db/`) stay on the server. They are
+4. Artifacts (`models/`, `artifacts/`, `db/`) stay on the server. They are
    already gitignored. Pull final weights/reports back via `scp` when needed.
-4. Long-running jobs go through `tmux new -d -s <name>` so an SSH disconnect
+5. Long-running jobs go through `tmux new -d -s <name>` so an SSH disconnect
    does not kill the process.
-5. GPU0 on the server is taken by another process (~8.4 GB). Use
+6. GPU0 on the server is taken by another process (~8.4 GB). Use
    `CUDA_VISIBLE_DEVICES=1..5`.
-6. Serena CLI is installed on the server with
+7. Serena CLI is installed on the server with
    `uv tool install -p 3.13 serena-agent@latest --prerelease=allow`; verified
    version is `Serena 1.5.1`. `.serena/` was copied to the server for this
    project. Treat it as local tool state, not as repository source.
-7. Current transferred runtime data on the server includes `db/`, `artifacts/`,
+8. Current transferred runtime data on the server includes `db/`, `artifacts/`,
    `models/`, `salym/`, and `salym_prepared/`. After cleanup on 2026-05-21:
    `artifacts` is ~110 MB, `db` is ~122 MB, and `models` is ~15 MB. Historical
    raw Salym transfers remain server-local: `salym` = `71894737195` bytes,
