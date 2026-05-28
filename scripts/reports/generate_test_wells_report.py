@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -31,11 +32,27 @@ PRESSURE_COLUMN = "Давление на приеме насоса кгс/см²
 OUTPUT_FREQUENCY_COLUMN = "Выходная частота"
 FREQUENCY_CHANGE_THRESHOLD = 0.5
 FREQUENCY_POINT_WINDOW_HOURS = 3.0
+PRITOK_REFERENCE_TIMES = {
+    "42-713": "2025-10-14 21:29:42",
+    "42-723": "2025-11-07 20:41:42",
+    "45-790": "2026-01-02 02:29:05",
+    "46-806": "2025-12-24 01:09:17",
+    "48-812": "2026-01-25 21:33:05",
+}
 
 COLOR_PRESSURE = "#1e40af"
 COLOR_CRITICAL = "#dc2626"
 COLOR_EARLY = "#f59e0b"
 COLOR_BG = "#fafafa"
+
+
+@dataclass(frozen=True)
+class FrequencyWindow:
+    label: str
+    center: pd.Timestamp
+    start: pd.Timestamp
+    end: pd.Timestamp
+    note: str
 
 
 def load_batch_summary(batch_dir: Path) -> dict:
@@ -79,47 +96,131 @@ def critical_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
     return rows.sort_values("detected_time")
 
 
-def render_frequency_caption(source: pd.DataFrame, preds: pd.DataFrame) -> str:
+def normalize_well_id(well_id: str) -> str:
+    return well_id.strip().replace("/", "-")
+
+
+def format_timestamp(ts: pd.Timestamp) -> str:
+    return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_frequency(value: float | None) -> str:
+    if value is None:
+        return "—"
+    return f"{value:.2f}"
+
+
+def frequency_window_stats(
+    freq: pd.Series,
+    timestamps: pd.Series,
+    window: FrequencyWindow,
+) -> dict[str, str]:
+    mask = (timestamps >= window.start) & (timestamps <= window.end)
+    values = freq[mask].dropna()
+    if len(values) < 2:
+        return {
+            "label": window.label,
+            "time": format_timestamp(window.center),
+            "window": window.note,
+            "points": str(len(values)),
+            "min": "—",
+            "max": "—",
+            "delta": "—",
+            "status": "недостаточно данных",
+        }
+
+    f_min = float(values.min())
+    f_max = float(values.max())
+    f_delta = f_max - f_min
+    return {
+        "label": window.label,
+        "time": format_timestamp(window.center),
+        "window": window.note,
+        "points": str(len(values)),
+        "min": format_frequency(f_min),
+        "max": format_frequency(f_max),
+        "delta": format_frequency(f_delta),
+        "status": "меняется" if f_delta >= FREQUENCY_CHANGE_THRESHOLD else "неизменна",
+    }
+
+
+def pritok_frequency_windows(well_id: str, preds: pd.DataFrame) -> list[FrequencyWindow]:
+    windows: list[FrequencyWindow] = []
     critical_rows = critical_prediction_rows(preds)
-    if critical_rows.empty:
-        return "Выходная частота: критических детектов нет."
+    for index, row in enumerate(critical_rows.itertuples(index=False), start=1):
+        center = pd.Timestamp(row.detected_time)
+        close_raw = getattr(row, "incident_close_time", pd.NaT)
+        close = pd.to_datetime(close_raw) if pd.notna(close_raw) else pd.NaT
+        if pd.notna(close) and close > center:
+            window_start = center
+            window_end = pd.Timestamp(close)
+            window_note = f"{format_timestamp(window_start)} — {format_timestamp(window_end)}"
+        else:
+            delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
+            window_start = center - delta
+            window_end = center + delta
+            window_note = f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч"
+        windows.append(
+            FrequencyWindow(
+                label=f"Детект {index}",
+                center=center,
+                start=window_start,
+                end=window_end,
+                note=window_note,
+            )
+        )
+
+    reference_time = PRITOK_REFERENCE_TIMES.get(normalize_well_id(well_id))
+    if reference_time:
+        center = pd.Timestamp(reference_time)
+        delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
+        windows.append(
+            FrequencyWindow(
+                label="Контрольное время",
+                center=center,
+                start=center - delta,
+                end=center + delta,
+                note=f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч",
+            )
+        )
+
+    return windows
+
+
+def render_pritok_frequency_table(well_id: str, source: pd.DataFrame, preds: pd.DataFrame) -> str:
     if OUTPUT_FREQUENCY_COLUMN not in source.columns:
-        return "Выходная частота: канал отсутствует."
+        return "<p class='frequency-note'>Выходная частота: канал отсутствует.</p>"
+
+    windows = pritok_frequency_windows(well_id, preds)
+    if not windows:
+        return "<p class='frequency-note'>Выходная частота: нет детектов и контрольного времени.</p>"
 
     freq = pd.to_numeric(source[OUTPUT_FREQUENCY_COLUMN], errors="coerce")
     timestamps = pd.to_datetime(source["timestamp"])
-    parts: list[str] = []
-    for _, row in critical_rows.iterrows():
-        start = pd.Timestamp(row["detected_time"])
-        close_raw = row.get("incident_close_time")
-        close = pd.to_datetime(close_raw) if pd.notna(close_raw) else pd.NaT
-        if pd.notna(close) and close > start:
-            window_start = start
-            window_end = pd.Timestamp(close)
-            window_note = "до закрытия"
-        else:
-            delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
-            window_start = start - delta
-            window_end = start + delta
-            window_note = f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч"
-
-        mask = (timestamps >= window_start) & (timestamps <= window_end)
-        values = freq[mask].dropna()
-        time_label = start.strftime("%Y-%m-%d %H:%M")
-        if len(values) < 2:
-            parts.append(f"{time_label}: недостаточно данных ({window_note})")
-            continue
-
-        f_min = float(values.min())
-        f_max = float(values.max())
-        f_delta = f_max - f_min
-        status = "меняется" if f_delta >= FREQUENCY_CHANGE_THRESHOLD else "неизменна"
-        parts.append(
-            f"{time_label}: {status}, Δ={f_delta:.2f}, "
-            f"{f_min:.2f}–{f_max:.2f} ({window_note})"
-        )
-
-    return "Выходная частота в детектах: " + "; ".join(escape(part) for part in parts)
+    rows = [frequency_window_stats(freq, timestamps, window) for window in windows]
+    body = "".join(
+        "<tr>"
+        f"<td>{escape(row['label'])}</td>"
+        f"<td>{escape(row['time'])}</td>"
+        f"<td>{escape(row['window'])}</td>"
+        f"<td>{escape(row['points'])}</td>"
+        f"<td>{escape(row['min'])}</td>"
+        f"<td>{escape(row['max'])}</td>"
+        f"<td>{escape(row['delta'])}</td>"
+        f"<td>{escape(row['status'])}</td>"
+        "</tr>"
+        for row in rows
+    )
+    return (
+        "<table class='frequency-table'>"
+        "<caption>Выходная частота в зоне притока</caption>"
+        "<thead><tr>"
+        "<th>Точка</th><th>Время</th><th>Окно</th><th>Точек</th>"
+        "<th>Мин</th><th>Макс</th><th>Δ</th><th>Вывод</th>"
+        "</tr></thead>"
+        f"<tbody>{body}</tbody>"
+        "</table>"
+    )
 
 
 _PLOTLY_EMBEDDED = {"done": False}
@@ -217,13 +318,13 @@ def render_chart(well_id: str, anomaly: str, well_dir: Path) -> str:
     div_id = f"chart_{well_id}_{anomaly}"
     n_crit = len(critical)
     caption = f"Аномалий обнаружено: <strong>{n_crit}</strong>"
-    frequency_caption = render_frequency_caption(source, preds)
+    frequency_table = render_pritok_frequency_table(well_id, source, preds) if anomaly == "pritok" else ""
     chart_html = fig.to_html(full_html=False, include_plotlyjs=include_js, div_id=div_id)
     return (
         "<div class='chart-block'>"
         f"<div class='chart-caption'>{caption}</div>"
-        f"<div class='chart-caption frequency-caption'>{frequency_caption}</div>"
-        f"{chart_html}</div>"
+        f"{chart_html}"
+        f"{frequency_table}</div>"
     )
 
 
@@ -238,7 +339,12 @@ h2 { font-size: 18px; margin: 24px 0 8px; color: #1e293b; letter-spacing: -0.01e
 .chart-block { margin: 6px 0 18px; }
 .chart-caption { color: #475569; font-size: 13px; margin: 8px 0 0 72px; }
 .chart-caption strong { color: #b91c1c; }
-.frequency-caption { color: #334155; line-height: 1.45; max-width: 1120px; }
+.frequency-note { color: #64748b; font-size: 13px; margin: 8px 0 8px 72px; }
+.frequency-table { border-collapse: collapse; margin: 4px 0 18px 72px; min-width: 760px; font-size: 12px; color: #1e293b; }
+.frequency-table caption { caption-side: top; text-align: left; font-weight: 600; color: #334155; padding: 0 0 6px; }
+.frequency-table th, .frequency-table td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; white-space: nowrap; }
+.frequency-table th { background: #f8fafc; color: #475569; font-weight: 600; }
+.frequency-table td:last-child { font-weight: 600; }
 .legend-row { display: flex; gap: 22px; font-size: 12px; color: #475569; margin-top: 12px; flex-wrap: wrap; }
 .legend-line { display: inline-block; width: 22px; height: 2px; vertical-align: middle; margin-right: 8px; border-radius: 2px; }
 .legend-line.critical { background: #dc2626; height: 3px; }
