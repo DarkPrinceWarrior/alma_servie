@@ -82,6 +82,10 @@ class GlobalNormalitySettings:
     balance_seed: int
     prepare_patch_size_overrides: dict[str, int]
     enable_feature_reduction: bool
+    missing_channel_masks_enabled: bool
+    channel_dropout_enabled: bool
+    channel_dropout_rate: float
+    channel_dropout_seed: int
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,8 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     common_source_freq = str(payload.get("common_source_freq", "5min"))
     balance = dict(payload.get("balance", {}))
+    missing_channel_masks = dict(payload.get("missing_channel_masks", {}))
+    channel_dropout = dict(payload.get("channel_dropout", {}))
     overrides = {
         str(key): int(value)
         for key, value in dict(payload.get("prepare_patch_size_overrides") or {}).items()
@@ -121,6 +127,10 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
         balance_seed=int(balance.get("seed", 20260518)),
         prepare_patch_size_overrides=overrides,
         enable_feature_reduction=bool(payload.get("enable_feature_reduction", False)),
+        missing_channel_masks_enabled=bool(missing_channel_masks.get("enabled", False)),
+        channel_dropout_enabled=bool(channel_dropout.get("enabled", False)),
+        channel_dropout_rate=float(channel_dropout.get("rate", 0.0)),
+        channel_dropout_seed=int(channel_dropout.get("seed", 20260518)),
     )
 
 
@@ -188,9 +198,18 @@ def prepare_global_normality_runtime(
             seed=settings.balance_seed,
         )
 
+    missing_mask_raw_channels = (
+        list(schema.raw_channels) if settings.missing_channel_masks_enabled else None
+    )
+    channel_dropout_rate = (
+        float(settings.channel_dropout_rate) if settings.channel_dropout_enabled else 0.0
+    )
     pool, shared_channels, train_wells = collect_shared_train_pool(
         global_pool,
         enable_reduction=settings.enable_feature_reduction,
+        missing_mask_raw_channels=missing_mask_raw_channels,
+        channel_dropout_rate=channel_dropout_rate,
+        channel_dropout_seed=settings.channel_dropout_seed,
     )
     if verbose:
         print(
@@ -207,6 +226,9 @@ def prepare_global_normality_runtime(
         verbose=verbose,
         num_iter=settings.global_iters,
         enable_reduction=settings.enable_feature_reduction,
+        missing_mask_raw_channels=missing_mask_raw_channels,
+        channel_dropout_rate=channel_dropout_rate,
+        channel_dropout_seed=settings.channel_dropout_seed,
     )
     detail = {
         "detector": GLOBAL_DETECTOR_KEY,
@@ -221,6 +243,10 @@ def prepare_global_normality_runtime(
         "norm_work_profile": settings.norm_work_profile if settings.include_norm_work else None,
         "reference_policy": settings.reference_policy,
         "feature_reduction_enabled": settings.enable_feature_reduction,
+        "missing_channel_masks_enabled": settings.missing_channel_masks_enabled,
+        "channel_dropout_enabled": settings.channel_dropout_enabled,
+        "channel_dropout_rate": channel_dropout_rate,
+        "channel_dropout_seed": settings.channel_dropout_seed,
         "balance_audit": balance_audit,
         "schema_audit_by_class": schema_audit_by_class,
         "schema_audit_global_pool": schema_audit_global_pool,

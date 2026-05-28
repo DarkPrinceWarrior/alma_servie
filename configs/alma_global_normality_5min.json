@@ -8,9 +8,19 @@
     "patch_long": 384,
     "global_iters": 200,
     "feature_schema": "configs/alma_global_feature_schema.json",
-    "include_norm_work": false,
+    "include_norm_work": true,
     "norm_work_profile": "pritok",
     "reference_policy": "normal_windows",
+    "missing_channel_masks": {
+        "enabled": true,
+        "description": "Append __missing_raw__::<channel> indicators to the global encoder input so absent telemetry is explicit."
+    },
+    "channel_dropout": {
+        "enabled": true,
+        "rate": 0.05,
+        "seed": 20260528,
+        "description": "During global encoder training, randomly zero feature families by raw channel and set the missing-channel mask so the encoder learns deploy-time channel absence."
+    },
     "balance": {
         "enabled": true,
         "source_policy": "equal_min",

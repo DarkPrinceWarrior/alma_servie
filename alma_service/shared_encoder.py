@@ -47,7 +47,23 @@ from alma_service.generic_detectors import (
     _ensure_2d_float32,
     _maybe_compile_module,
 )
+from alma_service.feature_schema import feature_root
 from alma_service.paths import MODELS_DIR, ensure_parent
+
+
+MISSING_RAW_CHANNEL_PREFIX = "__missing_raw__::"
+
+
+def missing_raw_channel_feature(raw_channel: str) -> str:
+    return f"{MISSING_RAW_CHANNEL_PREFIX}{raw_channel}"
+
+
+def _is_missing_raw_channel_feature(channel: str) -> bool:
+    return str(channel).startswith(MISSING_RAW_CHANNEL_PREFIX)
+
+
+def _missing_raw_channel_name(mask_feature: str) -> str:
+    return str(mask_feature)[len(MISSING_RAW_CHANNEL_PREFIX):]
 
 
 @dataclass
@@ -145,11 +161,76 @@ def _set_seed(seed: int = SEED) -> None:
     torch.manual_seed(seed)
 
 
+def _raw_channels_represented_by_features(
+    feature_channels: list[str],
+    raw_channels: list[str],
+) -> list[str]:
+    roots = {feature_root(channel) for channel in feature_channels}
+    return [raw for raw in raw_channels if raw in roots]
+
+
+def _append_missing_channel_masks(
+    pool: np.ndarray,
+    feature_channels: list[str],
+    raw_channels: list[str] | None,
+) -> tuple[np.ndarray, list[str]]:
+    if not raw_channels:
+        return pool, feature_channels
+    represented = _raw_channels_represented_by_features(feature_channels, list(raw_channels))
+    if not represented:
+        return pool, feature_channels
+    mask_channels = [missing_raw_channel_feature(raw) for raw in represented]
+    masks = np.zeros((pool.shape[0], len(mask_channels)), dtype=np.float32)
+    return (
+        np.concatenate([pool.astype(np.float32), masks], axis=1).astype(np.float32),
+        [*feature_channels, *mask_channels],
+    )
+
+
+def _apply_channel_dropout(
+    pool: np.ndarray,
+    shared_channels: list[str],
+    *,
+    rate: float,
+    seed: int,
+) -> np.ndarray:
+    rate = float(rate)
+    if rate <= 0.0:
+        return pool
+    if rate >= 1.0:
+        raise ValueError(f"channel_dropout_rate must be < 1.0, got {rate}")
+
+    out = np.asarray(pool, dtype=np.float32).copy()
+    rng = np.random.default_rng(int(seed))
+    mask_lookup = {
+        _missing_raw_channel_name(channel): idx
+        for idx, channel in enumerate(shared_channels)
+        if _is_missing_raw_channel_feature(channel)
+    }
+    for raw_channel, mask_idx in mask_lookup.items():
+        feature_indices = [
+            idx
+            for idx, channel in enumerate(shared_channels)
+            if not _is_missing_raw_channel_feature(channel) and feature_root(channel) == raw_channel
+        ]
+        if not feature_indices:
+            continue
+        rows = np.flatnonzero(rng.random(out.shape[0]) < rate)
+        if len(rows) == 0:
+            continue
+        out[np.ix_(rows, feature_indices)] = 0.0
+        out[rows, mask_idx] = 1.0
+    return out
+
+
 def collect_shared_train_pool(
     prepared_wells: dict[str, Any],
     *,
     only_split: str = "train",
     enable_reduction: bool = True,
+    missing_mask_raw_channels: list[str] | None = None,
+    channel_dropout_rate: float = 0.0,
+    channel_dropout_seed: int = SEED,
 ) -> tuple[np.ndarray, list[str], list[str]]:
     """Collect clean-normal feature matrices from train wells.
 
@@ -222,6 +303,18 @@ def collect_shared_train_pool(
                 f"    Feature reduction: {original_count} → {len(shared_channels)} channels "
                 f"(removed {original_count - len(shared_channels)})"
             )
+
+    pool, shared_channels = _append_missing_channel_masks(
+        pool,
+        shared_channels,
+        missing_mask_raw_channels,
+    )
+    pool = _apply_channel_dropout(
+        pool,
+        shared_channels,
+        rate=float(channel_dropout_rate),
+        seed=int(channel_dropout_seed),
+    )
 
     return pool, shared_channels, train_well_ids
 
@@ -391,6 +484,9 @@ def train_shared_encoder(
     verbose: bool = False,
     num_iter: int = PAANO_NUM_ITERS,
     enable_reduction: bool | None = None,
+    missing_mask_raw_channels: list[str] | None = None,
+    channel_dropout_rate: float = 0.0,
+    channel_dropout_seed: int = SEED,
 ) -> SharedEncoderState:
     """Train two shared encoders (short + long scale) on clean-normal data
     from all train wells of the given anomaly family.
@@ -404,6 +500,9 @@ def train_shared_encoder(
     pool, shared_channels, train_well_ids = collect_shared_train_pool(
         prepared_wells,
         enable_reduction=bool(enable_reduction),
+        missing_mask_raw_channels=missing_mask_raw_channels,
+        channel_dropout_rate=float(channel_dropout_rate),
+        channel_dropout_seed=int(channel_dropout_seed),
     )
 
     if verbose:
@@ -428,6 +527,13 @@ def train_shared_encoder(
     detail = {
         "pool_points": int(len(pool)),
         "shared_channels": len(shared_channels),
+        "missing_channel_masks": [
+            _missing_raw_channel_name(channel)
+            for channel in shared_channels
+            if _is_missing_raw_channel_feature(channel)
+        ],
+        "channel_dropout_rate": float(channel_dropout_rate),
+        "channel_dropout_seed": int(channel_dropout_seed),
         "train_wells": train_well_ids,
         "iterations": int(num_iter),
     }
@@ -474,6 +580,9 @@ def load_or_train_shared_encoder(
     verbose: bool = False,
     num_iter: int = PAANO_NUM_ITERS,
     enable_reduction: bool | None = None,
+    missing_mask_raw_channels: list[str] | None = None,
+    channel_dropout_rate: float = 0.0,
+    channel_dropout_seed: int = SEED,
 ) -> SharedEncoderState:
     """Load a saved shared encoder if one exists in models/ and is compatible
     with the current train pool; otherwise train from scratch.
@@ -492,6 +601,9 @@ def load_or_train_shared_encoder(
         pool, shared_channels, train_well_ids = collect_shared_train_pool(
             prepared_wells,
             enable_reduction=bool(enable_reduction),
+            missing_mask_raw_channels=missing_mask_raw_channels,
+            channel_dropout_rate=float(channel_dropout_rate),
+            channel_dropout_seed=int(channel_dropout_seed),
         )
         channels_match = list(meta["shared_channels"]) == list(shared_channels)
         patch_match = (
@@ -499,8 +611,15 @@ def load_or_train_shared_encoder(
             and int(meta["patch_long"]) == int(patch_long)
         )
         key_match = str(meta["anomaly_key"]) == anomaly_key
+        detail = dict(meta.get("detail", {}))
+        dropout_match = float(detail.get("channel_dropout_rate", 0.0)) == float(channel_dropout_rate)
+        mask_match = sorted(str(item) for item in detail.get("missing_channel_masks", [])) == sorted(
+            _missing_raw_channel_name(channel)
+            for channel in shared_channels
+            if _is_missing_raw_channel_feature(channel)
+        )
 
-        if channels_match and patch_match and key_match:
+        if channels_match and patch_match and key_match and dropout_match and mask_match:
             if verbose:
                 src = meta["detail"].get("training_mode", "shared")
                 print(
@@ -526,6 +645,12 @@ def load_or_train_shared_encoder(
             reasons.append(
                 f"channel set mismatch (saved={len(meta['shared_channels'])} vs current={len(shared_channels)})"
             )
+        if not dropout_match:
+            reasons.append(
+                f"channel dropout mismatch (saved={detail.get('channel_dropout_rate', 0.0)} vs current={channel_dropout_rate})"
+            )
+        if not mask_match:
+            reasons.append("missing-mask contract mismatch")
         print(f"  Shared encoder cache STALE: {'; '.join(reasons)} -> retraining from scratch")
     elif force_retrain and cache_path.exists():
         print(f"  Shared encoder cache OVERRIDE (ALMA_FORCE_RETRAIN_ENCODER=1): retraining {cache_path.name}")
@@ -539,6 +664,9 @@ def load_or_train_shared_encoder(
         verbose=verbose,
         num_iter=int(num_iter),
         enable_reduction=bool(enable_reduction),
+        missing_mask_raw_channels=missing_mask_raw_channels,
+        channel_dropout_rate=float(channel_dropout_rate),
+        channel_dropout_seed=int(channel_dropout_seed),
     )
     save_shared_encoder_state(state, cache_path)
     return state
@@ -601,8 +729,13 @@ def select_shared_columns(
 ) -> np.ndarray:
     """Project a well's feature matrix to the shared channel set."""
     col_lookup = {name: idx for idx, name in enumerate(feature_columns)}
+    available_roots = {feature_root(name) for name in feature_columns}
     projected = np.zeros((feature_matrix.shape[0], len(shared_channels)), dtype=np.float32)
     for out_idx, channel in enumerate(shared_channels):
+        if _is_missing_raw_channel_feature(channel):
+            raw_channel = _missing_raw_channel_name(channel)
+            projected[:, out_idx] = 0.0 if raw_channel in available_roots else 1.0
+            continue
         src_idx = col_lookup.get(channel)
         if src_idx is not None:
             projected[:, out_idx] = feature_matrix[:, src_idx].astype(np.float32)
