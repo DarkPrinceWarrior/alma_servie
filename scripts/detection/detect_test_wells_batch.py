@@ -100,6 +100,11 @@ def main() -> None:
         action="store_true",
         help="Use pre-built population memory bank instead of local reference.",
     )
+    parser.add_argument(
+        "--trusted-local-reference",
+        action="store_true",
+        help="Treat each local normal-reference window as expert-confirmed and append it to the population bank with a cap.",
+    )
     args = parser.parse_args()
 
     xlsx_dir = Path(args.xlsx_dir)
@@ -139,6 +144,7 @@ def main() -> None:
                     args.freq,
                     args.normal_reference_fraction,
                     args.use_population_memory_bank,
+                    args.trusted_local_reference,
                 )
             except Exception as exc:  # noqa: BLE001
                 print(f"[{anomaly}] FATAL: {exc}")
@@ -161,6 +167,7 @@ def main() -> None:
         "freq_override": args.freq,
         "normal_reference_fraction": args.normal_reference_fraction,
         "use_population_memory_bank": args.use_population_memory_bank,
+        "trusted_local_reference": args.trusted_local_reference,
         "anomalies": list(requested_anomalies),
         "elapsed_seconds": round(elapsed, 2),
         "wells": well_summaries,

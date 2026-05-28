@@ -59,6 +59,9 @@ GLOBAL_MEMORY_BANK_MODES = {
     GLOBAL_MEMORY_BANK_LOCAL,
     GLOBAL_MEMORY_BANK_POPULATION_FALLBACK,
 }
+GLOBAL_TRUSTED_LOCAL_REFERENCE_MAX_POINTS = 4_096
+GLOBAL_TRUSTED_LOCAL_REFERENCE_MAX_RATIO = 0.10
+GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL = "population_plus_trusted_local"
 
 
 @dataclass(frozen=True)
@@ -409,13 +412,24 @@ def build_global_single_runs(
             shared_state.shared_channels,
         )
         local_ref = x_projected[np.asarray(prepared.reference_mask, dtype=bool)]
+        trusted_local_source = _trusted_local_reference_source(prepared)
+        trusted_local_ref: np.ndarray | None = None
         if global_ref is not None:
             reference = global_ref
             memory_bank_source = "population"
+            if trusted_local_source is not None and len(local_ref) > 0:
+                trusted_local_ref = _cap_trusted_local_reference(
+                    local_ref,
+                    population_count=len(global_ref),
+                )
+                if len(trusted_local_ref) > 0:
+                    reference = np.concatenate([global_ref, trusted_local_ref], axis=0).astype(np.float32)
+                    memory_bank_source = GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL
             if verbose:
                 print(
                     f"    Score blind well {well_id} with global population memory bank "
-                    f"({len(reference)} reference points; local_ref={len(local_ref)})"
+                    f"({len(reference)} reference points; local_ref={len(local_ref)}, "
+                    f"trusted_local_ref={0 if trusted_local_ref is None else len(trusted_local_ref)})"
                 )
         else:
             reference = local_ref
@@ -443,14 +457,18 @@ def build_global_single_runs(
                 "class_fine_tune": False,
                 "physical_branches": False,
                 "blind_unlabeled": True,
-                "local_reference_used": memory_bank_source == "local_reference",
-                "population_memory_used": memory_bank_source == "population",
+                "local_reference_used": memory_bank_source
+                in {"local_reference", GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL},
+                "population_memory_used": memory_bank_source
+                in {"population", GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL},
                 "memory_bank_source": memory_bank_source,
-                "memory_bank_mode": "single_well_population_override"
-                if memory_bank_source == "population"
-                else GLOBAL_MEMORY_BANK_LOCAL,
+                "memory_bank_mode": _single_well_memory_bank_mode(memory_bank_source),
                 "local_reference_points": int(len(local_ref)),
-                "population_reference_points": int(len(reference)) if memory_bank_source == "population" else 0,
+                "population_reference_points": int(len(global_ref)) if global_ref is not None else 0,
+                "trusted_local_reference_used": trusted_local_ref is not None and len(trusted_local_ref) > 0,
+                "trusted_local_reference_source": trusted_local_source or "none",
+                "trusted_local_reference_points": 0 if trusted_local_ref is None else int(len(trusted_local_ref)),
+                "effective_reference_points": int(len(reference)),
                 "window_input_contract": raw_contract,
                 "input_contract": _compose_input_contract(raw_contract, memory_bank_source),
             },
@@ -460,6 +478,47 @@ def build_global_single_runs(
             score_output=score_output,
         )
     return detector_runs
+
+
+def _trusted_local_reference_source(prepared: Any) -> str | None:
+    detail = getattr(prepared, "detail", {}) or {}
+    selector = detail.get("normal_window_selector") if isinstance(detail, dict) else None
+    if not isinstance(selector, dict):
+        return None
+    if bool(selector.get("trusted_local_reference")):
+        source = selector.get("trusted_local_reference_source")
+        return str(source) if source else "explicit_trusted_local_reference"
+    if selector.get("reference_policy") == "all_points_before_first_anomaly_start":
+        return "expert_pre_anomaly"
+    fraction = selector.get("normal_reference_fraction")
+    if fraction is None:
+        return None
+    try:
+        if float(fraction) >= 1.0:
+            return "explicit_full_normal"
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _cap_trusted_local_reference(local_ref: np.ndarray, *, population_count: int) -> np.ndarray:
+    ref = np.asarray(local_ref, dtype=np.float32)
+    if len(ref) == 0:
+        return ref
+    ratio_cap = max(1, int(population_count * GLOBAL_TRUSTED_LOCAL_REFERENCE_MAX_RATIO))
+    max_points = min(len(ref), GLOBAL_TRUSTED_LOCAL_REFERENCE_MAX_POINTS, ratio_cap)
+    if max_points >= len(ref):
+        return ref
+    indices = np.linspace(0, len(ref) - 1, num=max_points, dtype=np.int64)
+    return ref[indices]
+
+
+def _single_well_memory_bank_mode(memory_bank_source: str) -> str:
+    if memory_bank_source == "population":
+        return "single_well_population_override"
+    if memory_bank_source == GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL:
+        return "single_well_population_plus_trusted_local"
+    return GLOBAL_MEMORY_BANK_LOCAL
 
 
 def _unavailable_global_output(
@@ -513,7 +572,12 @@ def _population_reference_matrix(
 
 def _compose_input_contract(window_contract: str, memory_bank_source: str) -> str:
     prefix = "padded_long" if window_contract == "edge_hold_padded" else "real_long"
-    suffix = "population_memory" if memory_bank_source == "population" else "local_memory"
+    if memory_bank_source == "population":
+        suffix = "population_memory"
+    elif memory_bank_source == GLOBAL_MEMORY_BANK_POPULATION_PLUS_LOCAL:
+        suffix = "population_plus_local_memory"
+    else:
+        suffix = "local_memory"
     return f"{prefix}_{suffix}"
 
 

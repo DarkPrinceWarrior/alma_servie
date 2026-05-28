@@ -2177,6 +2177,7 @@ def run_single_well(
     reference_policy: str = REFERENCE_POLICY_NORMAL_WINDOWS,
     normal_reference_fraction: float | None = None,
     use_population_memory_bank: bool = False,
+    trusted_local_reference: bool = False,
 ) -> None:
     detector_key = normalize_detector_key(detector)
     spec = get_detection_spec(anomaly_key)
@@ -2211,6 +2212,11 @@ def run_single_well(
     if prepared is None:
         print("No usable data after engineered preprocessing.")
         return
+    if trusted_local_reference:
+        selector = dict(prepared.detail.get("normal_window_selector") or {})
+        selector["trusted_local_reference"] = True
+        selector["trusted_local_reference_source"] = "explicit_single_well_reference"
+        prepared.detail["normal_window_selector"] = selector
 
     device = _resolve_torch_device(detector_key, verbose=True)
 
