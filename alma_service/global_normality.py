@@ -385,6 +385,83 @@ def build_global_core_runs(
     return detector_runs
 
 
+def build_global_single_runs(
+    prepared_runs: dict[str, Any],
+    shared_state: Any,
+    device: torch.device,
+    *,
+    verbose: bool,
+    population_reference: np.ndarray | None = None,
+) -> dict[str, Any]:
+    from alma_service.generic_detection import PreparedDetectorRun
+
+    detector_runs: dict[str, Any] = {}
+    input_padding_mode = _global_paano_input_padding_mode()
+    global_ref = (
+        np.asarray(population_reference, dtype=np.float32)
+        if population_reference is not None
+        else None
+    )
+    for well_id, prepared in prepared_runs.items():
+        x_projected = select_shared_columns(
+            prepared.feature_columns,
+            prepared.feature_matrix,
+            shared_state.shared_channels,
+        )
+        local_ref = x_projected[np.asarray(prepared.reference_mask, dtype=bool)]
+        if global_ref is not None:
+            reference = global_ref
+            memory_bank_source = "population"
+            if verbose:
+                print(
+                    f"    Score blind well {well_id} with global population memory bank "
+                    f"({len(reference)} reference points; local_ref={len(local_ref)})"
+                )
+        else:
+            reference = local_ref
+            memory_bank_source = "local_reference"
+
+        detector = SharedPaAnoDetector(
+            shared_state=shared_state,
+            device=device,
+            verbose=verbose,
+            input_padding_mode=input_padding_mode,
+        )
+        detector.fit_reference(reference)
+        raw_output = detector.score_stream(x_projected, mask_all=prepared.stability_mask)
+        primary = np.asarray(raw_output.primary, dtype=np.float32)
+        raw_contract = str(raw_output.detail.get("input_contract", "real_window"))
+        score_output = DetectorScoreOutput(
+            primary=primary,
+            components={
+                "global_paano_score": primary,
+                **raw_output.components,
+            },
+            detail={
+                **raw_output.detail,
+                "global_normality_detector": True,
+                "class_fine_tune": False,
+                "physical_branches": False,
+                "blind_unlabeled": True,
+                "local_reference_used": memory_bank_source == "local_reference",
+                "population_memory_used": memory_bank_source == "population",
+                "memory_bank_source": memory_bank_source,
+                "memory_bank_mode": "single_well_population_override"
+                if memory_bank_source == "population"
+                else GLOBAL_MEMORY_BANK_LOCAL,
+                "local_reference_points": int(len(local_ref)),
+                "population_reference_points": int(len(reference)) if memory_bank_source == "population" else 0,
+                "window_input_contract": raw_contract,
+                "input_contract": _compose_input_contract(raw_contract, memory_bank_source),
+            },
+        )
+        detector_runs[well_id] = PreparedDetectorRun(
+            prepared=prepared,
+            score_output=score_output,
+        )
+    return detector_runs
+
+
 def _unavailable_global_output(
     *,
     prepared: Any,

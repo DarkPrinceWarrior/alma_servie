@@ -192,7 +192,7 @@ LEGEND_BLOCK = """
 </div>
 """
 
-DISCLAIMER_BLOCK = """
+LOCAL_REFERENCE_DISCLAIMER_BLOCK = """
 <div class='disclaimer'>
 <strong>Внимание.</strong> Скважины без экспертной разметки. Эталон нормы построен
 из первых 20 % точек ряда (≈10 суток на 49-дневном ряду). Если начальный участок
@@ -200,6 +200,22 @@ DISCLAIMER_BLOCK = """
 эксперт должен визуально подтвердить штатность начального участка.
 </div>
 """
+
+POPULATION_MEMORY_BANK_DISCLAIMER_BLOCK = """
+<div class='disclaimer'>
+<strong>Внимание.</strong> Скважины без экспертной разметки. Отклонение от нормы
+рассчитано через один global-normality PaAno encoder и общий population memory
+bank: нормальные окна train-скважин одной физической сущности — скважин УЭЦН.
+Первые 20 % ряда остаются локальным blind-контекстом для нормировки и порога,
+но PaAno memory bank берётся из population reference.
+</div>
+"""
+
+
+def render_disclaimer(batch: dict) -> str:
+    if bool(batch.get("use_population_memory_bank")):
+        return POPULATION_MEMORY_BANK_DISCLAIMER_BLOCK
+    return LOCAL_REFERENCE_DISCLAIMER_BLOCK
 
 
 def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
@@ -223,7 +239,7 @@ def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
         "<h1>Прогон тестовых скважин — отчёт детекции</h1>"
         f"<div class='subtitle'>{' · '.join(subtitle_parts)}</div>"
         + LEGEND_BLOCK
-        + DISCLAIMER_BLOCK
+        + render_disclaimer(batch)
         + "</div>"
     )
 

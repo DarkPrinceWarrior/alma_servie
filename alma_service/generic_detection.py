@@ -2213,31 +2213,65 @@ def run_single_well(
         return
 
     device = _resolve_torch_device(detector_key, verbose=True)
-    from alma_service.shared_encoder import load_shared_encoder_state
-
-    shared_state = load_shared_encoder_state(spec.anomaly_key, device=device, verbose=True)
 
     population_reference: np.ndarray | None = None
-    if use_population_memory_bank:
-        bank_path = MODELS_DIR / f"population_memory_bank_{detector_key}_{spec.anomaly_key}.npz"
-        if not bank_path.exists():
-            raise FileNotFoundError(
-                f"Population memory bank not found: {bank_path}. "
-                f"Build it via scripts/utils/build_population_memory_bank.py."
-            )
-        bank = np.load(bank_path, allow_pickle=True)
-        population_reference = np.asarray(bank["features"], dtype=np.float32)
-        print(f"Loaded population memory bank: {bank_path.name} shape={population_reference.shape}")
+    if detector_key == "paano_global":
+        from alma_service.feature_schema import load_feature_schema, restrict_prepared_to_schema
+        from alma_service.global_normality import (
+            GLOBAL_ENCODER_KEY,
+            build_global_single_runs,
+        )
+        from alma_service.shared_encoder import load_shared_encoder_state
 
-    detector_runs = _build_local_runs(
-        spec.anomaly_key,
-        detector_key,
-        {well_id: prepared},
-        device=device,
-        verbose=True,
-        shared_state=shared_state,
-        population_reference=population_reference,
-    )
+        schema = load_feature_schema()
+        prepared_global, schema_audit = restrict_prepared_to_schema(prepared, schema, strict=False)
+        if prepared_global is None:
+            raise RuntimeError(
+                "Global normality feature schema rejected blind well "
+                f"{well_id}: {schema_audit}"
+            )
+        prepared = prepared_global
+        shared_state = load_shared_encoder_state(GLOBAL_ENCODER_KEY, device=device, verbose=True)
+        if use_population_memory_bank:
+            bank_path = MODELS_DIR / f"population_memory_bank_{detector_key}_{GLOBAL_ENCODER_KEY}.npz"
+            if not bank_path.exists():
+                raise FileNotFoundError(
+                    f"Population memory bank not found: {bank_path}. "
+                    f"Build it via scripts/utils/build_population_memory_bank.py."
+                )
+            bank = np.load(bank_path, allow_pickle=True)
+            population_reference = np.asarray(bank["features"], dtype=np.float32)
+            print(f"Loaded population memory bank: {bank_path.name} shape={population_reference.shape}")
+        detector_runs = build_global_single_runs(
+            {well_id: prepared},
+            shared_state,
+            device,
+            verbose=True,
+            population_reference=population_reference,
+        )
+    else:
+        from alma_service.shared_encoder import load_shared_encoder_state
+
+        shared_state = load_shared_encoder_state(spec.anomaly_key, device=device, verbose=True)
+        if use_population_memory_bank:
+            bank_path = MODELS_DIR / f"population_memory_bank_{detector_key}_{spec.anomaly_key}.npz"
+            if not bank_path.exists():
+                raise FileNotFoundError(
+                    f"Population memory bank not found: {bank_path}. "
+                    f"Build it via scripts/utils/build_population_memory_bank.py."
+                )
+            bank = np.load(bank_path, allow_pickle=True)
+            population_reference = np.asarray(bank["features"], dtype=np.float32)
+            print(f"Loaded population memory bank: {bank_path.name} shape={population_reference.shape}")
+        detector_runs = _build_local_runs(
+            spec.anomaly_key,
+            detector_key,
+            {well_id: prepared},
+            device=device,
+            verbose=True,
+            shared_state=shared_state,
+            population_reference=population_reference,
+        )
     run = detector_runs[well_id]
 
     cfg_payload = load_json(config_path(spec, detector_key))

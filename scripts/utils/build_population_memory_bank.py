@@ -1,14 +1,17 @@
-"""Собрать population memory bank для blind-инференса paano_global.
+"""Собрать population memory bank для blind-инференса.
 
-Источники нормы (per-anomaly):
+Для `paano_global` строится один общий банк в пространстве
+`global_normality_paano_shared_encoder.pt`, общий для negermet/pritok/salt.
+
+Для остальных детекторов источники нормы (per-anomaly):
 - labelled train скв.: первая часть до первого labelled_start (через
   prepare_engineered_well + anomaly_intervals → ветка
   REFERENCE_POLICY_NORMAL_WINDOWS).
 - norm_work скв.: ВСЁ как норма (normal_reference_fraction=1.0).
 
-Признаки выровнены под shared_channels из global_normality энкодера.
-
-Артефакт: models/population_memory_bank_<detector>_<anomaly>.npz
+Артефакты:
+- models/population_memory_bank_paano_global_global_normality.npz
+- models/population_memory_bank_<detector>_<anomaly>.npz
 { features: (N, C) float32, shared_channels: object[], sources: object[][well_id,count] }
 """
 
@@ -38,6 +41,11 @@ from alma_service.generic_detection import (
     REFERENCE_MIN_DAYS,
     REFERENCE_MIN_RATIO,
     _runtime_config,
+)
+from alma_service.global_normality import (
+    GLOBAL_DETECTOR_KEY,
+    GLOBAL_ENCODER_KEY,
+    prepare_global_normality_runtime,
 )
 from alma_service.paths import DB_DIR, MODELS_DIR
 from alma_service.shared_encoder import load_shared_encoder_state, select_shared_columns
@@ -168,6 +176,50 @@ def build_for_anomaly(anomaly_key: str, detector: str, out_path: Path, max_point
     print(f"\n  Saved {anomaly_key}: shape={population.shape} {suffix}, file={total_mb:.1f} MB → {out_path}")
 
 
+def build_global_normality_bank(detector: str, out_path: Path, max_points: int | None) -> None:
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    runtime = prepare_global_normality_runtime("negermet", device=device, verbose=True)
+    shared_channels = list(runtime.shared_state.shared_channels)
+    print(f"  global shared_channels: {len(shared_channels)} channels")
+
+    pool: list[np.ndarray] = []
+    sources: list[list[str]] = []
+    for pool_key, prepared in sorted(runtime.population_pool.items()):
+        X = select_shared_columns(prepared.feature_columns, prepared.feature_matrix, shared_channels)
+        ref = X[np.asarray(prepared.reference_mask, dtype=bool)].astype(np.float32)
+        if len(ref) == 0:
+            continue
+        print(f"    {pool_key}: {len(ref):>7d} points")
+        pool.append(ref)
+        sources.append([str(pool_key), str(len(ref))])
+
+    if not pool:
+        raise RuntimeError("No sources collected for global normality population bank")
+
+    raw_total = sum(len(c) for c in pool)
+    if max_points is None or max_points >= raw_total:
+        population = np.concatenate(pool, axis=0).astype(np.float32)
+        sources_with_taken = [[s[0], s[1], s[1]] for s in sources]
+        suffix = f"(no subsample, {raw_total} points)"
+    else:
+        population, taken_per_source = _stratified_subsample(pool, max_total=max_points)
+        sources_with_taken = [[s[0], s[1], str(t)] for s, t in zip(sources, taken_per_source)]
+        population = population.astype(np.float32)
+        suffix = f"(subsampled from {raw_total} to {max_points})"
+
+    np.savez_compressed(
+        out_path,
+        features=population,
+        shared_channels=np.array(shared_channels, dtype=object),
+        sources=np.array(sources_with_taken, dtype=object),
+    )
+    total_mb = out_path.stat().st_size / 1024 / 1024
+    print(
+        f"\n  Saved {detector}:{GLOBAL_ENCODER_KEY}: shape={population.shape} "
+        f"{suffix}, file={total_mb:.1f} MB → {out_path}"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build population memory bank for paano_global blind inference.")
     parser.add_argument("--anomaly", default="all", choices=["all", "negermet", "pritok", "salt"])
@@ -183,6 +235,11 @@ def main() -> None:
     anomalies = ("negermet", "pritok", "salt") if args.anomaly == "all" else (args.anomaly,)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     cap = "no_cap" if args.max_points is None else str(args.max_points)
+    if args.detector == GLOBAL_DETECTOR_KEY:
+        out = MODELS_DIR / f"population_memory_bank_{args.detector}_{GLOBAL_ENCODER_KEY}.npz"
+        print(f"\n=== {GLOBAL_ENCODER_KEY} (max_points={cap}) ===")
+        build_global_normality_bank(args.detector, out, args.max_points)
+        return
     for a in anomalies:
         out = MODELS_DIR / f"population_memory_bank_{args.detector}_{a}.npz"
         print(f"\n=== {a} (max_points={cap}) ===")
