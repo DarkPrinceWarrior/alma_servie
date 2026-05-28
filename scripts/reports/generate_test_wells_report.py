@@ -28,6 +28,9 @@ ANOMALY_LABELS = {
 }
 ANOMALY_ORDER = ("negermet", "pritok", "salt")
 PRESSURE_COLUMN = "Давление на приеме насоса кгс/см²"
+OUTPUT_FREQUENCY_COLUMN = "Выходная частота"
+FREQUENCY_CHANGE_THRESHOLD = 0.5
+FREQUENCY_POINT_WINDOW_HOURS = 3.0
 
 COLOR_PRESSURE = "#1e40af"
 COLOR_CRITICAL = "#dc2626"
@@ -46,7 +49,7 @@ def load_source(well_dir: Path, anomaly: str) -> pd.DataFrame:
     path = well_dir / anomaly / "source.parquet"
     if not path.exists():
         return pd.DataFrame()
-    df = pd.read_parquet(path, columns=["timestamp", PRESSURE_COLUMN])
+    df = pd.read_parquet(path)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     return df
 
@@ -61,9 +64,62 @@ def load_preds(well_dir: Path, anomaly: str) -> pd.DataFrame:
 def extract_critical(preds: pd.DataFrame) -> list[pd.Timestamp]:
     if preds.empty:
         return []
+    rows = critical_prediction_rows(preds)
+    return pd.to_datetime(rows["detected_time"]).tolist()
+
+
+def critical_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
+    if preds.empty:
+        return pd.DataFrame()
     event = preds.get("event_class", pd.Series([""] * len(preds))).fillna("").astype(str).str.lower()
-    times = pd.to_datetime(preds["detected_time"])
-    return sorted(times[event != "early_warning"].tolist())
+    rows = preds.loc[event != "early_warning"].copy()
+    if rows.empty:
+        return rows
+    rows["detected_time"] = pd.to_datetime(rows["detected_time"])
+    return rows.sort_values("detected_time")
+
+
+def render_frequency_caption(source: pd.DataFrame, preds: pd.DataFrame) -> str:
+    critical_rows = critical_prediction_rows(preds)
+    if critical_rows.empty:
+        return "Выходная частота: критических детектов нет."
+    if OUTPUT_FREQUENCY_COLUMN not in source.columns:
+        return "Выходная частота: канал отсутствует."
+
+    freq = pd.to_numeric(source[OUTPUT_FREQUENCY_COLUMN], errors="coerce")
+    timestamps = pd.to_datetime(source["timestamp"])
+    parts: list[str] = []
+    for _, row in critical_rows.iterrows():
+        start = pd.Timestamp(row["detected_time"])
+        close_raw = row.get("incident_close_time")
+        close = pd.to_datetime(close_raw) if pd.notna(close_raw) else pd.NaT
+        if pd.notna(close) and close > start:
+            window_start = start
+            window_end = pd.Timestamp(close)
+            window_note = "до закрытия"
+        else:
+            delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
+            window_start = start - delta
+            window_end = start + delta
+            window_note = f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч"
+
+        mask = (timestamps >= window_start) & (timestamps <= window_end)
+        values = freq[mask].dropna()
+        time_label = start.strftime("%Y-%m-%d %H:%M")
+        if len(values) < 2:
+            parts.append(f"{time_label}: недостаточно данных ({window_note})")
+            continue
+
+        f_min = float(values.min())
+        f_max = float(values.max())
+        f_delta = f_max - f_min
+        status = "меняется" if f_delta >= FREQUENCY_CHANGE_THRESHOLD else "неизменна"
+        parts.append(
+            f"{time_label}: {status}, Δ={f_delta:.2f}, "
+            f"{f_min:.2f}–{f_max:.2f} ({window_note})"
+        )
+
+    return "Выходная частота в детектах: " + "; ".join(escape(part) for part in parts)
 
 
 _PLOTLY_EMBEDDED = {"done": False}
@@ -161,8 +217,14 @@ def render_chart(well_id: str, anomaly: str, well_dir: Path) -> str:
     div_id = f"chart_{well_id}_{anomaly}"
     n_crit = len(critical)
     caption = f"Аномалий обнаружено: <strong>{n_crit}</strong>"
+    frequency_caption = render_frequency_caption(source, preds)
     chart_html = fig.to_html(full_html=False, include_plotlyjs=include_js, div_id=div_id)
-    return f"<div class='chart-block'><div class='chart-caption'>{caption}</div>{chart_html}</div>"
+    return (
+        "<div class='chart-block'>"
+        f"<div class='chart-caption'>{caption}</div>"
+        f"<div class='chart-caption frequency-caption'>{frequency_caption}</div>"
+        f"{chart_html}</div>"
+    )
 
 
 HEAD_CSS = """
@@ -176,6 +238,7 @@ h2 { font-size: 18px; margin: 24px 0 8px; color: #1e293b; letter-spacing: -0.01e
 .chart-block { margin: 6px 0 18px; }
 .chart-caption { color: #475569; font-size: 13px; margin: 8px 0 0 72px; }
 .chart-caption strong { color: #b91c1c; }
+.frequency-caption { color: #334155; line-height: 1.45; max-width: 1120px; }
 .legend-row { display: flex; gap: 22px; font-size: 12px; color: #475569; margin-top: 12px; flex-wrap: wrap; }
 .legend-line { display: inline-block; width: 22px; height: 2px; vertical-align: middle; margin-right: 8px; border-radius: 2px; }
 .legend-line.critical { background: #dc2626; height: 3px; }
