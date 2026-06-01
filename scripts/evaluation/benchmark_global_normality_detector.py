@@ -57,6 +57,10 @@ from alma_service.generic_detectors import (
     PAANO_INPUT_PADDING_MODES,
     SharedPaAnoDetector,
 )
+from alma_service.global_normality import (
+    _apply_norm_pool_hygiene,
+    load_global_normality_settings,
+)
 from alma_service.paano_defaults import PATCH_SIZES
 from alma_service.prediction_postprocess import build_incidents, filter_actionable_starts
 from alma_service.shared_encoder import (
@@ -696,6 +700,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--schema-only", action="store_true")
     parser.add_argument("--enable-feature-reduction", action="store_true")
     parser.add_argument("--disable-balanced-pool", action="store_true")
+    parser.add_argument(
+        "--disable-norm-pool-hygiene",
+        action="store_true",
+        help="Не применять правила гигиены банка нормы из конфига global normality.",
+    )
     parser.add_argument("--balance-rows-per-source", type=int, default=DEFAULT_BALANCE_ROWS_PER_SOURCE)
     parser.add_argument("--balance-rows-per-well", type=int, default=DEFAULT_BALANCE_ROWS_PER_WELL)
     parser.add_argument("--balance-source-policy", choices=["equal_min", "cap"], default=DEFAULT_BALANCE_SOURCE_POLICY)
@@ -736,6 +745,14 @@ def main() -> None:
                 common_source_freq=common_source_freq,
                 norm_work_profile=str(args.norm_work_profile),
             )
+    hygiene_audit: dict[str, Any] = {"enabled": False}
+    if not bool(args.disable_norm_pool_hygiene):
+        hygiene_rules = load_global_normality_settings().norm_pool_hygiene_rules
+        global_pool_runs, hygiene_audit = _apply_norm_pool_hygiene(
+            global_pool_runs,
+            hygiene_rules,
+            verbose=True,
+        )
     global_pool_runs, schema_audit_global_pool = _apply_feature_schema_to_pool(
         global_pool_runs,
         feature_schema,
@@ -807,6 +824,7 @@ def main() -> None:
         "schema_strict": schema_strict,
         "feature_reduction_enabled": bool(args.enable_feature_reduction),
         "balance_audit": balance_audit,
+        "norm_pool_hygiene_audit": hygiene_audit,
         "schema_audit_by_class": schema_audit_by_class,
         "schema_audit_global_pool": schema_audit_global_pool,
         "global_pool_points_after_reduction": int(len(global_pool)),

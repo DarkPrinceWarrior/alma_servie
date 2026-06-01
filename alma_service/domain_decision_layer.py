@@ -20,11 +20,19 @@ DOMAIN_ACCEPTED = "accepted"
 DOMAIN_REJECTED_BAD_DATA = "rejected_bad_data"
 DOMAIN_REJECTED_REGIME_EVENT = "rejected_regime_event"
 DOMAIN_REJECTED_FREQUENCY_TRANSITION = "rejected_frequency_transition"
+DOMAIN_REJECTED_WELL_STOPPED = "rejected_well_stopped"
 DOMAIN_PRITOK_CANDIDATE = "pritok_candidate"
 DOMAIN_SALT_CANDIDATE = "salt_candidate"
 DOMAIN_NEGERMET_CANDIDATE = "negermet_candidate"
 DOMAIN_UNCERTAIN = "uncertain"
 DOMAIN_NO_DATA = "no_data"
+
+# Остановка скважины: рабочая выходная частота УЭЦН в данных проекта — 170-225 Гц.
+# Частота ниже порога означает стоящий насос; рост давления при стоящем насосе —
+# гидростатическое восстановление, а не сигнатура аномалии (правило эксперта:
+# остановка не считается аномалией; подтверждено случаем 5271г).
+WELL_STOPPED_FREQUENCY_THRESHOLD = 1.0
+WELL_STOPPED_FRACTION_THRESHOLD = 0.5
 
 TEMPERATURE_COLUMNS = (
     "Температура на приёме насоса",
@@ -212,6 +220,20 @@ def _flag(row: pd.Series, column: str) -> bool:
     return bool(value)
 
 
+def _stopped_fraction(
+    prepared: PreparedWellData,
+    post_mask: np.ndarray,
+) -> float:
+    frequency = _column_values(prepared, FREQ_COL)
+    if frequency is None:
+        return float("nan")
+    post_values = frequency[post_mask]
+    finite = post_values[np.isfinite(post_values)]
+    if finite.size == 0:
+        return float("nan")
+    return float((finite < WELL_STOPPED_FREQUENCY_THRESHOLD).mean())
+
+
 def _classify_domain_start(
     *,
     anomaly_key: str,
@@ -222,7 +244,14 @@ def _classify_domain_start(
     temperature_delta_pct: float,
     imbalance_delta_pct: float,
     config: DomainDecisionConfig,
+    stopped_fraction: float = float("nan"),
 ) -> tuple[str, str, str]:
+    if np.isfinite(stopped_fraction) and stopped_fraction >= WELL_STOPPED_FRACTION_THRESHOLD:
+        return (
+            DOMAIN_REJECTED_WELL_STOPPED,
+            "reject",
+            "well_stopped_pressure_recovery_is_not_anomaly",
+        )
     start_class = str(start_row.get("start_class", "")).strip().lower()
     bad_data_context = _flag(start_row, "is_bad_data") or start_class == "bad_data"
     regime_context = _flag(start_row, "is_regime_event") or start_class == "regime_event"
@@ -337,6 +366,7 @@ def assess_domain_start(
     load_delta = _group_abs_delta_pct(prepared, LOAD_COLUMNS, pre_mask, post_mask)
     temperature_delta = _group_abs_delta_pct(prepared, TEMPERATURE_COLUMNS, pre_mask, post_mask)
     imbalance_delta = _group_abs_delta_pct(prepared, IMBALANCE_COLUMNS, pre_mask, post_mask)
+    stopped_fraction = _stopped_fraction(prepared, post_mask)
     verdict, action, reason = _classify_domain_start(
         anomaly_key=str(anomaly_key),
         start_row=start_row,
@@ -346,11 +376,13 @@ def assess_domain_start(
         temperature_delta_pct=temperature_delta,
         imbalance_delta_pct=imbalance_delta,
         config=cfg,
+        stopped_fraction=stopped_fraction,
     )
     return {
         "domain_verdict": verdict,
         "domain_action": action,
         "domain_reason": reason,
+        "domain_stopped_fraction": stopped_fraction,
         "domain_pre_points": int(pre_mask.sum()),
         "domain_post_points": int(post_mask.sum()),
         "domain_pre_hours": float(cfg.pre_hours),

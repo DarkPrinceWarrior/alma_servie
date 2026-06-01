@@ -86,6 +86,7 @@ class GlobalNormalitySettings:
     channel_dropout_enabled: bool
     channel_dropout_rate: float
     channel_dropout_seed: int
+    norm_pool_hygiene_rules: tuple[dict[str, Any], ...]
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,10 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
     balance = dict(payload.get("balance", {}))
     missing_channel_masks = dict(payload.get("missing_channel_masks", {}))
     channel_dropout = dict(payload.get("channel_dropout", {}))
+    norm_pool_hygiene = dict(payload.get("norm_pool_hygiene", {}))
+    hygiene_rules: tuple[dict[str, Any], ...] = ()
+    if bool(norm_pool_hygiene.get("enabled", False)):
+        hygiene_rules = tuple(dict(rule) for rule in norm_pool_hygiene.get("rules", []))
     overrides = {
         str(key): int(value)
         for key, value in dict(payload.get("prepare_patch_size_overrides") or {}).items()
@@ -131,6 +136,7 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
         channel_dropout_enabled=bool(channel_dropout.get("enabled", False)),
         channel_dropout_rate=float(channel_dropout.get("rate", 0.0)),
         channel_dropout_seed=int(channel_dropout.get("seed", 20260518)),
+        norm_pool_hygiene_rules=hygiene_rules,
     )
 
 
@@ -183,6 +189,11 @@ def prepare_global_normality_runtime(
                 common_source_freq=settings.common_source_freq,
                 norm_work_profile=settings.norm_work_profile,
             )
+    global_pool, hygiene_audit = _apply_norm_pool_hygiene(
+        global_pool,
+        settings.norm_pool_hygiene_rules,
+        verbose=verbose,
+    )
     global_pool, schema_audit_global_pool = _apply_feature_schema_to_pool(
         global_pool,
         schema,
@@ -248,6 +259,7 @@ def prepare_global_normality_runtime(
         "channel_dropout_rate": channel_dropout_rate,
         "channel_dropout_seed": settings.channel_dropout_seed,
         "balance_audit": balance_audit,
+        "norm_pool_hygiene_audit": hygiene_audit,
         "schema_audit_by_class": schema_audit_by_class,
         "schema_audit_global_pool": schema_audit_global_pool,
         "global_pool_points": int(len(pool)),
@@ -762,6 +774,97 @@ def _global_train_pool(prepared_by_class: dict[str, dict[str, Any]]) -> dict[str
             if item.split == "train":
                 out[f"{anomaly_key}:{well_id}"] = item
     return out
+
+
+def _apply_norm_pool_hygiene(
+    global_pool: dict[str, Any],
+    rules: tuple[dict[str, Any], ...],
+    *,
+    verbose: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not rules:
+        return global_pool, {"enabled": False}
+
+    rules_by_well: dict[str, dict[str, Any]] = {}
+    for rule in rules:
+        well_key = _normalize_well_id(rule.get("well_id", ""))
+        if well_key:
+            rules_by_well[well_key] = rule
+
+    cleaned_pool: dict[str, Any] = {}
+    applied: list[dict[str, Any]] = []
+    for pool_key, prepared in sorted(global_pool.items()):
+        well_key = _normalize_well_id(getattr(prepared, "well_id", ""))
+        rule = rules_by_well.get(well_key)
+        if rule is None:
+            cleaned_pool[pool_key] = prepared
+            continue
+
+        action = str(rule.get("action", "")).strip().lower()
+        source_filter = str(rule.get("source", "")).strip().lower()
+        if source_filter and _pool_source_from_key(pool_key) != source_filter:
+            cleaned_pool[pool_key] = prepared
+            continue
+
+        if action == "exclude":
+            applied.append(
+                {
+                    "pool_key": pool_key,
+                    "action": action,
+                    "reason": str(rule.get("reason", "")),
+                    "reference_rows_removed": int(
+                        np.asarray(prepared.reference_mask, dtype=bool).sum()
+                    ),
+                }
+            )
+            if verbose:
+                print(f"  [norm_pool_hygiene] exclude {pool_key}: {rule.get('reason', '')}")
+            continue
+
+        if action == "trim_reference_tail_days":
+            trim_days = float(rule.get("days", 0.0))
+            timestamps = pd.to_datetime(np.asarray(prepared.timestamps))
+            reference_mask = np.asarray(prepared.reference_mask, dtype=bool).copy()
+            ref_positions = np.flatnonzero(reference_mask)
+            if trim_days > 0 and len(ref_positions) > 0:
+                ref_end_ts = timestamps[ref_positions[-1]]
+                cutoff = ref_end_ts - pd.Timedelta(days=trim_days)
+                tail = ref_positions[timestamps[ref_positions] > cutoff]
+                reference_mask[tail] = False
+            removed = int(len(ref_positions) - reference_mask.sum())
+            detail = dict(prepared.detail)
+            detail["norm_pool_hygiene"] = {
+                "action": action,
+                "days": trim_days,
+                "reason": str(rule.get("reason", "")),
+                "reference_rows_removed": removed,
+            }
+            applied.append(
+                {
+                    "pool_key": pool_key,
+                    "action": action,
+                    "days": trim_days,
+                    "reason": str(rule.get("reason", "")),
+                    "reference_rows_removed": removed,
+                }
+            )
+            if verbose:
+                print(
+                    f"  [norm_pool_hygiene] trim {pool_key}: -{trim_days:g} days "
+                    f"({removed} reference rows): {rule.get('reason', '')}"
+                )
+            if not reference_mask.any():
+                continue
+            cleaned_pool[pool_key] = replace(prepared, reference_mask=reference_mask, detail=detail)
+            continue
+
+        raise ValueError(f"Unknown norm_pool_hygiene action: {action!r} for well {well_key!r}")
+
+    return cleaned_pool, {
+        "enabled": True,
+        "rules_total": len(rules),
+        "applied": applied,
+    }
 
 
 def _add_norm_work_pool(

@@ -8,6 +8,7 @@ from alma_service.domain_decision_layer import (
     DOMAIN_PRITOK_CANDIDATE,
     DOMAIN_REJECTED_FREQUENCY_TRANSITION,
     DOMAIN_REJECTED_REGIME_EVENT,
+    DOMAIN_REJECTED_WELL_STOPPED,
     DOMAIN_SALT_CANDIDATE,
     DOMAIN_UNCERTAIN,
     assess_domain_start,
@@ -199,3 +200,55 @@ def test_negermet_weak_candidate_without_physical_response_stays_uncertain() -> 
     )
     assert result["domain_verdict"] == "uncertain"
     assert result["domain_action"] == "uncertain"
+
+
+def test_well_stopped_rejects_pressure_recovery_as_negermet() -> None:
+    # Сценарий 5271г: насос остановился (частота -> 0), давление растёт гидростатически.
+    pressure = np.r_[np.full(24, 30.0), np.linspace(30.0, 79.0, 24)]
+    frequency = np.r_[np.full(24, 195.0), np.zeros(24)]
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:00:00"),
+    )
+    assert result["domain_verdict"] == DOMAIN_REJECTED_WELL_STOPPED
+    assert result["domain_action"] == "reject"
+    assert result["domain_stopped_fraction"] >= 0.5
+
+
+def test_well_stopped_rejects_for_all_anomaly_classes() -> None:
+    pressure = np.r_[np.full(288, 50.0), np.linspace(50.0, 90.0, 288)]
+    frequency = np.r_[np.full(288, 180.0), np.zeros(288)]
+    for anomaly_key in ("pritok", "salt", "negermet"):
+        result = assess_domain_start(
+            anomaly_key=anomaly_key,
+            prepared=_prepared(pressure, frequency),
+            start_row=_row("2026-01-02"),
+        )
+        assert result["domain_verdict"] == DOMAIN_REJECTED_WELL_STOPPED, anomaly_key
+        assert result["domain_action"] == "reject", anomaly_key
+
+
+def test_working_well_with_pressure_step_is_not_marked_stopped() -> None:
+    # Рабочая частота 170-225 Гц со скачком давления — это негермет, не остановка.
+    pressure = np.r_[np.full(24, 100.0), np.full(24, 130.0)]
+    frequency = np.full(len(pressure), 180.0)
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:00:00"),
+    )
+    assert result["domain_verdict"] == DOMAIN_NEGERMET_CANDIDATE
+    assert result["domain_stopped_fraction"] == 0.0
+
+
+def test_partial_stop_below_threshold_does_not_reject() -> None:
+    # Менее половины окна в остановке — решение остаётся за классовой логикой.
+    pressure = np.r_[np.full(24, 100.0), np.full(24, 130.0)]
+    frequency = np.r_[np.full(24, 180.0), np.full(14, 180.0), np.zeros(10)]
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:00:00"),
+    )
+    assert result["domain_verdict"] != DOMAIN_REJECTED_WELL_STOPPED
