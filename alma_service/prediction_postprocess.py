@@ -59,13 +59,24 @@ def annotate_predicted_starts(predictions: pd.DataFrame) -> pd.DataFrame:
     result = predictions.copy()
     if "event_class" not in result.columns:
         result["event_class"] = ""
+    event_clean = result["event_class"].fillna("").astype(str).str.strip().str.lower()
     result["start_class"] = result["event_class"].map(_start_class)
     if "zone_status" in result.columns:
         zone = result["zone_status"].fillna("").astype(str).str.lower()
-        event_clean = result["event_class"].fillna("").astype(str).str.strip().str.lower()
         zone_overridable = event_clean.isin({"", EVENT_BAD_DATA, EVENT_REGIME})
         result.loc[(zone == EVENT_PRE_ANOMALY) & zone_overridable, "start_class"] = START_PRE_ANOMALY_ZONE
         result.loc[(zone == EVENT_LABELLED_ANOMALY) & zone_overridable, "start_class"] = START_LABELLED_ANOMALY
+
+    protected = result["start_class"].isin({START_PRE_ANOMALY_ZONE, START_LABELLED_ANOMALY})
+    bad_mask = event_clean.eq(EVENT_BAD_DATA)
+    if "is_bad_data" in result.columns:
+        bad_mask = bad_mask | result["is_bad_data"].fillna(False).astype(bool)
+    regime_mask = event_clean.eq(EVENT_REGIME)
+    if "is_regime_event" in result.columns:
+        regime_mask = regime_mask | result["is_regime_event"].fillna(False).astype(bool)
+
+    result.loc[bad_mask & ~protected, "start_class"] = START_BAD_DATA
+    result.loc[regime_mask & ~protected & ~bad_mask, "start_class"] = START_REGIME_EVENT
     result["actionable_alert"] = result["start_class"].isin(ACTIONABLE_START_CLASSES)
     result["suppression_reason"] = ""
     result.loc[result["start_class"] == START_BAD_DATA, "suppression_reason"] = "bad_data"

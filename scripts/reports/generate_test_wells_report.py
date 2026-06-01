@@ -226,7 +226,7 @@ def render_pritok_frequency_table(well_id: str, source: pd.DataFrame, preds: pd.
 _PLOTLY_EMBEDDED = {"done": False}
 
 
-def render_chart(well_id: str, anomaly: str, well_dir: Path) -> str:
+def render_chart(well_id: str, anomaly: str, well_dir: Path, show_frequency_table: bool = True) -> str:
     source = load_source(well_dir, anomaly)
     preds = load_preds(well_dir, anomaly)
     if source.empty or PRESSURE_COLUMN not in source.columns:
@@ -318,7 +318,11 @@ def render_chart(well_id: str, anomaly: str, well_dir: Path) -> str:
     div_id = f"chart_{well_id}_{anomaly}"
     n_crit = len(critical)
     caption = f"Аномалий обнаружено: <strong>{n_crit}</strong>"
-    frequency_table = render_pritok_frequency_table(well_id, source, preds) if anomaly == "pritok" else ""
+    frequency_table = (
+        render_pritok_frequency_table(well_id, source, preds)
+        if anomaly == "pritok" and show_frequency_table
+        else ""
+    )
     chart_html = fig.to_html(full_html=False, include_plotlyjs=include_js, div_id=div_id)
     return (
         "<div class='chart-block'>"
@@ -350,6 +354,7 @@ h2 { font-size: 18px; margin: 24px 0 8px; color: #1e293b; letter-spacing: -0.01e
 .legend-line.critical { background: #dc2626; height: 3px; }
 .legend-line.pressure { background: #1e40af; height: 3px; }
 .disclaimer { background: #fef9c3; border-left: 4px solid #facc15; padding: 12px 16px; border-radius: 8px; color: #713f12; font-size: 13px; margin-top: 14px; line-height: 1.5; }
+.success-note { background: #dcfce7; border-left: 4px solid #16a34a; padding: 12px 16px; border-radius: 8px; color: #14532d; font-size: 14px; font-weight: 600; margin-top: 14px; line-height: 1.5; }
 .no-data { color: #94a3b8; font-style: italic; padding: 14px; }
 </style>
 """
@@ -389,7 +394,13 @@ def render_disclaimer(batch: dict) -> str:
     return LOCAL_REFERENCE_DISCLAIMER_BLOCK
 
 
-def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
+def render_report(
+    batch_dir: Path,
+    anomalies: tuple[str, ...],
+    show_disclaimer: bool = True,
+    show_frequency_table: bool = True,
+    success_note: str | None = None,
+) -> str:
     batch = load_batch_summary(batch_dir)
     n_wells = len(batch.get("wells", []))
     detector = batch.get("detector_choice", "—")
@@ -405,12 +416,16 @@ def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
         subtitle_parts.append(f"Время прогона: {elapsed:.1f} с")
     subtitle_parts.append(f"Сгенерировано: {generated_at}")
 
+    note_html = (
+        f"<div class='success-note'>{escape(success_note)}</div>" if success_note else ""
+    )
     header_html = (
         "<div class='header'>"
         "<h1>Прогон тестовых скважин — отчёт детекции</h1>"
         f"<div class='subtitle'>{' · '.join(subtitle_parts)}</div>"
         + LEGEND_BLOCK
-        + render_disclaimer(batch)
+        + note_html
+        + (render_disclaimer(batch) if show_disclaimer else "")
         + "</div>"
     )
 
@@ -418,7 +433,7 @@ def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
     for well_summary in batch.get("wells", []):
         well_id = str(well_summary.get("well_id", ""))
         well_dir = batch_dir / well_id
-        charts = [render_chart(well_id, a, well_dir) for a in anomalies]
+        charts = [render_chart(well_id, a, well_dir, show_frequency_table) for a in anomalies]
         sections.append(
             f"<section class='well-block'>"
             f"<h2>Скважина {escape(well_id)}</h2>"
@@ -445,6 +460,9 @@ def main() -> None:
         default="artifacts/reports/test_wells/test_wells_paano_global_report.html",
     )
     parser.add_argument("--anomalies", default=",".join(ANOMALY_ORDER))
+    parser.add_argument("--no-disclaimer", action="store_true", help="Не выводить блок «Внимание».")
+    parser.add_argument("--no-frequency-table", action="store_true", help="Не выводить таблицу выходной частоты.")
+    parser.add_argument("--note", default=None, help="Текст зелёной заметки в шапке отчёта.")
     args = parser.parse_args()
 
     batch_dir = Path(args.batch_dir).resolve()
@@ -455,7 +473,13 @@ def main() -> None:
     if unknown:
         raise ValueError(f"Неизвестные аномалии: {unknown}")
 
-    html = render_report(batch_dir, anomalies)
+    html = render_report(
+        batch_dir,
+        anomalies,
+        show_disclaimer=not args.no_disclaimer,
+        show_frequency_table=not args.no_frequency_table,
+        success_note=args.note,
+    )
     output_path = Path(args.output).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")

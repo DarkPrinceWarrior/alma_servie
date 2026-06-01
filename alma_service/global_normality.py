@@ -173,7 +173,7 @@ def prepare_global_normality_runtime(
         prepared_by_class, schema_audit_by_class = _apply_feature_schema_by_class(
             prepared_by_class,
             schema,
-            strict=True,
+            strict=False,
         )
         global_pool = _global_train_pool(prepared_by_class)
         if settings.include_norm_work:
@@ -186,7 +186,7 @@ def prepare_global_normality_runtime(
     global_pool, schema_audit_global_pool = _apply_feature_schema_to_pool(
         global_pool,
         schema,
-        strict=True,
+        strict=False,
     )
     balance_audit: dict[str, Any] = {"enabled": False}
     if settings.balance_enabled:

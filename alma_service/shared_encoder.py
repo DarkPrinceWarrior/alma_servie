@@ -246,7 +246,9 @@ def collect_shared_train_pool(
     pool: np.ndarray
         Concatenated clean-normal rows, columns correspond to ``shared_channels``.
     shared_channels: list[str]
-        Feature columns present in ALL train wells (intersection).
+        Feature columns used by the encoder. With missing-channel masks enabled,
+        this is a schema union projected per well with zeros for absent feature
+        families and explicit ``__missing_raw__`` indicators.
     train_well_ids: list[str]
         List of well IDs that contributed to the pool.
 
@@ -263,12 +265,24 @@ def collect_shared_train_pool(
     if not train_wells:
         raise ValueError(f"No wells with split='{only_split}' found.")
 
-    # Find intersection of feature columns across all train wells
-    channel_sets = [set(pw.feature_columns) for pw in train_wells.values()]
-    shared = channel_sets[0]
-    for cs in channel_sets[1:]:
-        shared = shared & cs
-    shared_channels = sorted(shared)
+    use_missing_masks = bool(missing_mask_raw_channels)
+    if use_missing_masks:
+        raw_filter = set(str(channel) for channel in missing_mask_raw_channels or [])
+        shared_channels = sorted(
+            {
+                channel
+                for pw in train_wells.values()
+                for channel in pw.feature_columns
+                if feature_root(channel) in raw_filter
+            }
+        )
+    else:
+        # Find intersection of feature columns across all train wells.
+        channel_sets = [set(pw.feature_columns) for pw in train_wells.values()]
+        shared = channel_sets[0]
+        for cs in channel_sets[1:]:
+            shared = shared & cs
+        shared_channels = sorted(shared)
 
     if not shared_channels:
         raise ValueError(
@@ -279,12 +293,17 @@ def collect_shared_train_pool(
     pool_parts: list[np.ndarray] = []
     for wid in sorted(train_wells):
         pw = train_wells[wid]
-        # Select only shared columns in consistent order
-        col_indices = [pw.feature_columns.index(ch) for ch in shared_channels]
-        well_matrix = pw.feature_matrix[:, col_indices]
+        if use_missing_masks:
+            well_matrix = select_shared_columns(
+                pw.feature_columns,
+                pw.feature_matrix,
+                shared_channels,
+            )
+        else:
+            col_indices = [pw.feature_columns.index(ch) for ch in shared_channels]
+            well_matrix = pw.feature_matrix[:, col_indices]
 
-        # Use reference_mask (already zone-filtered if intervals were provided)
-        ref_rows = well_matrix[pw.reference_mask]
+        ref_rows = well_matrix[np.asarray(pw.reference_mask, dtype=bool)]
         if len(ref_rows) > 0:
             pool_parts.append(ref_rows)
 
@@ -304,11 +323,42 @@ def collect_shared_train_pool(
                 f"(removed {original_count - len(shared_channels)})"
             )
 
-    pool, shared_channels = _append_missing_channel_masks(
-        pool,
-        shared_channels,
-        missing_mask_raw_channels,
-    )
+    if use_missing_masks:
+        represented_roots = {feature_root(channel) for channel in shared_channels}
+        mask_raw_channels = [
+            str(raw_channel)
+            for raw_channel in missing_mask_raw_channels or []
+            if str(raw_channel) in represented_roots
+        ]
+        mask_channels = [missing_raw_channel_feature(raw_channel) for raw_channel in mask_raw_channels]
+        masked_parts: list[np.ndarray] = []
+        for wid in sorted(train_wells):
+            pw = train_wells[wid]
+            well_matrix = select_shared_columns(
+                pw.feature_columns,
+                pw.feature_matrix,
+                shared_channels,
+            )
+            available_roots = {feature_root(channel) for channel in pw.feature_columns}
+            masks = np.zeros((len(well_matrix), len(mask_raw_channels)), dtype=np.float32)
+            for idx, raw_channel in enumerate(mask_raw_channels):
+                if raw_channel not in available_roots:
+                    masks[:, idx] = 1.0
+            if mask_channels:
+                well_matrix = np.concatenate([well_matrix, masks], axis=1).astype(np.float32)
+            ref_rows = well_matrix[np.asarray(pw.reference_mask, dtype=bool)]
+            if len(ref_rows) > 0:
+                masked_parts.append(ref_rows)
+        if not masked_parts:
+            raise ValueError("No clean-normal reference data collected from train wells.")
+        pool = np.concatenate(masked_parts, axis=0).astype(np.float32)
+        shared_channels = [*shared_channels, *mask_channels]
+    else:
+        pool, shared_channels = _append_missing_channel_masks(
+            pool,
+            shared_channels,
+            missing_mask_raw_channels,
+        )
     pool = _apply_channel_dropout(
         pool,
         shared_channels,

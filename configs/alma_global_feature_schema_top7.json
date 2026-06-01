@@ -1,0 +1,15 @@
+{
+  "name": "alma_global_top7_fi",
+  "version": "2026-05-21",
+  "description": "Experiment: reduced schema = top-7 feature-importance channels available to paano_global. Vyhodnoy tok PCh excluded by coverage. Baseline schema: alma_global_core_21.",
+  "raw_channels": [
+    "Давление на приеме насоса кгс/см²",
+    "Температура на приёме насоса",
+    "Температура масла двигателя",
+    "Ток на фазе А",
+    "Ток на фазе В",
+    "Ток на фазе С",
+    "Коэффициент загрузки ПЭД"
+  ],
+  "excluded_channels": []
+}

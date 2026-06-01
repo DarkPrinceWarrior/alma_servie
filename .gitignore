@@ -46,3 +46,7 @@ salt_anomaly_report_original.html
 # Repomix output
 repomix-*.xml
 repomix-output.xml
+# Local research transcripts and run logs
+ChatExport_*/
+runs/
+TZ_well_anomaly_detection.md

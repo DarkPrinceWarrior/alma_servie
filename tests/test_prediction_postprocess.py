@@ -9,6 +9,7 @@ from alma_service.prediction_postprocess import (
     START_BAD_DATA,
     START_LABELLED_ANOMALY,
     START_PRE_ANOMALY_ZONE,
+    START_EARLY_WARNING,
     START_REGIME_EVENT,
     build_incidents,
     filter_actionable_starts,
@@ -52,6 +53,27 @@ class TestPredictionPostprocess(unittest.TestCase):
             [START_LABELLED_ANOMALY, START_PRE_ANOMALY_ZONE],
         )
         self.assertEqual(int(result["actionable_alert"].sum()), 2)
+
+    def test_early_warnings_respect_bad_data_and_regime_flags(self) -> None:
+        predictions = pd.DataFrame(
+            {
+                "well_id": ["1", "1", "1"],
+                "detected_time": pd.to_datetime(
+                    ["2026-01-01 00:00", "2026-01-01 01:00", "2026-01-01 02:00"]
+                ),
+                "event_class": ["early_warning", "early_warning", "early_warning"],
+                "is_bad_data": [True, False, False],
+                "is_regime_event": [False, True, False],
+            }
+        )
+
+        result = build_incidents(predictions, merge_window_hours=6.0).starts
+
+        self.assertEqual(
+            list(result["start_class"]),
+            [START_BAD_DATA, START_REGIME_EVENT, START_EARLY_WARNING],
+        )
+        self.assertEqual(int(result["actionable_alert"].sum()), 1)
 
     def test_merges_repeated_actionable_starts_into_incident(self) -> None:
         predictions = pd.DataFrame(
