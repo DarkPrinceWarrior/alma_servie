@@ -33,6 +33,7 @@ DOMAIN_NO_DATA = "no_data"
 # остановка не считается аномалией; подтверждено случаем 5271г).
 WELL_STOPPED_FREQUENCY_THRESHOLD = 1.0
 WELL_STOPPED_FRACTION_THRESHOLD = 0.5
+WELL_STOPPED_POINT_WINDOW_MINUTES = 15.0
 
 TEMPERATURE_COLUMNS = (
     "Температура на приёме насоса",
@@ -222,16 +223,33 @@ def _flag(row: pd.Series, column: str) -> bool:
 
 def _stopped_fraction(
     prepared: PreparedWellData,
-    post_mask: np.ndarray,
+    mask: np.ndarray,
 ) -> float:
     frequency = _column_values(prepared, FREQ_COL)
     if frequency is None:
         return float("nan")
-    post_values = frequency[post_mask]
-    finite = post_values[np.isfinite(post_values)]
+    values = frequency[mask]
+    finite = values[np.isfinite(values)]
     if finite.size == 0:
         return float("nan")
     return float((finite < WELL_STOPPED_FREQUENCY_THRESHOLD).mean())
+
+
+def _stopped_at_detection(
+    prepared: PreparedWellData,
+    detected_time: pd.Timestamp,
+) -> bool | None:
+    frequency = _column_values(prepared, FREQ_COL)
+    if frequency is None:
+        return None
+    ts = pd.to_datetime(prepared.timestamps)
+    tolerance = pd.Timedelta(minutes=WELL_STOPPED_POINT_WINDOW_MINUTES)
+    window = np.asarray((ts >= detected_time - tolerance) & (ts <= detected_time + tolerance), dtype=bool)
+    values = frequency[window]
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None
+    return bool(float(np.median(finite)) < WELL_STOPPED_FREQUENCY_THRESHOLD)
 
 
 def _classify_domain_start(
@@ -366,7 +384,18 @@ def assess_domain_start(
     load_delta = _group_abs_delta_pct(prepared, LOAD_COLUMNS, pre_mask, post_mask)
     temperature_delta = _group_abs_delta_pct(prepared, TEMPERATURE_COLUMNS, pre_mask, post_mask)
     imbalance_delta = _group_abs_delta_pct(prepared, IMBALANCE_COLUMNS, pre_mask, post_mask)
-    stopped_fraction = _stopped_fraction(prepared, post_mask)
+    # Гидростатическое восстановление — это рост, начавшийся в остановке. Поэтому
+    # остановка оценивается в точке детекции и в окне роста (до точки), а не после:
+    # остановка скважины оператором после реальной аварии не должна отклонять алерт
+    # (случай 5271г: скачок при работающем насосе, остановка через час).
+    stopped_at_detection = _stopped_at_detection(prepared, detected_time)
+    rise_stopped_fraction = _stopped_fraction(prepared, pre_mask)
+    if stopped_at_detection is True:
+        stopped_fraction = 1.0
+    elif stopped_at_detection is False:
+        stopped_fraction = rise_stopped_fraction if np.isfinite(rise_stopped_fraction) else 0.0
+    else:
+        stopped_fraction = rise_stopped_fraction
     verdict, action, reason = _classify_domain_start(
         anomaly_key=str(anomaly_key),
         start_row=start_row,
@@ -383,6 +412,7 @@ def assess_domain_start(
         "domain_action": action,
         "domain_reason": reason,
         "domain_stopped_fraction": stopped_fraction,
+        "domain_stopped_at_detection": stopped_at_detection,
         "domain_pre_points": int(pre_mask.sum()),
         "domain_post_points": int(post_mask.sum()),
         "domain_pre_hours": float(cfg.pre_hours),

@@ -20,6 +20,7 @@ from alma_service.tabular_io import write_dataset_tables, write_table
 
 
 DEFAULT_SUMMARY_PATH = DATA_DIR / "reference" / "Сводная информация_объединённая.xlsx"
+DEFAULT_OVERRIDES_PATH = PROJECT_ROOT / "configs" / "alma_summary_overrides.json"
 DEFAULT_FREQ = "5min"
 MIN_REFERENCE_POINTS = 768
 MIN_REFERENCE_DAYS = MIN_REFERENCE_POINTS * 5 / 60 / 24
@@ -122,8 +123,60 @@ def _resolve_source_path(row: pd.Series, output_key: str) -> Path:
     raise FileNotFoundError(f"Source file not found for summary row {int(row.name) + 4}: {source_file}")
 
 
-def _load_summary_cases(summary_path: Path, min_reference_days: float) -> list[SummaryCase]:
+def _load_summary_overrides(overrides_path: Path | None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if overrides_path is None or not overrides_path.exists():
+        return [], {"enabled": False, "applied": []}
+    payload = json.loads(overrides_path.read_text(encoding="utf-8"))
+    if not payload.get("enabled", True):
+        return [], {"enabled": False, "applied": []}
+    return list(payload.get("overrides", [])), {"enabled": True, "path": str(overrides_path), "applied": []}
+
+
+def _apply_summary_overrides(
+    df: pd.DataFrame,
+    overrides: list[dict[str, Any]],
+    audit: dict[str, Any],
+) -> pd.DataFrame:
+    for override in overrides:
+        row_idx = int(override["summary_row"]) - 4
+        column = str(override["column"])
+        expected_well = _normalize_id(override["well_id"])
+        actual_well = _normalize_id(df.at[row_idx, "Скважина"])
+        if actual_well != expected_well:
+            raise RuntimeError(
+                f"Переопределение строки {override['summary_row']}: в сводной скважина "
+                f"{actual_well!r}, в правиле {expected_well!r} — проверьте номер строки"
+            )
+        old_value = df.at[row_idx, column]
+        new_value: Any = override["new_value"]
+        if column.startswith("Дата"):
+            new_value = pd.to_datetime(new_value)
+        df.at[row_idx, column] = new_value
+        applied = {
+            "summary_row": int(override["summary_row"]),
+            "well_id": str(override["well_id"]),
+            "column": column,
+            "old_value": str(old_value),
+            "new_value": str(new_value),
+            "reason": str(override.get("reason", "")),
+        }
+        audit["applied"].append(applied)
+        print(
+            f"Переопределение разметки: строка {override['summary_row']} ({override['well_id']}), "
+            f"{column}: {old_value} -> {new_value}"
+        )
+    return df
+
+
+def _load_summary_cases(
+    summary_path: Path,
+    min_reference_days: float,
+    overrides_path: Path | None = DEFAULT_OVERRIDES_PATH,
+) -> tuple[list[SummaryCase], dict[str, Any]]:
     df = pd.read_excel(summary_path, header=2)
+    overrides, overrides_audit = _load_summary_overrides(overrides_path)
+    if overrides:
+        df = _apply_summary_overrides(df, overrides, overrides_audit)
     candidates: list[dict[str, Any]] = []
 
     for idx, row in df.iterrows():
@@ -194,7 +247,7 @@ def _load_summary_cases(summary_path: Path, min_reference_days: float) -> list[S
         else:
             case_id = str(item["source_well_id"])
         cases.append(SummaryCase(case_id=case_id, **item))
-    return cases
+    return cases, overrides_audit
 
 
 def _build_output_dataset(output_key: str, cases: list[SummaryCase], freq: str) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -287,9 +340,10 @@ def build_combined_summary_datasets(
     *,
     freq: str = DEFAULT_FREQ,
     min_reference_days: float = MIN_REFERENCE_DAYS,
+    overrides_path: Path | None = DEFAULT_OVERRIDES_PATH,
 ) -> None:
     ensure_dir(DB_DIR)
-    cases = _load_summary_cases(summary_path, min_reference_days)
+    cases, overrides_audit = _load_summary_cases(summary_path, min_reference_days, overrides_path)
     by_output = {key: [case for case in cases if case.output_key == key] for key in OUTPUT_KEYS}
 
     summary: dict[str, Any] = {
@@ -297,6 +351,7 @@ def build_combined_summary_datasets(
         "freq": freq,
         "min_reference_points": MIN_REFERENCE_POINTS,
         "min_reference_days": float(min_reference_days),
+        "summary_overrides": overrides_audit,
         "total_cases": len(cases),
         "outputs": {},
     }
@@ -340,6 +395,12 @@ def build_combined_summary_datasets(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build 5min datasets from the combined well summary.")
     parser.add_argument("--summary", type=Path, default=DEFAULT_SUMMARY_PATH)
+    parser.add_argument("--overrides", type=Path, default=DEFAULT_OVERRIDES_PATH)
+    parser.add_argument(
+        "--disable-summary-overrides",
+        action="store_true",
+        help="Не применять переопределения разметки из configs/alma_summary_overrides.json.",
+    )
     parser.add_argument("--freq", default=DEFAULT_FREQ)
     parser.add_argument("--min-reference-days", type=float, default=MIN_REFERENCE_DAYS)
     return parser.parse_args()
@@ -351,6 +412,7 @@ def main() -> None:
         args.summary,
         freq=str(args.freq),
         min_reference_days=float(args.min_reference_days),
+        overrides_path=None if args.disable_summary_overrides else args.overrides,
     )
 
 

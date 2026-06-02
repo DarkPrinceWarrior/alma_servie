@@ -1300,7 +1300,7 @@ def render_report(md_text: str, rows: dict[int, WellRow]) -> str:
         + render_prefix_section(md_sections, drift_figure_json)
         + render_md_passthrough("ограничения", "Известные ограничения набора и нерешённые вопросы", limitations_content)
         + render_md_passthrough("тезисы", "Экспертные тезисы из переписки", theses_section.body if theses_section else "")
-        + render_md_passthrough("меры", "Реализованные меры (01.06.2026)", measures_content)
+        + render_md_passthrough("меры", "Реализованные меры", measures_content)
         + render_md_passthrough("выводы", "Выводы для текущего глобального детектора", conclusions_section.body if conclusions_section else "")
         + tasks_and_questions
         + reference_block

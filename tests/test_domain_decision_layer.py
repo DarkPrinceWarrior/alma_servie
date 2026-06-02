@@ -252,3 +252,33 @@ def test_partial_stop_below_threshold_does_not_reject() -> None:
         start_row=_row("2026-01-01 02:00:00"),
     )
     assert result["domain_verdict"] != DOMAIN_REJECTED_WELL_STOPPED
+
+
+def test_operator_stop_after_real_anomaly_does_not_reject() -> None:
+    # Уточнённый случай 5271г (разметка эксперта 15.08 00:37): скачок давления +64%
+    # при работающем насосе (191 Гц), оператор останавливает скважину через час после
+    # начала аварии. Алерт в момент скачка не должен отклоняться правилом остановки.
+    pressure = np.r_[np.full(24, 28.0), np.full(24, 46.0)]
+    frequency = np.r_[np.full(36, 191.0), np.zeros(12)]
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:00:00"),
+    )
+    assert result["domain_verdict"] != DOMAIN_REJECTED_WELL_STOPPED
+    assert result["domain_verdict"] == DOMAIN_NEGERMET_CANDIDATE
+    assert result["domain_stopped_at_detection"] is False
+
+
+def test_detection_inside_stop_recovery_still_rejected() -> None:
+    # Контроль: детекция внутри остановки (рост — гидростатика) по-прежнему отклоняется,
+    # даже если до остановки скважина работала (короткая остановка, как у 5271г 14.08).
+    pressure = np.r_[np.full(30, 27.0), np.linspace(27.0, 33.0, 18)]
+    frequency = np.r_[np.full(30, 195.0), np.zeros(18)]
+    result = assess_domain_start(
+        anomaly_key="negermet",
+        prepared=_prepared(pressure, frequency),
+        start_row=_row("2026-01-01 02:40:00"),
+    )
+    assert result["domain_verdict"] == DOMAIN_REJECTED_WELL_STOPPED
+    assert result["domain_action"] == "reject"
