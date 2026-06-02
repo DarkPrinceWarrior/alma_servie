@@ -87,6 +87,7 @@ class GlobalNormalitySettings:
     channel_dropout_rate: float
     channel_dropout_seed: int
     norm_pool_hygiene_rules: tuple[dict[str, Any], ...]
+    stop_influence_cleaning_sources: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -109,6 +110,10 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
     hygiene_rules: tuple[dict[str, Any], ...] = ()
     if bool(norm_pool_hygiene.get("enabled", False)):
         hygiene_rules = tuple(dict(rule) for rule in norm_pool_hygiene.get("rules", []))
+    stop_influence = dict(payload.get("stop_influence_cleaning", {}))
+    stop_influence_sources: tuple[str, ...] = ()
+    if bool(stop_influence.get("enabled", False)):
+        stop_influence_sources = tuple(str(source) for source in stop_influence.get("sources", []))
     overrides = {
         str(key): int(value)
         for key, value in dict(payload.get("prepare_patch_size_overrides") or {}).items()
@@ -137,6 +142,7 @@ def load_global_normality_settings(path: str | Path = DEFAULT_GLOBAL_CONFIG_PATH
         channel_dropout_rate=float(channel_dropout.get("rate", 0.0)),
         channel_dropout_seed=int(channel_dropout.get("seed", 20260518)),
         norm_pool_hygiene_rules=hygiene_rules,
+        stop_influence_cleaning_sources=stop_influence_sources,
     )
 
 
@@ -192,6 +198,11 @@ def prepare_global_normality_runtime(
     global_pool, hygiene_audit = _apply_norm_pool_hygiene(
         global_pool,
         settings.norm_pool_hygiene_rules,
+        verbose=verbose,
+    )
+    global_pool, stop_influence_audit = _apply_stop_influence_cleaning(
+        global_pool,
+        settings.stop_influence_cleaning_sources,
         verbose=verbose,
     )
     global_pool, schema_audit_global_pool = _apply_feature_schema_to_pool(
@@ -260,6 +271,7 @@ def prepare_global_normality_runtime(
         "channel_dropout_seed": settings.channel_dropout_seed,
         "balance_audit": balance_audit,
         "norm_pool_hygiene_audit": hygiene_audit,
+        "stop_influence_cleaning_audit": stop_influence_audit,
         "schema_audit_by_class": schema_audit_by_class,
         "schema_audit_global_pool": schema_audit_global_pool,
         "global_pool_points": int(len(pool)),
@@ -863,6 +875,69 @@ def _apply_norm_pool_hygiene(
     return cleaned_pool, {
         "enabled": True,
         "rules_total": len(rules),
+        "applied": applied,
+    }
+
+
+def _apply_stop_influence_cleaning(
+    global_pool: dict[str, Any],
+    sources: tuple[str, ...],
+    *,
+    verbose: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # Вырезание зон влияния остановок (от падения частоты до восстановления частоты
+    # и возврата давления к базе) из reference-частей пула нормы. Метод выбран вместо
+    # интерполяции: в банк попадают только настоящие данные нормальной работы.
+    if not sources:
+        return global_pool, {"enabled": False}
+
+    from alma_service.stop_influence import detect_stop_influence_zones, find_channel, stop_influence_mask
+
+    cleaned_pool: dict[str, Any] = {}
+    applied: list[dict[str, Any]] = []
+    for pool_key, prepared in sorted(global_pool.items()):
+        if _pool_source_from_key(pool_key) not in sources:
+            cleaned_pool[pool_key] = prepared
+            continue
+        raw_columns = list(getattr(prepared, "raw_columns", []))
+        frequency_col = find_channel(raw_columns, "выходная частота")
+        pressure_col = find_channel(raw_columns, "давление на приеме")
+        if frequency_col is None or pressure_col is None:
+            cleaned_pool[pool_key] = prepared
+            continue
+        raw_matrix = np.asarray(prepared.raw_matrix, dtype=float)
+        zones = detect_stop_influence_zones(
+            prepared.timestamps,
+            raw_matrix[:, raw_columns.index(frequency_col)],
+            raw_matrix[:, raw_columns.index(pressure_col)],
+        )
+        if not zones:
+            cleaned_pool[pool_key] = prepared
+            continue
+        inside = stop_influence_mask(prepared.timestamps, zones)
+        reference_mask = np.asarray(prepared.reference_mask, dtype=bool) & ~inside
+        removed = int(np.asarray(prepared.reference_mask, dtype=bool).sum() - reference_mask.sum())
+        detail = dict(prepared.detail)
+        detail["stop_influence_cleaning"] = {
+            "zones": len(zones),
+            "reference_rows_removed": removed,
+        }
+        applied.append(
+            {
+                "pool_key": pool_key,
+                "zones": len(zones),
+                "reference_rows_removed": removed,
+            }
+        )
+        if verbose:
+            print(f"  [stop_influence] {pool_key}: зон влияния остановок {len(zones)}, убрано строк нормы {removed}")
+        if not reference_mask.any():
+            continue
+        cleaned_pool[pool_key] = replace(prepared, reference_mask=reference_mask, detail=detail)
+
+    return cleaned_pool, {
+        "enabled": True,
+        "sources": list(sources),
         "applied": applied,
     }
 

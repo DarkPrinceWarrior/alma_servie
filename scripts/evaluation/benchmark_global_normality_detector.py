@@ -59,6 +59,7 @@ from alma_service.generic_detectors import (
 )
 from alma_service.global_normality import (
     _apply_norm_pool_hygiene,
+    _apply_stop_influence_cleaning,
     load_global_normality_settings,
 )
 from alma_service.paano_defaults import PATCH_SIZES
@@ -336,10 +337,11 @@ def _prepare_by_class(
     reference_policy: str,
     *,
     common_source_freq: str | None,
+    anomaly_keys: tuple[str, ...] = ANOMALY_KEYS,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, pd.DataFrame]]:
     prepared_by_class: dict[str, dict[str, Any]] = {}
     intervals_by_class: dict[str, pd.DataFrame] = {}
-    for anomaly_key in ANOMALY_KEYS:
+    for anomaly_key in anomaly_keys:
         spec = get_detection_spec(anomaly_key)
         source_path = _anomaly_source_path(anomaly_key, common_source_freq)
         if source_path is not None and not source_path.exists():
@@ -705,6 +707,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Не применять правила гигиены банка нормы из конфига global normality.",
     )
+    parser.add_argument(
+        "--anomalies",
+        nargs="+",
+        choices=list(ANOMALY_KEYS),
+        default=list(ANOMALY_KEYS),
+        help="Какие классы аномалий включать в пул и оценку (по умолчанию все три).",
+    )
+    parser.add_argument(
+        "--disable-stop-influence-cleaning",
+        action="store_true",
+        help="Не вырезать зоны влияния остановок из пула нормы.",
+    )
     parser.add_argument("--balance-rows-per-source", type=int, default=DEFAULT_BALANCE_ROWS_PER_SOURCE)
     parser.add_argument("--balance-rows-per-well", type=int, default=DEFAULT_BALANCE_ROWS_PER_WELL)
     parser.add_argument("--balance-source-policy", choices=["equal_min", "cap"], default=DEFAULT_BALANCE_SOURCE_POLICY)
@@ -726,11 +740,13 @@ def main() -> None:
     feature_schema = load_feature_schema(args.feature_schema)
     schema_strict = not bool(args.allow_missing_schema_channels)
     common_source_freq = str(args.common_source_freq).strip() if args.common_source_freq else None
+    selected_anomalies = tuple(args.anomalies)
     prepare_patch_size_overrides = _prepare_patch_overrides_for_common_freq(common_source_freq)
     with _temporary_prepare_patch_sizes(prepare_patch_size_overrides):
         prepared_by_class, intervals_by_class = _prepare_by_class(
             str(args.reference_policy),
             common_source_freq=common_source_freq,
+            anomaly_keys=selected_anomalies,
         )
         prepared_by_class, schema_audit_by_class = _apply_feature_schema_by_class(
             prepared_by_class,
@@ -751,6 +767,14 @@ def main() -> None:
         global_pool_runs, hygiene_audit = _apply_norm_pool_hygiene(
             global_pool_runs,
             hygiene_rules,
+            verbose=True,
+        )
+    stop_influence_audit: dict[str, Any] = {"enabled": False}
+    if not bool(args.disable_stop_influence_cleaning):
+        cleaning_sources = load_global_normality_settings().stop_influence_cleaning_sources
+        global_pool_runs, stop_influence_audit = _apply_stop_influence_cleaning(
+            global_pool_runs,
+            cleaning_sources,
             verbose=True,
         )
     global_pool_runs, schema_audit_global_pool = _apply_feature_schema_to_pool(
@@ -825,6 +849,8 @@ def main() -> None:
         "feature_reduction_enabled": bool(args.enable_feature_reduction),
         "balance_audit": balance_audit,
         "norm_pool_hygiene_audit": hygiene_audit,
+        "stop_influence_cleaning_audit": stop_influence_audit,
+        "selected_anomalies": list(selected_anomalies),
         "schema_audit_by_class": schema_audit_by_class,
         "schema_audit_global_pool": schema_audit_global_pool,
         "global_pool_points_after_reduction": int(len(global_pool)),
@@ -833,7 +859,7 @@ def main() -> None:
         "global_state_detail": global_state.detail,
         "saved_class_specific_baseline": {
             anomaly_key: _load_saved_baseline(anomaly_key)
-            for anomaly_key in ANOMALY_KEYS
+            for anomaly_key in selected_anomalies
         },
         "classes": {},
     }
@@ -846,7 +872,7 @@ def main() -> None:
             **baseline.get("all", {}),
         })
 
-    for anomaly_key in ANOMALY_KEYS:
+    for anomaly_key in selected_anomalies:
         print(f"\n=== Global normality detector: {anomaly_key} ===")
         class_payload = _evaluate_global_runs(
             anomaly_key=anomaly_key,
