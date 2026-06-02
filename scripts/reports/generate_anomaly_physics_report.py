@@ -81,8 +81,10 @@ COLOR_ANOMALY_LINE = "#b91c1c"
 COLOR_STOP_ZONE = "rgba(100, 116, 139, 0.22)"
 COLOR_STOP_TEXT = "#475569"
 COLOR_FREQ_JUMP_LINE = "#7c3aed"
-COLOR_PEAK_ZONE = "rgba(249, 115, 22, 0.25)"
-COLOR_PEAK_TEXT = "#c2410c"
+COLOR_PEAK_STOP_ZONE = "rgba(100, 116, 139, 0.28)"
+COLOR_PEAK_STOP_TEXT = "#475569"
+COLOR_PEAK_OTHER_ZONE = "rgba(249, 115, 22, 0.28)"
+COLOR_PEAK_OTHER_TEXT = "#c2410c"
 
 STOP_FREQUENCY_THRESHOLD_HZ = 1.0
 STOP_MIN_DURATION_MINUTES = 30.0
@@ -91,6 +93,8 @@ FREQ_JUMP_BUFFER_AFTER_STOP_HOURS = 12.0
 MAX_FREQ_JUMP_MARKERS = 12
 PEAK_DEVIATION_THRESHOLD_PCT = 15.0
 PEAK_MAX_DURATION_HOURS = 72.0
+PEAK_STOP_CHECK_BUFFER_HOURS = 1.0
+PEAK_STOP_MIN_SAMPLES = 2
 
 CANONICAL_EXAMPLES = {
     "negermet": (44, "Скачок давления +120% за часы при неизменной частоте (скв. 524)"),
@@ -438,20 +442,24 @@ def detect_stop_periods(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Tim
     return periods
 
 
-def detect_pressure_peaks(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp, float]]:
+def detect_pressure_peaks(series: pd.DataFrame) -> list[dict[str, Any]]:
     pressure_col = find_column(series, "давление на приеме")
+    freq_col = find_column(series, "выходная частота")
     if pressure_col is None or "timestamp" not in series.columns:
         return []
-    p = series.set_index("timestamp")[pressure_col].dropna().sort_index()
+    indexed = series.set_index("timestamp").sort_index()
+    p = indexed[pressure_col].dropna()
     if len(p) < 50:
         return []
+    frequency = indexed[freq_col].dropna() if freq_col else pd.Series(dtype=float)
     baseline = p.rolling("24h", center=True, min_periods=12).median()
     deviation_pct = (p - baseline) / baseline * 100
     in_peak = deviation_pct > PEAK_DEVIATION_THRESHOLD_PCT
     if not in_peak.any():
         return []
     groups = (in_peak != in_peak.shift()).cumsum()
-    peaks: list[tuple[pd.Timestamp, pd.Timestamp, float]] = []
+    buffer = pd.Timedelta(hours=PEAK_STOP_CHECK_BUFFER_HOURS)
+    peaks: list[dict[str, Any]] = []
     for _, group in p[in_peak].groupby(groups[in_peak]):
         start, end = group.index[0], group.index[-1]
         duration_hours = (end - start).total_seconds() / 3600.0
@@ -459,7 +467,19 @@ def detect_pressure_peaks(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.T
             continue
         base_value = float(baseline.loc[start:end].median())
         excess_pct = (float(group.max()) / base_value - 1.0) * 100.0 if base_value > 0 else 0.0
-        peaks.append((start, end, excess_pct))
+        # классификация по частоте: была ли остановка насоса в окне пика (с буфером)
+        freq_window = frequency.loc[start - buffer: end + buffer] if len(frequency) else pd.Series(dtype=float)
+        stopped_samples = int((freq_window < STOP_FREQUENCY_THRESHOLD_HZ).sum()) if len(freq_window) else 0
+        from_stop = stopped_samples >= PEAK_STOP_MIN_SAMPLES
+        peaks.append(
+            {
+                "start": start,
+                "end": end,
+                "excess_pct": excess_pct,
+                "from_stop": from_stop,
+                "stopped_samples": stopped_samples,
+            }
+        )
     return peaks
 
 
@@ -508,7 +528,9 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
         return None
     stop_periods = detect_stop_periods(row.series)
     freq_jumps = detect_frequency_jumps(row.series, stop_periods)
-    pressure_peaks = detect_pressure_peaks(row.series)
+    # Правило пиков (указание эксперта 02-03.06.2026) применяется только к классу приток:
+    # на негермете и солях резкое изменение давления — сама аномалия, а не артефакт
+    pressure_peaks = detect_pressure_peaks(row.series) if row.class_key == "pritok" else []
     series = adaptive_resample(row.series, row.anomaly_start)
     if "timestamp" not in series.columns or series.empty:
         return None
@@ -646,25 +668,34 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
                 }
             )
 
-    # Оранжевые зоны резких пиков давления: по указанию эксперта исключаются из статистики
-    for peak_start, peak_end, peak_excess in pressure_peaks:
+    # Зоны резких пиков давления (только приток): по указанию эксперта исключаются из статистики.
+    # Серые — пик от остановки насоса (частота падала ниже 1 Гц в окне пика), гидростатика.
+    # Оранжевые — пик другой природы (остановки не было), требует уточнения у эксперта.
+    for peak in pressure_peaks:
         # расширяем зону минимум до 12 часов, чтобы узкий пик был виден на длинном ряду
-        visual_start = peak_start - pd.Timedelta(hours=4)
-        visual_end = max(peak_end + pd.Timedelta(hours=4), peak_start + pd.Timedelta(hours=12))
+        visual_start = peak["start"] - pd.Timedelta(hours=4)
+        visual_end = max(peak["end"] + pd.Timedelta(hours=4), peak["start"] + pd.Timedelta(hours=12))
+        zone_color = COLOR_PEAK_STOP_ZONE if peak["from_stop"] else COLOR_PEAK_OTHER_ZONE
+        text_color = COLOR_PEAK_STOP_TEXT if peak["from_stop"] else COLOR_PEAK_OTHER_TEXT
+        label = (
+            f"Пик +{peak['excess_pct']:.0f}% — остановка насоса"
+            if peak["from_stop"]
+            else f"Пик +{peak['excess_pct']:.0f}% — НЕ остановка, причина неизвестна"
+        )
         shapes.append(
             {
                 "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
                 "x0": visual_start.strftime("%Y-%m-%d %H:%M"), "x1": visual_end.strftime("%Y-%m-%d %H:%M"),
-                "y0": 0, "y1": 1, "fillcolor": COLOR_PEAK_ZONE,
-                "line": {"color": COLOR_PEAK_TEXT, "width": 1, "dash": "dot"},
+                "y0": 0, "y1": 1, "fillcolor": zone_color,
+                "line": {"color": text_color, "width": 1, "dash": "dot"},
             }
         )
         if len(pressure_peaks) <= 6:
             annotations.append(
                 {
-                    "x": peak_end.strftime("%Y-%m-%d %H:%M"), "y": 0.5, "xref": "x", "yref": "paper",
-                    "text": f"Пик +{peak_excess:.0f}% — исключён из статистики", "showarrow": False, "textangle": -90,
-                    "font": {"size": 10, "color": COLOR_PEAK_TEXT}, "xanchor": "left", "yanchor": "middle",
+                    "x": peak["end"].strftime("%Y-%m-%d %H:%M"), "y": 0.5, "xref": "x", "yref": "paper",
+                    "text": label, "showarrow": False, "textangle": -90,
+                    "font": {"size": 10, "color": text_color}, "xanchor": "left", "yanchor": "middle",
                 }
             )
 
@@ -1077,7 +1108,8 @@ def render_legend() -> str:
         f"<div class='элемент'><span class='образец' style='border-top:2px dashed {COLOR_ANOMALY_LINE};height:0;margin-top:8px'></span> Начало аномалии по разметке эксперта</div>"
         f"<div class='элемент'><span class='образец' style='background:{COLOR_STOP_ZONE};border:1px dotted {COLOR_STOP_TEXT}'></span> Остановка насоса (частота ниже 1 Гц)</div>"
         f"<div class='элемент'><span class='образец' style='border-top:2px dotted {COLOR_FREQ_JUMP_LINE};height:0;margin-top:8px'></span> Скачок выходной частоты</div>"
-        f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_ZONE};border:1px dotted {COLOR_PEAK_TEXT}'></span> Резкий пик давления (исключён из статистики)</div>"
+        f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_STOP_ZONE};border:1px dotted {COLOR_PEAK_STOP_TEXT}'></span> Пик давления от остановки насоса (только приток, исключён из статистики)</div>"
+        f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_OTHER_ZONE};border:1px dotted {COLOR_PEAK_OTHER_TEXT}'></span> Пик давления НЕ от остановки (только приток, исключён из статистики, причина неизвестна)</div>"
         "</div>"
         "<div class='правило-чтения'>"
         "<p><strong>Главное правило чтения графиков:</strong> рост давления — признак аномалии только тогда, когда насос работает, "
@@ -1264,12 +1296,16 @@ def render_well_card(row: WellRow, figure: dict[str, Any] | None) -> str:
     stops = figure["stops"] if figure else []
     jumps = figure["jumps"] if figure else []
     peaks = figure.get("peaks", []) if figure else []
+    stop_peaks = [peak for peak in peaks if peak["from_stop"]]
+    other_peaks = [peak for peak in peaks if not peak["from_stop"]]
     if stops:
         badges += f" <span class='бейдж' style='background:{COLOR_STOP_TEXT}'>Остановок насоса: {len(stops)}</span>"
     if jumps:
         badges += f" <span class='бейдж' style='background:{COLOR_FREQ_JUMP_LINE}'>Скачков частоты: {len(jumps)}</span>"
-    if peaks:
-        badges += f" <span class='бейдж' style='background:{COLOR_PEAK_TEXT}'>Резких пиков давления: {len(peaks)}</span>"
+    if stop_peaks:
+        badges += f" <span class='бейдж' style='background:{COLOR_PEAK_STOP_TEXT}'>Пиков от остановок: {len(stop_peaks)}</span>"
+    if other_peaks:
+        badges += f" <span class='бейдж' style='background:{COLOR_PEAK_OTHER_TEXT}'>Пиков неясной природы: {len(other_peaks)}</span>"
 
     period_text = ""
     if row.series is not None and not row.series.empty:
@@ -1299,13 +1335,25 @@ def render_well_card(row: WellRow, figure: dict[str, Any] | None) -> str:
                 f"<strong style='color:{COLOR_FREQ_JUMP_LINE}'>Фиолетовые пунктирные линии</strong> — скачки выходной частоты: "
                 "изменение давления сразу после такой линии (и в противоположную сторону) — штатная реакция на смену режима, не аномалия."
             )
-        if peaks:
-            peak_list = ", ".join(f"{s.strftime('%d.%m %H:%M')} (+{e:.0f}%)" for s, _, e in peaks[:6])
-            suffix = "…" if len(peaks) > 6 else ""
+        if stop_peaks:
+            peak_list = ", ".join(
+                f"{peak['start'].strftime('%d.%m %H:%M')} (+{peak['excess_pct']:.0f}%)" for peak in stop_peaks[:6]
+            )
+            suffix = "…" if len(stop_peaks) > 6 else ""
             zone_notes.append(
-                f"<strong style='color:{COLOR_PEAK_TEXT}'>Оранжевые зоны</strong> — резкие пики давления ({peak_list}{suffix}): "
-                "по указанию эксперта (02.06.2026) исключаются из статистики префиксов и расчётов трендов. "
-                "Пометка для проверки экспертом: верно ли определены границы пиков."
+                f"<strong style='color:{COLOR_PEAK_STOP_TEXT}'>Серые зоны пиков</strong> — пики давления от остановки насоса ({peak_list}{suffix}): "
+                "в окне пика выходная частота падала ниже 1 Гц — рост давления это гидростатическое восстановление. "
+                "Исключаются из статистики префиксов и расчётов трендов."
+            )
+        if other_peaks:
+            peak_list = ", ".join(
+                f"{peak['start'].strftime('%d.%m %H:%M')} (+{peak['excess_pct']:.0f}%)" for peak in other_peaks[:6]
+            )
+            suffix = "…" if len(other_peaks) > 6 else ""
+            zone_notes.append(
+                f"<strong style='color:{COLOR_PEAK_OTHER_TEXT}'>Оранжевые зоны пиков</strong> — пики давления НЕ от остановки ({peak_list}{suffix}): "
+                "насос в окне пика работал, причина пика неизвестна (КРС / промывка / замер?). "
+                "Исключаются из статистики; природу нужно уточнить у эксперта."
             )
         if zone_notes:
             chart_html += "<div class='пояснение-зон'>" + "<br>".join(zone_notes) + "</div>"
