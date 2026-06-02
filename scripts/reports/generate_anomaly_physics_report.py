@@ -78,6 +78,15 @@ COLOR_TEMP_OIL = "#9f1239"
 COLOR_PREFIX_ZONE = "rgba(16, 185, 129, 0.10)"
 COLOR_ANOMALY_ZONE = "rgba(239, 68, 68, 0.12)"
 COLOR_ANOMALY_LINE = "#b91c1c"
+COLOR_STOP_ZONE = "rgba(100, 116, 139, 0.22)"
+COLOR_STOP_TEXT = "#475569"
+COLOR_FREQ_JUMP_LINE = "#7c3aed"
+
+STOP_FREQUENCY_THRESHOLD_HZ = 1.0
+STOP_MIN_DURATION_MINUTES = 30.0
+FREQ_JUMP_THRESHOLD_HZ = 0.5
+FREQ_JUMP_BUFFER_AFTER_STOP_HOURS = 12.0
+MAX_FREQ_JUMP_MARKERS = 12
 
 CANONICAL_EXAMPLES = {
     "negermet": (44, "Скачок давления +120% за часы при неизменной частоте (скв. 524)"),
@@ -407,6 +416,53 @@ def adaptive_resample(
     return combined.reset_index()
 
 
+def detect_stop_periods(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+    freq_col = find_column(series, "выходная частота")
+    if freq_col is None or "timestamp" not in series.columns:
+        return []
+    frame = series[["timestamp", freq_col]].dropna().sort_values("timestamp")
+    if frame.empty:
+        return []
+    stopped = frame[freq_col] < STOP_FREQUENCY_THRESHOLD_HZ
+    groups = (stopped != stopped.shift()).cumsum()
+    periods: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for _, group in frame[stopped].groupby(groups[stopped]):
+        start = group["timestamp"].iloc[0]
+        end = group["timestamp"].iloc[-1]
+        if (end - start).total_seconds() / 60.0 >= STOP_MIN_DURATION_MINUTES:
+            periods.append((start, end))
+    return periods
+
+
+def detect_frequency_jumps(
+    series: pd.DataFrame,
+    stop_periods: list[tuple[pd.Timestamp, pd.Timestamp]],
+) -> list[tuple[pd.Timestamp, float]]:
+    freq_col = find_column(series, "выходная частота")
+    if freq_col is None or "timestamp" not in series.columns:
+        return []
+    indexed = series.set_index("timestamp")[freq_col].dropna().sort_index()
+    if indexed.empty:
+        return []
+    medians = indexed.resample("6h").median().dropna()
+    deltas = medians.diff()
+    jumps: list[tuple[pd.Timestamp, float]] = []
+    buffer = pd.Timedelta(hours=FREQ_JUMP_BUFFER_AFTER_STOP_HOURS)
+    for ts, delta in deltas.items():
+        if not np.isfinite(delta) or abs(float(delta)) < FREQ_JUMP_THRESHOLD_HZ:
+            continue
+        inside_stop = any(
+            stop_start - buffer <= ts <= stop_end + buffer for stop_start, stop_end in stop_periods
+        )
+        if inside_stop:
+            continue
+        jumps.append((pd.Timestamp(ts), float(delta)))
+    if len(jumps) > MAX_FREQ_JUMP_MARKERS:
+        jumps = sorted(jumps, key=lambda item: abs(item[1]), reverse=True)[:MAX_FREQ_JUMP_MARKERS]
+        jumps = sorted(jumps, key=lambda item: item[0])
+    return jumps
+
+
 def trace_values(series: pd.DataFrame, column: str | None, digits: int) -> tuple[list[str], list[float | None]] | None:
     if column is None or column not in series.columns:
         return None
@@ -418,9 +474,11 @@ def trace_values(series: pd.DataFrame, column: str | None, digits: int) -> tuple
     return x, y
 
 
-def build_well_figure(row: WellRow) -> str | None:
+def build_well_figure(row: WellRow) -> dict[str, Any] | None:
     if row.series is None or row.series.empty:
         return None
+    stop_periods = detect_stop_periods(row.series)
+    freq_jumps = detect_frequency_jumps(row.series, stop_periods)
     series = adaptive_resample(row.series, row.anomaly_start)
     if "timestamp" not in series.columns or series.empty:
         return None
@@ -539,6 +597,44 @@ def build_well_figure(row: WellRow) -> str | None:
             }
         )
 
+    # Серые зоны остановок насоса: рост давления внутри них — гидростатика, не аномалия
+    for stop_start, stop_end in stop_periods:
+        shapes.append(
+            {
+                "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
+                "x0": stop_start.strftime("%Y-%m-%d %H:%M"), "x1": stop_end.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "fillcolor": COLOR_STOP_ZONE,
+                "line": {"color": COLOR_STOP_TEXT, "width": 1, "dash": "dot"},
+            }
+        )
+        if len(stop_periods) <= 6:
+            annotations.append(
+                {
+                    "x": stop_start.strftime("%Y-%m-%d %H:%M"), "y": 0.985, "xref": "x", "yref": "paper",
+                    "text": "Остановка насоса", "showarrow": False, "textangle": -90,
+                    "font": {"size": 10, "color": COLOR_STOP_TEXT}, "xanchor": "right", "yanchor": "top",
+                }
+            )
+
+    # Фиолетовые линии скачков частоты: реакция давления в этот момент — штатная, не аномалия
+    for jump_ts, jump_delta in freq_jumps:
+        shapes.append(
+            {
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": jump_ts.strftime("%Y-%m-%d %H:%M"), "x1": jump_ts.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1,
+                "line": {"color": COLOR_FREQ_JUMP_LINE, "width": 1.0, "dash": "dot"},
+            }
+        )
+        if len(freq_jumps) <= 8:
+            annotations.append(
+                {
+                    "x": jump_ts.strftime("%Y-%m-%d %H:%M"), "y": 0.02, "xref": "x", "yref": "paper",
+                    "text": f"частота {jump_delta:+.1f} Гц", "showarrow": False, "textangle": -90,
+                    "font": {"size": 9, "color": COLOR_FREQ_JUMP_LINE}, "xanchor": "left", "yanchor": "bottom",
+                }
+            )
+
     axis_style = {
         "showgrid": True, "gridcolor": "#eef2f7", "linecolor": "#cbd5e1",
         "ticks": "outside", "tickcolor": "#cbd5e1", "zeroline": False,
@@ -562,7 +658,7 @@ def build_well_figure(row: WellRow) -> str | None:
     fig.update_yaxes(title_text="А / %", title_font={"size": 11, "color": "#64748b"}, row=3, col=1, secondary_y=False)
     fig.update_yaxes(title_text="°C", title_font={"size": 11, "color": "#64748b"}, row=3, col=1, secondary_y=True)
 
-    return fig.to_json()
+    return {"json": fig.to_json(), "stops": stop_periods, "jumps": freq_jumps}
 
 
 def parse_drift_pct(text: str) -> float | None:
@@ -734,6 +830,12 @@ table.навигатор tbody tr:hover { background: #eff6ff; }
 .нет-данных {
   padding: 36px; text-align: center; color: var(--вторичный); background: #f8fafc; border-radius: 10px; font-size: 14px;
 }
+.пояснение-зон {
+  margin-top: 8px; padding: 10px 14px; background: #f8fafc; border: 1px solid var(--линия);
+  border-radius: 10px; font-size: 13px; color: #334155; line-height: 1.5;
+}
+.правило-чтения ol { padding-left: 22px; }
+.правило-чтения li { margin-bottom: 8px; }
 
 .детали { margin-top: 14px; }
 .детали details { border: 1px solid var(--линия); border-radius: 10px; margin-bottom: 8px; background: #fbfcfe; }
@@ -921,9 +1023,23 @@ def render_legend() -> str:
         f"<div class='элемент'><span class='образец' style='background:{COLOR_PREFIX_ZONE};border:1px solid #10b981'></span> Нормальный префикс (до начала аномалии)</div>"
         f"<div class='элемент'><span class='образец' style='background:{COLOR_ANOMALY_ZONE};border:1px solid #ef4444'></span> Размеченная аномалия</div>"
         f"<div class='элемент'><span class='образец' style='border-top:2px dashed {COLOR_ANOMALY_LINE};height:0;margin-top:8px'></span> Начало аномалии по разметке эксперта</div>"
+        f"<div class='элемент'><span class='образец' style='background:{COLOR_STOP_ZONE};border:1px dotted {COLOR_STOP_TEXT}'></span> Остановка насоса (частота ниже 1 Гц)</div>"
+        f"<div class='элемент'><span class='образец' style='border-top:2px dotted {COLOR_FREQ_JUMP_LINE};height:0;margin-top:8px'></span> Скачок выходной частоты</div>"
         "</div>"
+        "<div class='правило-чтения'>"
+        "<p><strong>Главное правило чтения графиков:</strong> рост давления — признак аномалии только тогда, когда насос работает, "
+        "а частота не менялась. Два штатных случая, которые выглядят как аномалия, но ею не являются:</p>"
+        "<ol>"
+        "<li><strong>Пик давления внутри серой зоны (остановка насоса).</strong> Насос остановили — столб жидкости давит на датчик — "
+        "давление растёт само по себе (гидростатическое восстановление). После запуска насоса давление возвращается. "
+        "Пример: скв. 5021 — два пика +78% и +49% это именно остановки, а не приток.</li>"
+        "<li><strong>Изменение давления сразу после фиолетовой линии (скачок частоты).</strong> Подняли частоту — насос откачивает "
+        "быстрее — давление падает; снизили частоту — давление растёт. Это реакция на смену режима. "
+        "Сила реакции у скважин разная: у эталона 1996л ~0.3% на 1 Гц, у 5021 — ~2% на 1 Гц.</li>"
+        "</ol>"
         "<p style='margin-bottom:0'>Под каждым графиком — проверка физики из методологического документа: фактические изменения "
         "давления, частоты, токов и температур между нормальным окном и аномалией, и вывод о согласии с классом.</p>"
+        "</div>"
         "</div>"
         "</section>"
     )
@@ -1086,11 +1202,18 @@ def render_expert_comment_details(row: WellRow) -> str:
     )
 
 
-def render_well_card(row: WellRow, figure_json: str | None) -> str:
+def render_well_card(row: WellRow, figure: dict[str, Any] | None) -> str:
     badges = class_badge(row.class_key, row.class_label) + " " + split_badge(row.split)
     verdict = row.prefix.get("Вердикт", "") if row.prefix else ""
     if verdict:
         badges += " " + verdict_badge(verdict)
+
+    stops = figure["stops"] if figure else []
+    jumps = figure["jumps"] if figure else []
+    if stops:
+        badges += f" <span class='бейдж' style='background:{COLOR_STOP_TEXT}'>Остановок насоса: {len(stops)}</span>"
+    if jumps:
+        badges += f" <span class='бейдж' style='background:{COLOR_FREQ_JUMP_LINE}'>Скачков частоты: {len(jumps)}</span>"
 
     period_text = ""
     if row.series is not None and not row.series.empty:
@@ -1100,13 +1223,28 @@ def render_well_card(row: WellRow, figure_json: str | None) -> str:
         if row.anomaly_start is not None:
             period_text += f" · Начало аномалии: {row.anomaly_start.strftime('%d.%m.%Y %H:%M')}"
 
-    if figure_json is not None:
+    if figure is not None:
         fig_id = f"данные-графика-{row.summary_row}"
         chart_html = (
             f"<div class='график' id='график-{row.summary_row}' data-fig-id='{fig_id}'>"
             "<div class='заглушка'>График появится при прокрутке…</div></div>"
-            f"<script type='application/json' id='{fig_id}'>{figure_json}</script>"
+            f"<script type='application/json' id='{fig_id}'>{figure['json']}</script>"
         )
+        zone_notes = []
+        if stops:
+            stop_list = ", ".join(s.strftime("%d.%m %H:%M") for s, _ in stops[:6])
+            suffix = "…" if len(stops) > 6 else ""
+            zone_notes.append(
+                f"<strong style='color:{COLOR_STOP_TEXT}'>Серые зоны</strong> — остановки насоса ({stop_list}{suffix}): "
+                "рост давления внутри них — гидростатическое восстановление, не аномалия."
+            )
+        if jumps:
+            zone_notes.append(
+                f"<strong style='color:{COLOR_FREQ_JUMP_LINE}'>Фиолетовые пунктирные линии</strong> — скачки выходной частоты: "
+                "изменение давления сразу после такой линии (и в противоположную сторону) — штатная реакция на смену режима, не аномалия."
+            )
+        if zone_notes:
+            chart_html += "<div class='пояснение-зон'>" + "<br>".join(zone_notes) + "</div>"
     else:
         chart_html = (
             "<div class='нет-данных'>Ряд этой скважины отсутствует в текущем 5-минутном наборе. "
@@ -1125,7 +1263,7 @@ def render_well_card(row: WellRow, figure_json: str | None) -> str:
     )
 
 
-def render_well_groups(rows: dict[int, WellRow], figures: dict[int, str | None]) -> str:
+def render_well_groups(rows: dict[int, WellRow], figures: dict[int, dict[str, Any] | None]) -> str:
     groups = [
         ("карточки-негерметичность", "Негерметичность НКТ", ("negermet",)),
         ("карточки-приток", "Приток", ("pritok",)),
@@ -1237,7 +1375,7 @@ def render_sidebar() -> str:
 def render_report(md_text: str, rows: dict[int, WellRow]) -> str:
     md_sections = split_md_sections(md_text)
 
-    figures: dict[int, str | None] = {}
+    figures: dict[int, dict[str, Any] | None] = {}
     for summary_row, row in rows.items():
         figures[summary_row] = build_well_figure(row)
     drift_figure_json = build_prefix_drift_figure(rows)
