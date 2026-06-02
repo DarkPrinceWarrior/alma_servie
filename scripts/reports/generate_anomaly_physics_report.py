@@ -81,12 +81,16 @@ COLOR_ANOMALY_LINE = "#b91c1c"
 COLOR_STOP_ZONE = "rgba(100, 116, 139, 0.22)"
 COLOR_STOP_TEXT = "#475569"
 COLOR_FREQ_JUMP_LINE = "#7c3aed"
+COLOR_PEAK_ZONE = "rgba(249, 115, 22, 0.25)"
+COLOR_PEAK_TEXT = "#c2410c"
 
 STOP_FREQUENCY_THRESHOLD_HZ = 1.0
 STOP_MIN_DURATION_MINUTES = 30.0
 FREQ_JUMP_THRESHOLD_HZ = 0.5
 FREQ_JUMP_BUFFER_AFTER_STOP_HOURS = 12.0
 MAX_FREQ_JUMP_MARKERS = 12
+PEAK_DEVIATION_THRESHOLD_PCT = 15.0
+PEAK_MAX_DURATION_HOURS = 72.0
 
 CANONICAL_EXAMPLES = {
     "negermet": (44, "Скачок давления +120% за часы при неизменной частоте (скв. 524)"),
@@ -434,6 +438,31 @@ def detect_stop_periods(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Tim
     return periods
 
 
+def detect_pressure_peaks(series: pd.DataFrame) -> list[tuple[pd.Timestamp, pd.Timestamp, float]]:
+    pressure_col = find_column(series, "давление на приеме")
+    if pressure_col is None or "timestamp" not in series.columns:
+        return []
+    p = series.set_index("timestamp")[pressure_col].dropna().sort_index()
+    if len(p) < 50:
+        return []
+    baseline = p.rolling("24h", center=True, min_periods=12).median()
+    deviation_pct = (p - baseline) / baseline * 100
+    in_peak = deviation_pct > PEAK_DEVIATION_THRESHOLD_PCT
+    if not in_peak.any():
+        return []
+    groups = (in_peak != in_peak.shift()).cumsum()
+    peaks: list[tuple[pd.Timestamp, pd.Timestamp, float]] = []
+    for _, group in p[in_peak].groupby(groups[in_peak]):
+        start, end = group.index[0], group.index[-1]
+        duration_hours = (end - start).total_seconds() / 3600.0
+        if duration_hours > PEAK_MAX_DURATION_HOURS:
+            continue
+        base_value = float(baseline.loc[start:end].median())
+        excess_pct = (float(group.max()) / base_value - 1.0) * 100.0 if base_value > 0 else 0.0
+        peaks.append((start, end, excess_pct))
+    return peaks
+
+
 def detect_frequency_jumps(
     series: pd.DataFrame,
     stop_periods: list[tuple[pd.Timestamp, pd.Timestamp]],
@@ -479,6 +508,7 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
         return None
     stop_periods = detect_stop_periods(row.series)
     freq_jumps = detect_frequency_jumps(row.series, stop_periods)
+    pressure_peaks = detect_pressure_peaks(row.series)
     series = adaptive_resample(row.series, row.anomaly_start)
     if "timestamp" not in series.columns or series.empty:
         return None
@@ -616,6 +646,28 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
                 }
             )
 
+    # Оранжевые зоны резких пиков давления: по указанию эксперта исключаются из статистики
+    for peak_start, peak_end, peak_excess in pressure_peaks:
+        # расширяем зону минимум до 12 часов, чтобы узкий пик был виден на длинном ряду
+        visual_start = peak_start - pd.Timedelta(hours=4)
+        visual_end = max(peak_end + pd.Timedelta(hours=4), peak_start + pd.Timedelta(hours=12))
+        shapes.append(
+            {
+                "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
+                "x0": visual_start.strftime("%Y-%m-%d %H:%M"), "x1": visual_end.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "fillcolor": COLOR_PEAK_ZONE,
+                "line": {"color": COLOR_PEAK_TEXT, "width": 1, "dash": "dot"},
+            }
+        )
+        if len(pressure_peaks) <= 6:
+            annotations.append(
+                {
+                    "x": peak_end.strftime("%Y-%m-%d %H:%M"), "y": 0.5, "xref": "x", "yref": "paper",
+                    "text": f"Пик +{peak_excess:.0f}% — исключён из статистики", "showarrow": False, "textangle": -90,
+                    "font": {"size": 10, "color": COLOR_PEAK_TEXT}, "xanchor": "left", "yanchor": "middle",
+                }
+            )
+
     # Фиолетовые линии скачков частоты: реакция давления в этот момент — штатная, не аномалия
     for jump_ts, jump_delta in freq_jumps:
         shapes.append(
@@ -658,7 +710,7 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
     fig.update_yaxes(title_text="А / %", title_font={"size": 11, "color": "#64748b"}, row=3, col=1, secondary_y=False)
     fig.update_yaxes(title_text="°C", title_font={"size": 11, "color": "#64748b"}, row=3, col=1, secondary_y=True)
 
-    return {"json": fig.to_json(), "stops": stop_periods, "jumps": freq_jumps}
+    return {"json": fig.to_json(), "stops": stop_periods, "jumps": freq_jumps, "peaks": pressure_peaks}
 
 
 def parse_drift_pct(text: str) -> float | None:
@@ -1025,6 +1077,7 @@ def render_legend() -> str:
         f"<div class='элемент'><span class='образец' style='border-top:2px dashed {COLOR_ANOMALY_LINE};height:0;margin-top:8px'></span> Начало аномалии по разметке эксперта</div>"
         f"<div class='элемент'><span class='образец' style='background:{COLOR_STOP_ZONE};border:1px dotted {COLOR_STOP_TEXT}'></span> Остановка насоса (частота ниже 1 Гц)</div>"
         f"<div class='элемент'><span class='образец' style='border-top:2px dotted {COLOR_FREQ_JUMP_LINE};height:0;margin-top:8px'></span> Скачок выходной частоты</div>"
+        f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_ZONE};border:1px dotted {COLOR_PEAK_TEXT}'></span> Резкий пик давления (исключён из статистики)</div>"
         "</div>"
         "<div class='правило-чтения'>"
         "<p><strong>Главное правило чтения графиков:</strong> рост давления — признак аномалии только тогда, когда насос работает, "
@@ -1210,10 +1263,13 @@ def render_well_card(row: WellRow, figure: dict[str, Any] | None) -> str:
 
     stops = figure["stops"] if figure else []
     jumps = figure["jumps"] if figure else []
+    peaks = figure.get("peaks", []) if figure else []
     if stops:
         badges += f" <span class='бейдж' style='background:{COLOR_STOP_TEXT}'>Остановок насоса: {len(stops)}</span>"
     if jumps:
         badges += f" <span class='бейдж' style='background:{COLOR_FREQ_JUMP_LINE}'>Скачков частоты: {len(jumps)}</span>"
+    if peaks:
+        badges += f" <span class='бейдж' style='background:{COLOR_PEAK_TEXT}'>Резких пиков давления: {len(peaks)}</span>"
 
     period_text = ""
     if row.series is not None and not row.series.empty:
@@ -1242,6 +1298,14 @@ def render_well_card(row: WellRow, figure: dict[str, Any] | None) -> str:
             zone_notes.append(
                 f"<strong style='color:{COLOR_FREQ_JUMP_LINE}'>Фиолетовые пунктирные линии</strong> — скачки выходной частоты: "
                 "изменение давления сразу после такой линии (и в противоположную сторону) — штатная реакция на смену режима, не аномалия."
+            )
+        if peaks:
+            peak_list = ", ".join(f"{s.strftime('%d.%m %H:%M')} (+{e:.0f}%)" for s, _, e in peaks[:6])
+            suffix = "…" if len(peaks) > 6 else ""
+            zone_notes.append(
+                f"<strong style='color:{COLOR_PEAK_TEXT}'>Оранжевые зоны</strong> — резкие пики давления ({peak_list}{suffix}): "
+                "по указанию эксперта (02.06.2026) исключаются из статистики префиксов и расчётов трендов. "
+                "Пометка для проверки экспертом: верно ли определены границы пиков."
             )
         if zone_notes:
             chart_html += "<div class='пояснение-зон'>" + "<br>".join(zone_notes) + "</div>"
