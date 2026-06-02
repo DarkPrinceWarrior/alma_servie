@@ -176,9 +176,14 @@ def build_for_anomaly(anomaly_key: str, detector: str, out_path: Path, max_point
     print(f"\n  Saved {anomaly_key}: shape={population.shape} {suffix}, file={total_mb:.1f} MB → {out_path}")
 
 
-def build_global_normality_bank(detector: str, out_path: Path, max_points: int | None) -> None:
+def build_global_normality_bank(
+    detector: str,
+    out_path: Path,
+    max_points: int | None,
+    anomaly_key: str = "negermet",
+) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    runtime = prepare_global_normality_runtime("negermet", device=device, verbose=True)
+    runtime = prepare_global_normality_runtime(anomaly_key, device=device, verbose=True)
     shared_channels = list(runtime.shared_state.shared_channels)
     print(f"  global shared_channels: {len(shared_channels)} channels")
 
@@ -238,7 +243,10 @@ def main() -> None:
     if args.detector == GLOBAL_DETECTOR_KEY:
         out = MODELS_DIR / f"population_memory_bank_{args.detector}_{GLOBAL_ENCODER_KEY}.npz"
         print(f"\n=== {GLOBAL_ENCODER_KEY} (max_points={cap}) ===")
-        build_global_normality_bank(args.detector, out, args.max_points)
+        # при --anomaly <класс> runtime готовится под этот класс: вместе с
+        # ALMA_GLOBAL_POOL_CLASS_ONLY=1 это даёт банк только из выбранного класса + нормы
+        bank_anomaly = args.anomaly if args.anomaly != "all" else "negermet"
+        build_global_normality_bank(args.detector, out, args.max_points, anomaly_key=bank_anomaly)
         return
     for a in anomalies:
         out = MODELS_DIR / f"population_memory_bank_{args.detector}_{a}.npz"
