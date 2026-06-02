@@ -663,7 +663,8 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
             annotations.append(
                 {
                     "x": stop_start.strftime("%Y-%m-%d %H:%M"), "y": 0.985, "xref": "x", "yref": "paper",
-                    "text": "Остановка насоса", "showarrow": False, "textangle": -90,
+                    "text": f"Остановка насоса {stop_start.strftime('%d.%m %H:%M')}–{stop_end.strftime('%H:%M')}",
+                    "showarrow": False, "textangle": -90,
                     "font": {"size": 10, "color": COLOR_STOP_TEXT}, "xanchor": "right", "yanchor": "top",
                 }
             )
@@ -672,20 +673,20 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
     # Серые — пик от остановки насоса (частота падала ниже 1 Гц в окне пика), гидростатика.
     # Оранжевые — пик другой природы (остановки не было), требует уточнения у эксперта.
     for peak in pressure_peaks:
-        # расширяем зону минимум до 12 часов, чтобы узкий пик был виден на длинном ряду
-        visual_start = peak["start"] - pd.Timedelta(hours=4)
-        visual_end = max(peak["end"] + pd.Timedelta(hours=4), peak["start"] + pd.Timedelta(hours=12))
+        # зона рисуется строго по фактическим границам пика; точные времена — в подписи.
+        # Узкая зона на длинном ряду видна по вертикальной подписи и при приближении.
         zone_color = COLOR_PEAK_STOP_ZONE if peak["from_stop"] else COLOR_PEAK_OTHER_ZONE
         text_color = COLOR_PEAK_STOP_TEXT if peak["from_stop"] else COLOR_PEAK_OTHER_TEXT
+        period_label = f"{peak['start'].strftime('%d.%m %H:%M')}–{peak['end'].strftime('%H:%M')}"
         label = (
-            f"Пик +{peak['excess_pct']:.0f}% — остановка насоса"
+            f"Пик +{peak['excess_pct']:.0f}% ({period_label}) — остановка насоса"
             if peak["from_stop"]
-            else f"Пик +{peak['excess_pct']:.0f}% — НЕ остановка, причина неизвестна"
+            else f"Пик +{peak['excess_pct']:.0f}% ({period_label}) — НЕ остановка, причина неизвестна"
         )
         shapes.append(
             {
                 "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
-                "x0": visual_start.strftime("%Y-%m-%d %H:%M"), "x1": visual_end.strftime("%Y-%m-%d %H:%M"),
+                "x0": peak["start"].strftime("%Y-%m-%d %H:%M"), "x1": peak["end"].strftime("%Y-%m-%d %H:%M"),
                 "y0": 0, "y1": 1, "fillcolor": zone_color,
                 "line": {"color": text_color, "width": 1, "dash": "dot"},
             }
