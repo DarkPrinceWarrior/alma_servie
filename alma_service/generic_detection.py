@@ -244,6 +244,15 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     default_thr = ANOMALY_PRECURSOR_DEFAULT_THRESHOLD.get(anomaly_key)
     if default_thr is not None:
         cfg["early_warning_logreg_threshold"] = float(default_thr)
+    if anomaly_key == "pritok" and os.getenv("ALMA_PRESSURE_TREND_FUSION", "0").strip().lower() in ("1", "true", "yes"):
+        cfg["pressure_trend_fusion"] = {
+            "enabled": True,
+            "score_threshold": float(os.getenv("ALMA_PTF_SCORE_THRESHOLD", "0.0040")),
+            "slope_threshold_pct_per_day": float(os.getenv("ALMA_PTF_SLOPE", "0.15")),
+            "window_days": float(os.getenv("ALMA_PTF_WINDOW_DAYS", "10.0")),
+            "freq_jump_buffer_days": float(os.getenv("ALMA_PTF_FREQ_BUFFER_DAYS", "2.0")),
+            "dedupe_hours": 24.0,
+        }
     return cfg
 
 
@@ -662,6 +671,7 @@ def _detect_starts_for_run(
         hysteresis_scale=float(cfg["hysteresis_scale"]),
         bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
     )
+    starts = _augment_with_pressure_trend_fusion(starts, run, score, cfg)
     early_starts: list[pd.Timestamp] = []
     early_threshold_logreg = float(cfg.get("early_warning_logreg_threshold", 0.0))
     if precursor_model is not None and early_threshold_logreg > 0.0:
@@ -714,6 +724,39 @@ def _detect_starts_for_run(
             if all(abs(t_ns - c) > dedupe_ns for c in crit_ns):
                 early_starts.append(t)
     return score, thresholds, starts, early_starts
+
+
+def _augment_with_pressure_trend_fusion(
+    starts: list[pd.Timestamp],
+    run: PreparedDetectorRun,
+    score: np.ndarray,
+    cfg: dict[str, Any],
+) -> list[pd.Timestamp]:
+    # Совмещённый трендовый детектор притока (наклон давления + скор нейросети).
+    # По умолчанию выключен; включается только для класса приток через конфиг —
+    # негермет и соль не затрагиваются. Подробности: docs/физика_аномалий…, раздел fusion.
+    fusion_cfg = cfg.get("pressure_trend_fusion")
+    if not fusion_cfg or not bool(fusion_cfg.get("enabled", False)):
+        return starts
+    from alma_service.pressure_trend_onset import (
+        PressureTrendFusionConfig,
+        detect_from_prepared,
+    )
+
+    config = PressureTrendFusionConfig.from_dict(fusion_cfg)
+    trend_starts = detect_from_prepared(run.prepared, score, config)
+    if not trend_starts:
+        return starts
+    dedupe_ns = int(float(fusion_cfg.get("dedupe_hours", 24.0)) * 3600 * 1e9)
+    merged = list(starts)
+    existing_ns = [pd.Timestamp(t).value for t in merged]
+    for t in trend_starts:
+        t_ns = pd.Timestamp(t).value
+        if all(abs(t_ns - e) > dedupe_ns for e in existing_ns):
+            merged.append(pd.Timestamp(t))
+            existing_ns.append(t_ns)
+    merged.sort()
+    return merged
 
 
 def _score_unavailable_reason(run: PreparedDetectorRun) -> str | None:
