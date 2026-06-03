@@ -885,6 +885,11 @@ def _config_cache_key(cfg: dict[str, Any]) -> tuple[tuple[str, Any], ...]:
             return int(value)
         if isinstance(value, (np.bool_, bool)):
             return bool(value)
+        if isinstance(value, dict):
+            # вложенные конфиги (например pressure_trend_fusion) — рекурсивно в хешируемый ключ
+            return tuple(sorted((str(k), _normalize_value(v)) for k, v in value.items()))
+        if isinstance(value, (list, tuple)):
+            return tuple(_normalize_value(v) for v in value)
         return value
 
     return tuple(sorted((str(key), _normalize_value(value)) for key, value in cfg.items()))
