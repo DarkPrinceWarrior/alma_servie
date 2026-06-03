@@ -1,22 +1,16 @@
-"""Сводный HTML по batch test_wells — простой формат.
-
-Для каждой скв. × тип аномалии — один график: «Давление на приеме насоса»
-с вертикальными линиями на найденных стартах детектора. Никаких сводных
-таблиц и сложных subplots. Plotly bundled (offline), zero-English.
-"""
-
 from __future__ import annotations
 
 import argparse
 import json
 import sys
-from dataclasses import dataclass
 from datetime import datetime
 from html import escape
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
@@ -28,31 +22,35 @@ ANOMALY_LABELS = {
     "salt": "Солеотложение",
 }
 ANOMALY_ORDER = ("negermet", "pritok", "salt")
-PRESSURE_COLUMN = "Давление на приеме насоса кгс/см²"
-OUTPUT_FREQUENCY_COLUMN = "Выходная частота"
-FREQUENCY_CHANGE_THRESHOLD = 0.5
-FREQUENCY_POINT_WINDOW_HOURS = 3.0
-PRITOK_REFERENCE_TIMES = {
-    "42-713": "2025-10-14 21:29:42",
-    "42-723": "2025-11-07 20:41:42",
-    "45-790": "2026-01-02 02:29:05",
-    "46-806": "2025-12-24 01:09:17",
-    "48-812": "2026-01-25 21:33:05",
-}
 
-COLOR_PRESSURE = "#1e40af"
-COLOR_CRITICAL = "#dc2626"
-COLOR_EARLY = "#f59e0b"
-COLOR_BG = "#fafafa"
+SMOOTH_WINDOW_HOURS = 24.0
+TREND_EDGE_DAYS = 3.0
+FREQUENCY_STABLE_RANGE_HZ = 2.0
+DISPLAY_TARGET_POINTS = 2400
+
+COLOR_PRESSURE = "#1d4ed8"
+COLOR_SMOOTHED = "#0f766e"
+COLOR_FREQUENCY = "#7c3aed"
+COLOR_CURRENT = "#ea580c"
+COLOR_LOAD = "#ca8a04"
+COLOR_TEMP_INTAKE = "#dc2626"
+COLOR_TEMP_OIL = "#9f1239"
+COLOR_CRITICAL = "#b91c1c"
+COLOR_FIRST_ALERT = "#d97706"
+
+_PLOTLY_EMBEDDED = {"done": False}
 
 
-@dataclass(frozen=True)
-class FrequencyWindow:
-    label: str
-    center: pd.Timestamp
-    start: pd.Timestamp
-    end: pd.Timestamp
-    note: str
+def normalize_column(name: str) -> str:
+    return str(name).strip().lower().replace("ё", "е")
+
+
+def find_column(df: pd.DataFrame, *needles: str) -> str | None:
+    for column in df.columns:
+        normalized = normalize_column(column)
+        if all(normalize_column(needle) in normalized for needle in needles):
+            return str(column)
+    return None
 
 
 def load_batch_summary(batch_dir: Path) -> dict:
@@ -68,422 +66,488 @@ def load_source(well_dir: Path, anomaly: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_parquet(path)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
-    return df
+    return df.sort_values("timestamp").reset_index(drop=True)
 
 
 def load_preds(well_dir: Path, anomaly: str) -> pd.DataFrame:
     path = well_dir / anomaly / "predicted_starts.parquet"
     if not path.exists():
         return pd.DataFrame()
-    return pd.read_parquet(path)
+    df = pd.read_parquet(path)
+    if "detected_time" in df.columns:
+        df["detected_time"] = pd.to_datetime(df["detected_time"])
+    return df
 
 
-def extract_critical(preds: pd.DataFrame) -> list[pd.Timestamp]:
-    if preds.empty:
+def load_well_summary(well_dir: Path, anomaly: str) -> dict:
+    path = well_dir / anomaly / "summary.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def critical_detections(preds: pd.DataFrame) -> list[pd.Timestamp]:
+    if preds.empty or "event_class" not in preds.columns:
         return []
-    rows = critical_prediction_rows(preds)
-    return pd.to_datetime(rows["detected_time"]).tolist()
+    event = preds["event_class"].fillna("").astype(str).str.lower()
+    rows = preds.loc[event != "early_warning"]
+    if "actionable_alert" in rows.columns:
+        rows = rows[rows["actionable_alert"].fillna(False).astype(bool)]
+    return sorted(pd.to_datetime(rows["detected_time"]).tolist())
 
 
-def critical_prediction_rows(preds: pd.DataFrame) -> pd.DataFrame:
-    if preds.empty:
+def actionable_alerts(preds: pd.DataFrame) -> pd.DataFrame:
+    if preds.empty or "actionable_alert" not in preds.columns:
         return pd.DataFrame()
-    event = preds.get("event_class", pd.Series([""] * len(preds))).fillna("").astype(str).str.lower()
-    rows = preds.loc[event != "early_warning"].copy()
-    if rows.empty:
-        return rows
-    rows["detected_time"] = pd.to_datetime(rows["detected_time"])
-    return rows.sort_values("detected_time")
+    rows = preds[preds["actionable_alert"].fillna(False).astype(bool)].copy()
+    return rows.sort_values("detected_time") if not rows.empty else rows
 
 
-def normalize_well_id(well_id: str) -> str:
-    return well_id.strip().replace("/", "-")
+def smooth_series(timestamps: pd.Series, values: pd.Series) -> pd.Series:
+    indexed = pd.Series(np.asarray(values, dtype=float), index=pd.to_datetime(timestamps))
+    return indexed.rolling(f"{int(SMOOTH_WINDOW_HOURS)}h", min_periods=12).median()
 
 
-def format_timestamp(ts: pd.Timestamp) -> str:
-    return ts.strftime("%Y-%m-%d %H:%M:%S")
+def downsample(df: pd.DataFrame, target: int = DISPLAY_TARGET_POINTS) -> pd.DataFrame:
+    if len(df) <= target:
+        return df
+    indexed = df.set_index("timestamp").select_dtypes(include=[np.number])
+    duration_min = (indexed.index[-1] - indexed.index[0]).total_seconds() / 60.0
+    step = max(5, int(np.ceil(duration_min / target)))
+    return indexed.resample(f"{step}min").median().reset_index()
 
 
-def format_frequency(value: float | None) -> str:
-    if value is None:
-        return "—"
-    return f"{value:.2f}"
-
-
-def frequency_window_stats(
-    freq: pd.Series,
-    timestamps: pd.Series,
-    window: FrequencyWindow,
-) -> dict[str, str]:
-    mask = (timestamps >= window.start) & (timestamps <= window.end)
-    values = freq[mask].dropna()
-    if len(values) < 2:
-        return {
-            "label": window.label,
-            "time": format_timestamp(window.center),
-            "window": window.note,
-            "points": str(len(values)),
-            "min": "—",
-            "max": "—",
-            "delta": "—",
-            "status": "недостаточно данных",
+def trend_summary(source: pd.DataFrame) -> dict:
+    pressure_col = find_column(source, "давление на приеме")
+    frequency_col = find_column(source, "выходная частота")
+    out: dict[str, object] = {"pressure_col": pressure_col, "frequency_col": frequency_col}
+    if pressure_col is None or source.empty:
+        return out
+    smoothed = smooth_series(source["timestamp"], source[pressure_col]).dropna()
+    if smoothed.empty:
+        return out
+    edge = pd.Timedelta(days=TREND_EDGE_DAYS)
+    head = smoothed[smoothed.index <= smoothed.index[0] + edge]
+    tail = smoothed[smoothed.index >= smoothed.index[-1] - edge]
+    p_start = float(head.median())
+    p_end = float(tail.median())
+    delta_pct = (p_end / p_start - 1.0) * 100.0 if p_start > 0 else 0.0
+    duration_days = (smoothed.index[-1] - smoothed.index[0]).total_seconds() / 86400.0
+    out.update(
+        {
+            "p_start": p_start,
+            "p_end": p_end,
+            "delta_pct": delta_pct,
+            "rate_pct_per_day": delta_pct / duration_days if duration_days > 0 else 0.0,
+            "duration_days": duration_days,
         }
-
-    f_min = float(values.min())
-    f_max = float(values.max())
-    f_delta = f_max - f_min
-    return {
-        "label": window.label,
-        "time": format_timestamp(window.center),
-        "window": window.note,
-        "points": str(len(values)),
-        "min": format_frequency(f_min),
-        "max": format_frequency(f_max),
-        "delta": format_frequency(f_delta),
-        "status": "меняется" if f_delta >= FREQUENCY_CHANGE_THRESHOLD else "неизменна",
-    }
+    )
+    if frequency_col is not None:
+        freq = source[frequency_col].dropna()
+        working = freq[freq >= 1.0]
+        if len(working):
+            out["freq_median"] = float(working.median())
+            out["freq_range"] = float(working.max() - working.min())
+            out["freq_stable"] = bool(out["freq_range"] <= FREQUENCY_STABLE_RANGE_HZ)
+    return out
 
 
-def pritok_frequency_windows(well_id: str, preds: pd.DataFrame) -> list[FrequencyWindow]:
-    windows: list[FrequencyWindow] = []
-    critical_rows = critical_prediction_rows(preds)
-    for index, row in enumerate(critical_rows.itertuples(index=False), start=1):
-        center = pd.Timestamp(row.detected_time)
-        close_raw = getattr(row, "incident_close_time", pd.NaT)
-        close = pd.to_datetime(close_raw) if pd.notna(close_raw) else pd.NaT
-        if pd.notna(close) and close > center:
-            window_start = center
-            window_end = pd.Timestamp(close)
-            window_note = f"{format_timestamp(window_start)} — {format_timestamp(window_end)}"
+def trend_direction_text(delta_pct: float) -> str:
+    if delta_pct >= 3.0:
+        return "трендово растёт"
+    if delta_pct <= -3.0:
+        return "трендово снижается"
+    return "стабильно"
+
+
+def build_explanation(
+    anomaly: str,
+    source: pd.DataFrame,
+    preds: pd.DataFrame,
+    summary: dict,
+) -> str:
+    trend = trend_summary(source)
+    criticals = critical_detections(preds)
+    alerts = actionable_alerts(preds)
+    n_alerts = len(alerts)
+    score_max = summary.get("score_max")
+
+    parts: list[str] = []
+    if trend.get("p_start") is not None:
+        direction = trend_direction_text(float(trend["delta_pct"]))
+        parts.append(
+            f"Сглаженное давление на приёме {direction}: "
+            f"{trend['p_start']:.1f} → {trend['p_end']:.1f} кгс/см² "
+            f"({trend['delta_pct']:+.1f}% за {trend['duration_days']:.0f} суток, "
+            f"{trend['rate_pct_per_day']:+.2f}%/сутки)."
+        )
+    if trend.get("freq_median") is not None:
+        freq_note = "стабильна" if trend.get("freq_stable") else "менялась"
+        parts.append(
+            f"Выходная частота {freq_note}: медиана {trend['freq_median']:.1f} Гц, "
+            f"размах {trend['freq_range']:.1f} Гц."
+        )
+
+    if n_alerts > 0:
+        first_alert = pd.Timestamp(alerts["detected_time"].iloc[0])
+        verdict_head = "<strong>Решение детектора: аномалия (приток) обнаружена.</strong>"
+        reason_bits: list[str] = [
+            f"Действующих алертов: {n_alerts}, первый — {first_alert.strftime('%d.%m.%Y %H:%M')}."
+        ]
+        if criticals:
+            crit_list = ", ".join(ts.strftime("%d.%m.%Y %H:%M") for ts in criticals[:4])
+            reason_bits.append(f"Подтверждённые детекции (красные линии): {crit_list}.")
+        if trend.get("p_start") is not None and abs(float(trend["delta_pct"])) >= 3.0:
+            freq_part = (
+                "при стабильной выходной частоте"
+                if trend.get("freq_stable")
+                else "при этом частота менялась — детектор учёл это"
+            )
+            reason_bits.append(
+                f"Причина: трендовое изменение давления ({trend['delta_pct']:+.1f}%) {freq_part} — "
+                "классический признак притока; поведение скважины не похоже на банк нормальной работы."
+            )
         else:
-            delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
-            window_start = center - delta
-            window_end = center + delta
-            window_note = f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч"
-        windows.append(
-            FrequencyWindow(
-                label=f"Детект {index}",
-                center=center,
-                start=window_start,
-                end=window_end,
-                note=window_note,
+            reason_bits.append(
+                "Причина: многоканальное представление скважины устойчиво отклоняется от банка "
+                "нормальной популяции (детектор видит не только давление, но и токи, загрузку, температуры)."
             )
-        )
+        verdict_body = " ".join(reason_bits)
+        css_class = "вывод-детекция"
+    else:
+        verdict_head = "<strong>Решение детектора: аномалии нет.</strong>"
+        reason_bits = []
+        if trend.get("p_start") is not None:
+            if abs(float(trend["delta_pct"])) < 3.0:
+                reason_bits.append(
+                    f"Причина: сглаженное давление стабильно ({trend['delta_pct']:+.1f}% за весь период) — "
+                    "трендового роста или снижения, характерного для притока, нет."
+                )
+            else:
+                freq_explained = (
+                    " Изменение давления сопровождалось изменением частоты — это реакция на смену режима, не приток."
+                    if not trend.get("freq_stable")
+                    else ""
+                )
+                reason_bits.append(
+                    f"Причина: давление изменилось на {trend['delta_pct']:+.1f}%, но поведение скважины "
+                    f"остаётся в пределах банка нормальной работы.{freq_explained}"
+                )
+        if isinstance(score_max, (int, float)):
+            reason_bits.append(f"Максимальный скор детектора за период: {float(score_max):.4f} — порог не достигнут.")
+        verdict_body = " ".join(reason_bits)
+        css_class = "вывод-норма"
 
-    reference_time = PRITOK_REFERENCE_TIMES.get(normalize_well_id(well_id))
-    if reference_time:
-        center = pd.Timestamp(reference_time)
-        delta = pd.Timedelta(hours=FREQUENCY_POINT_WINDOW_HOURS)
-        windows.append(
-            FrequencyWindow(
-                label="Контрольное время",
-                center=center,
-                start=center - delta,
-                end=center + delta,
-                note=f"±{FREQUENCY_POINT_WINDOW_HOURS:g}ч",
-            )
-        )
-
-    return windows
-
-
-def render_pritok_frequency_table(well_id: str, source: pd.DataFrame, preds: pd.DataFrame) -> str:
-    if OUTPUT_FREQUENCY_COLUMN not in source.columns:
-        return "<p class='frequency-note'>Выходная частота: канал отсутствует.</p>"
-
-    windows = pritok_frequency_windows(well_id, preds)
-    if not windows:
-        return "<p class='frequency-note'>Выходная частота: нет детектов и контрольного времени.</p>"
-
-    freq = pd.to_numeric(source[OUTPUT_FREQUENCY_COLUMN], errors="coerce")
-    timestamps = pd.to_datetime(source["timestamp"])
-    rows = [frequency_window_stats(freq, timestamps, window) for window in windows]
-    body = "".join(
-        "<tr>"
-        f"<td>{escape(row['label'])}</td>"
-        f"<td>{escape(row['time'])}</td>"
-        f"<td>{escape(row['window'])}</td>"
-        f"<td>{escape(row['points'])}</td>"
-        f"<td>{escape(row['min'])}</td>"
-        f"<td>{escape(row['max'])}</td>"
-        f"<td>{escape(row['delta'])}</td>"
-        f"<td>{escape(row['status'])}</td>"
-        "</tr>"
-        for row in rows
-    )
     return (
-        "<table class='frequency-table'>"
-        "<caption>Выходная частота в зоне притока</caption>"
-        "<thead><tr>"
-        "<th>Точка</th><th>Время</th><th>Окно</th><th>Точек</th>"
-        "<th>Мин</th><th>Макс</th><th>Δ</th><th>Вывод</th>"
-        "</tr></thead>"
-        f"<tbody>{body}</tbody>"
-        "</table>"
+        f"<div class='{css_class}'>"
+        f"<p>{verdict_head}</p>"
+        f"<p>{' '.join(parts)}</p>"
+        f"<p>{verdict_body}</p>"
+        "</div>"
     )
 
 
-_PLOTLY_EMBEDDED = {"done": False}
+def build_well_figure(
+    source: pd.DataFrame,
+    preds: pd.DataFrame,
+    anomaly: str,
+) -> go.Figure | None:
+    pressure_col = find_column(source, "давление на приеме")
+    if source.empty or pressure_col is None:
+        return None
+    frequency_col = find_column(source, "выходная частота")
+    current_col = find_column(source, "ток на фазе а")
+    load_col = find_column(source, "коэффициент загрузки")
+    temp_intake_col = find_column(source, "температура на приеме")
+    temp_oil_col = find_column(source, "температура масла")
 
+    smoothed_full = smooth_series(source["timestamp"], source[pressure_col])
+    display = downsample(source)
+    smoothed_display = smooth_series(display["timestamp"], display[find_column(display, "давление на приеме")])
 
-def render_chart(well_id: str, anomaly: str, well_dir: Path, show_frequency_table: bool = True) -> str:
-    source = load_source(well_dir, anomaly)
-    preds = load_preds(well_dir, anomaly)
-    if source.empty or PRESSURE_COLUMN not in source.columns:
-        return f"<p class='no-data'>Скв. {escape(well_id)} — {escape(ANOMALY_LABELS[anomaly])}: нет данных по давлению.</p>"
+    fig = make_subplots(
+        rows=4,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=[0.34, 0.24, 0.16, 0.26],
+        vertical_spacing=0.045,
+        subplot_titles=(
+            "Давление на приёме насоса",
+            "Давление на приёме — сглаженное (тренд, медиана за 24 часа)",
+            "Выходная частота",
+            "Токи, загрузка ПЭД и температуры",
+        ),
+        specs=[[{}], [{}], [{}], [{"secondary_y": True}]],
+    )
 
-    critical = extract_critical(preds)
+    x_display = display["timestamp"].dt.strftime("%Y-%m-%d %H:%M").tolist()
+    pressure_display = display[find_column(display, "давление на приеме")]
 
-    fig = go.Figure()
     fig.add_trace(
         go.Scatter(
-            x=source["timestamp"],
-            y=source[PRESSURE_COLUMN],
-            mode="lines",
-            line={"color": COLOR_PRESSURE, "width": 1.6, "shape": "spline", "smoothing": 0.4},
-            name="Давление на приёме",
-            hovertemplate="<b>%{x|%Y-%m-%d %H:%M}</b><br>P = %{y:.2f} кгс/см²<extra></extra>",
-        )
+            x=x_display, y=[None if pd.isna(v) else round(float(v), 2) for v in pressure_display],
+            mode="lines", name="Давление на приёме",
+            line={"color": COLOR_PRESSURE, "width": 1.4},
+            hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Давление: %{y:.2f} кгс/см²<extra></extra>",
+        ),
+        row=1, col=1,
     )
+    fig.add_trace(
+        go.Scatter(
+            x=x_display,
+            y=[None if pd.isna(v) else round(float(v), 2) for v in smoothed_display.to_numpy()],
+            mode="lines", name="Давление сглаженное",
+            line={"color": COLOR_SMOOTHED, "width": 2.4},
+            hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Сглаженное: %{y:.2f} кгс/см²<extra></extra>",
+        ),
+        row=2, col=1,
+    )
+    if frequency_col:
+        freq_display = display[find_column(display, "выходная частота")]
+        fig.add_trace(
+            go.Scatter(
+                x=x_display, y=[None if pd.isna(v) else round(float(v), 1) for v in freq_display],
+                mode="lines", name="Выходная частота",
+                line={"color": COLOR_FREQUENCY, "width": 1.3},
+                hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Частота: %{y:.1f} Гц<extra></extra>",
+            ),
+            row=3, col=1,
+        )
+    for column_key, name, color, unit, secondary in (
+        ("ток на фазе а", "Ток фазы А", COLOR_CURRENT, "А", False),
+        ("коэффициент загрузки", "Загрузка ПЭД", COLOR_LOAD, "%", False),
+        ("температура на приеме", "Температура на приёме", COLOR_TEMP_INTAKE, "°C", True),
+        ("температура масла", "Температура масла", COLOR_TEMP_OIL, "°C", True),
+    ):
+        column = find_column(display, column_key)
+        if column is None:
+            continue
+        fig.add_trace(
+            go.Scatter(
+                x=x_display, y=[None if pd.isna(v) else round(float(v), 1) for v in display[column]],
+                mode="lines", name=name,
+                line={"color": color, "width": 1.2, "dash": "dot" if secondary else "solid"},
+                hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name}: %{{y:.1f}} {unit}<extra></extra>",
+            ),
+            row=4, col=1, secondary_y=secondary,
+        )
 
+    # Вертикальные линии: подтверждённые детекции (красные) и первый действующий алерт (оранжевая)
     shapes = []
-    for ts in critical:
+    annotations = []
+    criticals = critical_detections(preds)
+    alerts = actionable_alerts(preds)
+    if not alerts.empty:
+        first_alert = pd.Timestamp(alerts["detected_time"].iloc[0])
         shapes.append(
             {
-                "type": "line",
-                "xref": "x",
-                "yref": "paper",
-                "x0": ts,
-                "x1": ts,
-                "y0": 0,
-                "y1": 1,
-                "line": {"color": COLOR_CRITICAL, "width": 2.0},
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": first_alert.strftime("%Y-%m-%d %H:%M"), "x1": first_alert.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "line": {"color": COLOR_FIRST_ALERT, "width": 1.8, "dash": "dash"},
             }
         )
-
-    annotations = []
-    if critical:
-        y_max = float(source[PRESSURE_COLUMN].max())
-        for ts in critical:
+        annotations.append(
+            {
+                "x": first_alert.strftime("%Y-%m-%d %H:%M"), "y": 1.05, "xref": "x", "yref": "paper",
+                "text": "Первый действующий алерт", "showarrow": False,
+                "font": {"size": 11, "color": COLOR_FIRST_ALERT}, "xanchor": "left",
+            }
+        )
+    for idx, ts in enumerate(criticals):
+        shapes.append(
+            {
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": ts.strftime("%Y-%m-%d %H:%M"), "x1": ts.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "line": {"color": COLOR_CRITICAL, "width": 2.0},
+            }
+        )
+        if idx < 4:
             annotations.append(
                 {
-                    "x": ts,
-                    "y": y_max,
-                    "yref": "y",
-                    "xref": "x",
-                    "showarrow": False,
-                    "text": "▼",
-                    "font": {"color": COLOR_CRITICAL, "size": 14},
-                    "yshift": 6,
+                    "x": ts.strftime("%Y-%m-%d %H:%M"), "y": 0.99, "xref": "x", "yref": "paper",
+                    "text": "Детекция", "showarrow": False, "textangle": -90,
+                    "font": {"size": 10, "color": COLOR_CRITICAL}, "xanchor": "right", "yanchor": "top",
                 }
             )
 
+    axis_style = {
+        "showgrid": True, "gridcolor": "#eef2f7", "linecolor": "#cbd5e1",
+        "ticks": "outside", "tickcolor": "#cbd5e1", "zeroline": False,
+    }
     fig.update_layout(
-        title={
-            "text": f"<b>Скв. {well_id}</b> — {ANOMALY_LABELS[anomaly]}",
-            "font": {"size": 16, "color": "#0f172a"},
-            "x": 0.02,
-            "xanchor": "left",
-        },
-        height=340,
-        margin={"l": 70, "r": 30, "t": 60, "b": 50},
-        plot_bgcolor="#ffffff",
-        paper_bgcolor="#ffffff",
+        height=760,
+        margin={"l": 64, "r": 56, "t": 40, "b": 40},
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
         hovermode="x unified",
+        font={"family": "'Segoe UI', 'PT Sans', Arial, sans-serif", "size": 12, "color": "#1e293b"},
+        legend={"orientation": "h", "yanchor": "bottom", "y": -0.1, "x": 0, "font": {"size": 11}},
         shapes=shapes,
-        annotations=annotations,
-        font={"family": "Inter, Segoe UI, Arial, sans-serif", "size": 12, "color": "#1e293b"},
-        xaxis={
-            "title": None,
-            "showgrid": True,
-            "gridcolor": "#f1f5f9",
-            "linecolor": "#cbd5e1",
-            "ticks": "outside",
-            "tickcolor": "#cbd5e1",
-        },
-        yaxis={
-            "title": {"text": "P, кгс/см²", "font": {"size": 12, "color": "#64748b"}},
-            "showgrid": True,
-            "gridcolor": "#f1f5f9",
-            "linecolor": "#cbd5e1",
-            "ticks": "outside",
-            "tickcolor": "#cbd5e1",
-            "zeroline": False,
-        },
-        showlegend=False,
+        annotations=list(fig.layout.annotations) + annotations,
     )
+    fig.update_xaxes(**axis_style, tickformat="%d.%m.%y")
+    fig.update_yaxes(**axis_style)
+    fig.update_yaxes(title_text="кгс/см²", title_font={"size": 11, "color": "#64748b"}, row=1, col=1)
+    fig.update_yaxes(title_text="кгс/см²", title_font={"size": 11, "color": "#64748b"}, row=2, col=1)
+    fig.update_yaxes(title_text="Гц", title_font={"size": 11, "color": "#64748b"}, row=3, col=1)
+    fig.update_yaxes(title_text="А / %", title_font={"size": 11, "color": "#64748b"}, row=4, col=1, secondary_y=False)
+    fig.update_yaxes(title_text="°C", title_font={"size": 11, "color": "#64748b"}, row=4, col=1, secondary_y=True)
+    for annotation in fig.layout.annotations[:4]:
+        annotation.font = {"size": 13, "color": "#334155"}
+        annotation.x = 0.0
+        annotation.xanchor = "left"
+    return fig
 
-    include_js = "inline" if not _PLOTLY_EMBEDDED["done"] else False
-    _PLOTLY_EMBEDDED["done"] = True
-    div_id = f"chart_{well_id}_{anomaly}"
-    n_crit = len(critical)
-    caption = f"Аномалий обнаружено: <strong>{n_crit}</strong>"
-    frequency_table = (
-        render_pritok_frequency_table(well_id, source, preds)
-        if anomaly == "pritok" and show_frequency_table
-        else ""
-    )
-    chart_html = fig.to_html(full_html=False, include_plotlyjs=include_js, div_id=div_id)
+
+def render_well_card(well_id: str, well_dir: Path, anomaly: str) -> str:
+    source = load_source(well_dir, anomaly)
+    preds = load_preds(well_dir, anomaly)
+    summary = load_well_summary(well_dir, anomaly)
+
+    alerts = actionable_alerts(preds)
+    n_alerts = len(alerts)
+    if n_alerts > 0:
+        status_badge = f"<span class='бейдж' style='background:#b91c1c'>Аномалия обнаружена · алертов: {n_alerts}</span>"
+    else:
+        status_badge = "<span class='бейдж' style='background:#059669'>Аномалий нет</span>"
+
+    period_text = ""
+    if not source.empty:
+        start = source["timestamp"].iloc[0]
+        end = source["timestamp"].iloc[-1]
+        period_text = f"Период данных: {start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
+
+    figure = build_well_figure(source, preds, anomaly)
+    if figure is None:
+        chart_html = "<div class='нет-данных'>Нет данных по давлению для этой скважины.</div>"
+    else:
+        include_js = "inline" if not _PLOTLY_EMBEDDED["done"] else False
+        _PLOTLY_EMBEDDED["done"] = True
+        chart_html = figure.to_html(
+            full_html=False,
+            include_plotlyjs=include_js,
+            div_id=f"график-{well_id}-{anomaly}",
+            config={"responsive": True, "displayModeBar": False, "doubleClick": "reset"},
+        )
+
+    explanation_html = build_explanation(anomaly, source, preds, summary)
+
     return (
-        "<div class='chart-block'>"
-        f"<div class='chart-caption'>{caption}</div>"
+        f"<section class='карточка-скважины' id='скважина-{escape(well_id)}'>"
+        f"<div class='заголовок'><h2>Скважина {escape(well_id)} — {escape(ANOMALY_LABELS[anomaly])}</h2>{status_badge}</div>"
+        f"<div class='подпись'>{escape(period_text)}</div>"
         f"{chart_html}"
-        f"{frequency_table}</div>"
+        f"{explanation_html}"
+        "</section>"
     )
 
 
-HEAD_CSS = """
+REPORT_CSS = """
 <style>
-body { font-family: 'Inter', 'Segoe UI', Arial, sans-serif; margin: 0; padding: 28px 40px; background: #f8fafc; color: #0f172a; }
-h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.01em; }
-h2 { font-size: 18px; margin: 24px 0 8px; color: #1e293b; letter-spacing: -0.01em; }
-.header { background: white; padding: 20px 26px; border-radius: 14px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04); }
-.subtitle { color: #64748b; font-size: 13px; }
-.well-block { background: white; padding: 18px 24px 22px; border-radius: 14px; margin-bottom: 22px; box-shadow: 0 1px 3px rgba(15,23,42,0.06), 0 1px 2px rgba(15,23,42,0.04); }
-.chart-block { margin: 6px 0 18px; }
-.chart-caption { color: #475569; font-size: 13px; margin: 8px 0 0 72px; }
-.chart-caption strong { color: #b91c1c; }
-.frequency-note { color: #64748b; font-size: 13px; margin: 8px 0 8px 72px; }
-.frequency-table { border-collapse: collapse; margin: 4px 0 18px 72px; min-width: 760px; font-size: 12px; color: #1e293b; }
-.frequency-table caption { caption-side: top; text-align: left; font-weight: 600; color: #334155; padding: 0 0 6px; }
-.frequency-table th, .frequency-table td { border: 1px solid #e2e8f0; padding: 6px 8px; text-align: left; white-space: nowrap; }
-.frequency-table th { background: #f8fafc; color: #475569; font-weight: 600; }
-.frequency-table td:last-child { font-weight: 600; }
-.legend-row { display: flex; gap: 22px; font-size: 12px; color: #475569; margin-top: 12px; flex-wrap: wrap; }
-.legend-line { display: inline-block; width: 22px; height: 2px; vertical-align: middle; margin-right: 8px; border-radius: 2px; }
-.legend-line.critical { background: #dc2626; height: 3px; }
-.legend-line.pressure { background: #1e40af; height: 3px; }
-.disclaimer { background: #fef9c3; border-left: 4px solid #facc15; padding: 12px 16px; border-radius: 8px; color: #713f12; font-size: 13px; margin-top: 14px; line-height: 1.5; }
-.success-note { background: #dcfce7; border-left: 4px solid #16a34a; padding: 12px 16px; border-radius: 8px; color: #14532d; font-size: 14px; font-weight: 600; margin-top: 14px; line-height: 1.5; }
-.no-data { color: #94a3b8; font-style: italic; padding: 14px; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: #f1f5f9; color: #0f172a;
+  font-family: 'Segoe UI', 'PT Sans', Arial, sans-serif; font-size: 15px; line-height: 1.55;
+  padding: 28px 36px 80px 36px; max-width: 1280px; margin: 0 auto;
+}
+.шапка h1 { font-size: 24px; margin: 0 0 6px 0; }
+.шапка .подзаголовок { color: #64748b; font-size: 14px; margin-bottom: 26px; }
+.карточка-скважины {
+  background: #ffffff; border: 1px solid #e2e8f0; border-radius: 14px;
+  padding: 20px 24px; margin-bottom: 28px;
+}
+.карточка-скважины .заголовок { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-bottom: 4px; }
+.карточка-скважины .заголовок h2 { margin: 0; font-size: 19px; }
+.карточка-скважины .подпись { color: #64748b; font-size: 13px; margin-bottom: 14px; }
+.бейдж {
+  display: inline-block; padding: 3px 13px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  color: #ffffff; white-space: nowrap;
+}
+.вывод-детекция, .вывод-норма {
+  margin-top: 14px; padding: 14px 18px; border-radius: 10px; font-size: 14px;
+}
+.вывод-детекция { background: #fef2f2; border-left: 4px solid #b91c1c; }
+.вывод-норма { background: #f0fdf4; border-left: 4px solid #059669; }
+.вывод-детекция p, .вывод-норма p { margin: 5px 0; }
+.нет-данных { padding: 36px; text-align: center; color: #64748b; background: #f8fafc; border-radius: 10px; }
+.легенда { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 22px; font-size: 13.5px; }
+.легенда .элемент { display: flex; align-items: center; gap: 8px; }
+.легенда .линия { width: 30px; height: 0; display: inline-block; }
+footer { color: #64748b; font-size: 12.5px; margin-top: 50px; border-top: 1px solid #e2e8f0; padding-top: 14px; }
 </style>
 """
 
-LEGEND_BLOCK = """
-<div class='legend-row'>
-  <span><span class='legend-line pressure'></span>Давление на приёме насоса</span>
-  <span><span class='legend-line critical'></span>Обнаруженная аномалия</span>
-</div>
-"""
 
-LOCAL_REFERENCE_DISCLAIMER_BLOCK = """
-<div class='disclaimer'>
-<strong>Внимание.</strong> Скважины без экспертной разметки. Эталон нормы построен
-из первых 20 % точек ряда (≈10 суток на 49-дневном ряду). Если начальный участок
-содержал отклонения, рассчитанные старты могут быть смещены или приглушены —
-эксперт должен визуально подтвердить штатность начального участка.
-</div>
-"""
-
-POPULATION_MEMORY_BANK_DISCLAIMER_BLOCK = """
-<div class='disclaimer'>
-<strong>Внимание.</strong> Скважины без экспертной разметки. Отклонение от нормы
-рассчитано через единый глобальный кодировщик нормальной работы (PaAno) и общий
-банк нормальной популяции: нормальные окна обучающих скважин одной физической
-сущности — скважин УЭЦН. Первые 20&nbsp;% ряда каждой скважины используются как
-локальный контекст для нормировки и порога; этот участок не добавляется в банк
-нормы. Если есть экспертно подтверждённый нормальный интервал тестовой скважины,
-его можно включить как ограниченную доверенную добавку поверх банка нормы.
-</div>
-"""
-
-
-def render_disclaimer(batch: dict) -> str:
-    if bool(batch.get("use_population_memory_bank")):
-        return POPULATION_MEMORY_BANK_DISCLAIMER_BLOCK
-    return LOCAL_REFERENCE_DISCLAIMER_BLOCK
-
-
-def render_report(
-    batch_dir: Path,
-    anomalies: tuple[str, ...],
-    show_disclaimer: bool = True,
-    show_frequency_table: bool = True,
-    success_note: str | None = None,
-) -> str:
+def render_report(batch_dir: Path, anomalies: tuple[str, ...]) -> str:
     batch = load_batch_summary(batch_dir)
-    n_wells = len(batch.get("wells", []))
-    detector = batch.get("detector_choice", "—")
-    elapsed = batch.get("elapsed_seconds")
-    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+    wells = batch.get("wells", [])
+    generated_at = datetime.now().strftime("%d.%m.%Y %H:%M")
+    anomaly_titles = ", ".join(ANOMALY_LABELS[a] for a in anomalies)
 
-    subtitle_parts = [
-        f"Скважин: {n_wells}",
-        f"Детектор: <strong>{escape(str(detector))}</strong>",
-        f"Типов аномалий: {len(anomalies)}",
-    ]
-    if elapsed is not None:
-        subtitle_parts.append(f"Время прогона: {elapsed:.1f} с")
-    subtitle_parts.append(f"Сгенерировано: {generated_at}")
-
-    note_html = (
-        f"<div class='success-note'>{escape(success_note)}</div>" if success_note else ""
+    legend_html = (
+        "<div class='легенда'>"
+        f"<div class='элемент'><span class='линия' style='border-top:2px solid {COLOR_CRITICAL}'></span> Детекция (подтверждённый старт аномалии)</div>"
+        f"<div class='элемент'><span class='линия' style='border-top:2px dashed {COLOR_FIRST_ALERT}'></span> Первый действующий алерт</div>"
+        f"<div class='элемент'><span class='линия' style='border-top:3px solid {COLOR_SMOOTHED}'></span> Сглаженное давление (тренд)</div>"
+        "</div>"
     )
+
     header_html = (
-        "<div class='header'>"
-        "<h1>Прогон тестовых скважин — отчёт детекции</h1>"
-        f"<div class='subtitle'>{' · '.join(subtitle_parts)}</div>"
-        + LEGEND_BLOCK
-        + note_html
-        + (render_disclaimer(batch) if show_disclaimer else "")
-        + "</div>"
+        "<div class='шапка'>"
+        f"<h1>Тестовые скважины — результаты детекции ({escape(anomaly_titles)})</h1>"
+        f"<div class='подзаголовок'>Скважин: {len(wells)} · Детектор: paano_global · Сформировано: {generated_at}</div>"
+        f"{legend_html}"
+        "</div>"
     )
 
-    sections: list[str] = []
-    for well_summary in batch.get("wells", []):
+    cards: list[str] = []
+    for well_summary in wells:
         well_id = str(well_summary.get("well_id", ""))
         well_dir = batch_dir / well_id
-        charts = [render_chart(well_id, a, well_dir, show_frequency_table) for a in anomalies]
-        sections.append(
-            f"<section class='well-block'>"
-            f"<h2>Скважина {escape(well_id)}</h2>"
-            + "".join(charts)
-            + "</section>"
-        )
+        for anomaly in anomalies:
+            cards.append(render_well_card(well_id, well_dir, anomaly))
 
-    body = (
+    return (
         "<!DOCTYPE html><html lang='ru'><head><meta charset='utf-8'>"
-        "<title>Тестовые скважины — отчёт детекции</title>"
-        + HEAD_CSS + "</head><body>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Тестовые скважины — результаты детекции</title>"
+        + REPORT_CSS
+        + "</head><body>"
         + header_html
-        + "".join(sections)
+        + "".join(cards)
+        + "<footer>Отчёт сформирован автоматически. Все графики работают без подключения к сети. "
+        "Сглаженное давление — скользящая медиана за 24 часа: по ней видно трендовое увеличение или снижение без шума.</footer>"
         + "</body></html>"
     )
-    return body
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Сводный HTML по batch test_wells (простой формат).")
+    parser = argparse.ArgumentParser(description="Сводный HTML по batch test_wells (карточки в стиле отчёта по физике).")
     parser.add_argument("--batch-dir", default="artifacts/test_wells")
     parser.add_argument(
         "--output",
         default="artifacts/reports/test_wells/test_wells_paano_global_report.html",
     )
     parser.add_argument("--anomalies", default=",".join(ANOMALY_ORDER))
-    parser.add_argument("--no-disclaimer", action="store_true", help="Не выводить блок «Внимание».")
-    parser.add_argument("--no-frequency-table", action="store_true", help="Не выводить таблицу выходной частоты.")
-    parser.add_argument("--note", default=None, help="Текст зелёной заметки в шапке отчёта.")
+    parser.add_argument("--no-disclaimer", action="store_true", help="Совместимость: блок «Внимание» больше не выводится.")
+    parser.add_argument("--no-frequency-table", action="store_true", help="Совместимость: таблица частоты больше не выводится.")
+    parser.add_argument("--note", default=None, help="Совместимость: заметка больше не выводится.")
     args = parser.parse_args()
 
     batch_dir = Path(args.batch_dir).resolve()
     if not batch_dir.is_dir():
         raise FileNotFoundError(batch_dir)
+
     anomalies = tuple(a.strip().lower() for a in args.anomalies.split(",") if a.strip())
     unknown = [a for a in anomalies if a not in ANOMALY_ORDER]
     if unknown:
-        raise ValueError(f"Неизвестные аномалии: {unknown}")
+        raise ValueError(f"Неизвестные типы аномалий: {unknown}; поддерживаются: {ANOMALY_ORDER}")
 
-    html = render_report(
-        batch_dir,
-        anomalies,
-        show_disclaimer=not args.no_disclaimer,
-        show_frequency_table=not args.no_frequency_table,
-        success_note=args.note,
-    )
-    output_path = Path(args.output).resolve()
+    html = render_report(batch_dir, anomalies)
+    output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
-    print(f"HTML saved to {output_path} ({output_path.stat().st_size / 1024:.1f} KB)")
+    size_mb = output_path.stat().st_size / 1024 / 1024
+    print(f"Отчёт: {output_path} ({size_mb:.1f} МБ)")
 
 
 if __name__ == "__main__":
