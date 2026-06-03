@@ -72,6 +72,21 @@ def _expand(mask: np.ndarray, back_steps: int, forward_steps: int) -> np.ndarray
     return expanded
 
 
+DISCONNECTED_STALE_FRACTION = 0.98
+
+
+def _is_disconnected_channel(values: np.ndarray) -> bool:
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return True
+    if np.unique(finite).size <= 1:
+        return True
+    if finite.size < 2:
+        return True
+    stale_fraction = float((np.abs(np.diff(finite)) <= 1e-8).mean())
+    return stale_fraction >= DISCONNECTED_STALE_FRACTION
+
+
 def _stale_mask(values: np.ndarray, *, min_run: int) -> np.ndarray:
     if len(values) == 0:
         return np.zeros(0, dtype=bool)
@@ -185,6 +200,11 @@ def build_telemetry_status(
 
         missing_mask = np.isnan(raw).mean(axis=1) >= 0.25
         for idx in range(raw.shape[1]):
+            # Глобально-константный канал (неподключённый датчик: одно уникальное значение
+            # или застыл почти на всём ряду) не сигнал о залипании, а отсутствие сигнала —
+            # его не учитываем в sensor_stuck, иначе он душит всю скважину как bad_data.
+            if _is_disconnected_channel(raw[:, idx]):
+                continue
             column_stale = _stale_mask(raw[:, idx], min_run=stale_steps)
             if idx in operation_indices:
                 column_stale &= _low_operation_mask(raw[:, idx])
