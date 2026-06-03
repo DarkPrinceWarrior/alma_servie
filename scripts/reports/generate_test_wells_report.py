@@ -16,6 +16,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from alma_service.stop_influence import detect_zones_from_frame, stop_influence_mask
+
 ANOMALY_LABELS = {
     "negermet": "Негерметичность",
     "pritok": "Приток",
@@ -398,10 +400,65 @@ def build_well_figure(
     return fig
 
 
+def clean_stop_influence(source: pd.DataFrame) -> tuple[pd.DataFrame, list]:
+    # По правилу эксперта (03.06.2026): зоны влияния остановок вырезаются из
+    # отображаемых рядов и из расчёта трендов; оригинал показывается как дополнение
+    if source.empty:
+        return source, []
+    zones = detect_zones_from_frame(source)
+    if not zones:
+        return source, []
+    inside = stop_influence_mask(source["timestamp"], zones)
+    cleaned = source.copy()
+    numeric_columns = [c for c in cleaned.columns if c != "timestamp"]
+    cleaned.loc[inside, numeric_columns] = np.nan
+    return cleaned, zones
+
+
+def build_original_pressure_figure(source: pd.DataFrame, zones: list) -> go.Figure | None:
+    pressure_col = find_column(source, "давление на приеме")
+    if source.empty or pressure_col is None:
+        return None
+    display = downsample(source)
+    x_display = display["timestamp"].dt.strftime("%Y-%m-%d %H:%M").tolist()
+    fig = go.Figure(
+        go.Scatter(
+            x=x_display,
+            y=[None if pd.isna(v) else round(float(v), 2) for v in display[find_column(display, "давление на приеме")]],
+            mode="lines", name="Давление (оригинал)",
+            line={"color": COLOR_PRESSURE, "width": 1.3},
+            hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Давление: %{y:.2f} кгс/см²<extra></extra>",
+        )
+    )
+    shapes = []
+    for zone in zones:
+        shapes.append(
+            {
+                "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
+                "x0": zone.start.strftime("%Y-%m-%d %H:%M"), "x1": zone.end.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "fillcolor": "rgba(100, 116, 139, 0.28)",
+                "line": {"color": "#475569", "width": 1, "dash": "dot"},
+            }
+        )
+    fig.update_layout(
+        height=300,
+        margin={"l": 64, "r": 30, "t": 30, "b": 40},
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        hovermode="x unified", showlegend=False,
+        font={"family": "'Segoe UI', 'PT Sans', Arial, sans-serif", "size": 12, "color": "#1e293b"},
+        title={"text": "Оригинальный ряд давления (с пиками остановок, серые зоны вырезаны из основного графика)", "font": {"size": 13, "color": "#334155"}},
+        shapes=shapes,
+    )
+    fig.update_xaxes(showgrid=True, gridcolor="#eef2f7", tickformat="%d.%m.%y")
+    fig.update_yaxes(showgrid=True, gridcolor="#eef2f7", title_text="кгс/см²", title_font={"size": 11, "color": "#64748b"})
+    return fig
+
+
 def render_well_card(well_id: str, well_dir: Path, anomaly: str) -> str:
-    source = load_source(well_dir, anomaly)
+    raw_source = load_source(well_dir, anomaly)
     preds = load_preds(well_dir, anomaly)
     summary = load_well_summary(well_dir, anomaly)
+    source, zones = clean_stop_influence(raw_source)
 
     alerts = actionable_alerts(preds)
     n_alerts = len(alerts)
@@ -431,12 +488,33 @@ def render_well_card(well_id: str, well_dir: Path, anomaly: str) -> str:
 
     explanation_html = build_explanation(anomaly, source, preds, summary)
 
+    original_html = ""
+    if zones:
+        zone_list = ", ".join(
+            f"{z.core_start.strftime('%d.%m %H:%M')}–{z.core_end.strftime('%H:%M')} (+{z.excess_pct:.0f}%)" for z in zones
+        )
+        original_figure = build_original_pressure_figure(raw_source, zones)
+        original_chart = ""
+        if original_figure is not None:
+            original_chart = original_figure.to_html(
+                full_html=False, include_plotlyjs=False,
+                div_id=f"оригинал-{well_id}-{anomaly}",
+                config={"responsive": True, "displayModeBar": False, "doubleClick": "reset"},
+            )
+        original_html = (
+            "<details class='дополнение'>"
+            f"<summary>Дополнение: оригинальный ряд с пиками остановок ({len(zones)} зон вырезано: {escape(zone_list)})</summary>"
+            f"{original_chart}"
+            "</details>"
+        )
+
     return (
         f"<section class='карточка-скважины' id='скважина-{escape(well_id)}'>"
         f"<div class='заголовок'><h2>Скважина {escape(well_id)} — {escape(ANOMALY_LABELS[anomaly])}</h2>{status_badge}</div>"
         f"<div class='подпись'>{escape(period_text)}</div>"
         f"{chart_html}"
         f"{explanation_html}"
+        f"{original_html}"
         "</section>"
     )
 
@@ -469,6 +547,9 @@ body {
 .вывод-норма { background: #f0fdf4; border-left: 4px solid #059669; }
 .вывод-детекция p, .вывод-норма p { margin: 5px 0; }
 .нет-данных { padding: 36px; text-align: center; color: #64748b; background: #f8fafc; border-radius: 10px; }
+.дополнение { margin-top: 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fbfcfe; }
+.дополнение summary { padding: 10px 16px; cursor: pointer; font-weight: 600; font-size: 13.5px; color: #475569; }
+.дополнение > div { padding: 0 16px 14px 16px; }
 .легенда { display: flex; flex-wrap: wrap; gap: 18px; margin-bottom: 22px; font-size: 13.5px; }
 .легенда .элемент { display: flex; align-items: center; gap: 8px; }
 .легенда .линия { width: 30px; height: 0; display: inline-block; }
