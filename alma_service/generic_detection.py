@@ -244,7 +244,10 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     default_thr = ANOMALY_PRECURSOR_DEFAULT_THRESHOLD.get(anomaly_key)
     if default_thr is not None:
         cfg["early_warning_logreg_threshold"] = float(default_thr)
-    if anomaly_key == "pritok" and os.getenv("ALMA_PRESSURE_TREND_FUSION", "0").strip().lower() in ("1", "true", "yes"):
+    # fusion-критерий притока (наклон давления + скор нейросети) — дефолт для класса
+    # приток после проверки 03.06.2026 (5/5 на тестовых, 0 ложных на 39 контрольных).
+    # Отключается ALMA_PRESSURE_TREND_FUSION=0. Для негермет/соль не применяется.
+    if anomaly_key == "pritok" and os.getenv("ALMA_PRESSURE_TREND_FUSION", "1").strip().lower() in ("1", "true", "yes"):
         cfg["pressure_trend_fusion"] = {
             "enabled": True,
             "score_threshold": float(os.getenv("ALMA_PTF_SCORE_THRESHOLD", "0.0040")),
