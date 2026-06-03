@@ -18,6 +18,23 @@ DEFAULT_FREQ_JUMP_BUFFER_DAYS = 2.0
 DEFAULT_MIN_RUN = 3
 DEFAULT_RESAMPLE = "12h"
 
+# Привязка отметки к началу устойчивого тренда (ретроспективно). Срабатывание детектора
+# причинное — на подтверждении окна; но эксперту показываем именно начало спада/роста.
+# От точки подтверждения идём назад по СГЛАЖЕННОЙ кривой (как в отчёте), пока выполняется
+# либо короткий наклон в сторону тренда, либо кривая держится заметно за «полосой нормы»
+# относительно reference. Это ловит и крутой спад, и пологий шумный дрейф до него.
+DEFAULT_ANCHOR_SHORT_WINDOW_DAYS = 3.0
+DEFAULT_ANCHOR_FLAT_EPS_PCT = 0.04
+DEFAULT_ANCHOR_MAX_LOOKBACK_DAYS = 45.0
+DEFAULT_ANCHOR_SMOOTH_DAYS = 2.0
+DEFAULT_ANCHOR_BAND_FRAC = 0.005
+
+
+@dataclass(frozen=True)
+class TrendOnset:
+    onset: pd.Timestamp   # начало устойчивого тренда (ретроспективно) — отметка для эксперта
+    trigger: pd.Timestamp  # момент причинного срабатывания детектора (подтверждение окна)
+
 
 @dataclass(frozen=True)
 class PressureTrendFusionConfig:
@@ -28,6 +45,11 @@ class PressureTrendFusionConfig:
     freq_jump_threshold_hz: float = DEFAULT_FREQ_JUMP_THRESHOLD_HZ
     freq_jump_buffer_days: float = DEFAULT_FREQ_JUMP_BUFFER_DAYS
     min_run: int = DEFAULT_MIN_RUN
+    anchor_short_window_days: float = DEFAULT_ANCHOR_SHORT_WINDOW_DAYS
+    anchor_flat_eps_pct: float = DEFAULT_ANCHOR_FLAT_EPS_PCT
+    anchor_max_lookback_days: float = DEFAULT_ANCHOR_MAX_LOOKBACK_DAYS
+    anchor_smooth_days: float = DEFAULT_ANCHOR_SMOOTH_DAYS
+    anchor_band_frac: float = DEFAULT_ANCHOR_BAND_FRAC
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "PressureTrendFusionConfig":
@@ -40,6 +62,11 @@ class PressureTrendFusionConfig:
             freq_jump_threshold_hz=float(payload.get("freq_jump_threshold_hz", DEFAULT_FREQ_JUMP_THRESHOLD_HZ)),
             freq_jump_buffer_days=float(payload.get("freq_jump_buffer_days", DEFAULT_FREQ_JUMP_BUFFER_DAYS)),
             min_run=int(payload.get("min_run", DEFAULT_MIN_RUN)),
+            anchor_short_window_days=float(payload.get("anchor_short_window_days", DEFAULT_ANCHOR_SHORT_WINDOW_DAYS)),
+            anchor_flat_eps_pct=float(payload.get("anchor_flat_eps_pct", DEFAULT_ANCHOR_FLAT_EPS_PCT)),
+            anchor_max_lookback_days=float(payload.get("anchor_max_lookback_days", DEFAULT_ANCHOR_MAX_LOOKBACK_DAYS)),
+            anchor_smooth_days=float(payload.get("anchor_smooth_days", DEFAULT_ANCHOR_SMOOTH_DAYS)),
+            anchor_band_frac=float(payload.get("anchor_band_frac", DEFAULT_ANCHOR_BAND_FRAC)),
         )
 
 
@@ -56,6 +83,61 @@ def _frequency_jump_buffer_mask(freq12: pd.Series, *, threshold_hz: float, buffe
     return blocked
 
 
+def _anchor_trend_onset(
+    p12: pd.Series,
+    trigger: pd.Timestamp,
+    *,
+    base: float,
+    falling: bool,
+    ref_end_ts: pd.Timestamp,
+    config: PressureTrendFusionConfig,
+) -> pd.Timestamp:
+    # От точки подтверждения идём назад по СГЛАЖЕННОЙ кривой, пока выполняется ЛИБО короткий
+    # (trailing) наклон в сторону тренда, ЛИБО кривая держится за «полосой нормы» (заметно
+    # ниже base при спаде / выше при росте). Начало тренда — самая ранняя точка непрерывного
+    # хода. Это ловит и крутой спад, и пологий шумный дрейф перед ним (скв. 46-806), а возврат
+    # к норме (band/наклон не выполнены) обрывает проход на реальном начале.
+    smooth = p12.rolling(f"{int(round(config.anchor_smooth_days * 24))}h", min_periods=1).median()
+    idx = smooth.index
+    vals = smooth.to_numpy(dtype=float)
+    pos = int(idx.searchsorted(trigger, side="right")) - 1
+    if pos <= 0:
+        return trigger
+    step_days = 0.5  # DEFAULT_RESAMPLE == "12h"
+    short_points = max(2, int(round(config.anchor_short_window_days / step_days)))
+    trend_dir = -1.0 if falling else 1.0
+    eps_pct = float(config.anchor_flat_eps_pct)
+    band = float(config.anchor_band_frac) * base
+    max_lookback = pd.Timedelta(days=config.anchor_max_lookback_days)
+
+    def local_slope_pct(i: int) -> float:
+        j = max(0, i - short_points)
+        dt = (idx[i] - idx[j]).total_seconds() / 86400.0
+        if dt <= 0:
+            return 0.0
+        return (vals[i] - vals[j]) / dt / base * 100.0
+
+    onset_pos = pos
+    k = pos
+    while k - 1 >= 0:
+        if idx[pos] - idx[k] > max_lookback:
+            break
+        slope_ok = trend_dir * local_slope_pct(k) >= eps_pct
+        band_ok = (base - vals[k]) >= band if falling else (vals[k] - base) >= band
+        if slope_ok or band_ok:
+            onset_pos = k
+            k -= 1
+        else:
+            break
+    onset = idx[onset_pos]
+    if onset <= ref_end_ts:
+        nxt = idx[idx > ref_end_ts]
+        onset = nxt[0] if len(nxt) else trigger
+    if onset > trigger:
+        onset = trigger
+    return pd.Timestamp(onset)
+
+
 def detect_pressure_trend_fusion_onsets(
     timestamps: np.ndarray,
     pressure: np.ndarray,
@@ -64,9 +146,10 @@ def detect_pressure_trend_fusion_onsets(
     reference_mask: np.ndarray,
     onset_mask: np.ndarray | None,
     config: PressureTrendFusionConfig,
-) -> list[pd.Timestamp]:
+) -> list[TrendOnset]:
     """Совмещённый (fusion) трендовый детектор притока: устойчивый наклон давления
-    при стабильной частоте И повышенный скор нейросети. Возвращает старты эпизодов."""
+    при стабильной частоте И повышенный скор нейросети. Возвращает эпизоды как
+    TrendOnset(onset=начало тренда, trigger=момент подтверждения)."""
     ts = pd.to_datetime(np.asarray(timestamps))
     frame = pd.DataFrame(
         {
@@ -110,7 +193,7 @@ def detect_pressure_trend_fusion_onsets(
     window = pd.Timedelta(days=config.window_days)
 
     run = 0
-    starts: list[pd.Timestamp] = []
+    onsets: list[TrendOnset] = []
     armed = True
     for current in p12.index:
         if current <= ref_end_ts:
@@ -128,7 +211,8 @@ def detect_pressure_trend_fusion_onsets(
             run = 0
             continue
         x = (seg_p.index - seg_p.index[0]).total_seconds().to_numpy(dtype=float) / 86400.0
-        slope_pct = float(np.polyfit(x, seg_p.to_numpy(dtype=float), 1)[0]) / base * 100.0
+        slope_raw = float(np.polyfit(x, seg_p.to_numpy(dtype=float), 1)[0])
+        slope_pct = slope_raw / base * 100.0
         score_med = float(seg_s.median()) if seg_s.notna().any() else 0.0
         trend_ok = abs(slope_pct) >= config.slope_threshold_pct_per_day
         score_ok = score_med >= config.score_threshold
@@ -137,19 +221,23 @@ def detect_pressure_trend_fusion_onsets(
         if trend_ok and score_ok and onset_ok:
             run += 1
             if run >= config.min_run and armed:
-                starts.append(pd.Timestamp(current))
+                onset = _anchor_trend_onset(
+                    p12, pd.Timestamp(current),
+                    base=base, falling=slope_raw < 0, ref_end_ts=ref_end_ts, config=config,
+                )
+                onsets.append(TrendOnset(onset=onset, trigger=pd.Timestamp(current)))
                 armed = False
         else:
             run = 0
             armed = True
-    return starts
+    return onsets
 
 
 def detect_from_prepared(
     prepared: Any,
     score: np.ndarray,
     config: PressureTrendFusionConfig,
-) -> list[pd.Timestamp]:
+) -> list[TrendOnset]:
     raw_columns = list(getattr(prepared, "raw_columns", []))
     pressure_col = find_channel(raw_columns, "давление на приеме")
     frequency_col = find_channel(raw_columns, "выходная частота")

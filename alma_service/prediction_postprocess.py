@@ -68,6 +68,14 @@ def annotate_predicted_starts(predictions: pd.DataFrame) -> pd.DataFrame:
         result.loc[(zone == EVENT_LABELLED_ANOMALY) & zone_overridable, "start_class"] = START_LABELLED_ANOMALY
 
     protected = result["start_class"].isin({START_PRE_ANOMALY_ZONE, START_LABELLED_ANOMALY})
+    # Трендовые (fusion) старты притока уже подтверждены устойчивым наклоном давления +
+    # скором нейросети, поэтому «залипание» вспомогательных датчиков (sensor_stuck/bad_data
+    # от замороженной температуры/вибрации/напряжения) их НЕ подавляет.
+    trend_protected = (
+        result["trend_protected"].fillna(False).astype(bool)
+        if "trend_protected" in result.columns
+        else pd.Series(False, index=result.index)
+    )
     bad_mask = event_clean.eq(EVENT_BAD_DATA)
     if "is_bad_data" in result.columns:
         bad_mask = bad_mask | result["is_bad_data"].fillna(False).astype(bool)
@@ -75,8 +83,9 @@ def annotate_predicted_starts(predictions: pd.DataFrame) -> pd.DataFrame:
     if "is_regime_event" in result.columns:
         regime_mask = regime_mask | result["is_regime_event"].fillna(False).astype(bool)
 
-    result.loc[bad_mask & ~protected, "start_class"] = START_BAD_DATA
-    result.loc[regime_mask & ~protected & ~bad_mask, "start_class"] = START_REGIME_EVENT
+    result.loc[bad_mask & ~protected & ~trend_protected, "start_class"] = START_BAD_DATA
+    result.loc[regime_mask & ~protected & ~bad_mask & ~trend_protected, "start_class"] = START_REGIME_EVENT
+    result.loc[trend_protected & ~protected, "start_class"] = START_ANOMALY_CANDIDATE
     result["actionable_alert"] = result["start_class"].isin(ACTIONABLE_START_CLASSES)
     result["suppression_reason"] = ""
     result.loc[result["start_class"] == START_BAD_DATA, "suppression_reason"] = "bad_data"

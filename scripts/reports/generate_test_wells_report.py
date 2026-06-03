@@ -39,6 +39,7 @@ COLOR_TEMP_INTAKE = "#dc2626"
 COLOR_TEMP_OIL = "#9f1239"
 COLOR_CRITICAL = "#b91c1c"
 COLOR_FIRST_ALERT = "#d97706"
+COLOR_TRIGGER = "#475569"
 
 _PLOTLY_EMBEDDED = {"done": False}
 
@@ -96,6 +97,18 @@ def critical_detections(preds: pd.DataFrame) -> list[pd.Timestamp]:
     if "actionable_alert" in rows.columns:
         rows = rows[rows["actionable_alert"].fillna(False).astype(bool)]
     return sorted(pd.to_datetime(rows["detected_time"]).tolist())
+
+
+def trend_triggers(preds: pd.DataFrame) -> list[pd.Timestamp]:
+    # Моменты причинного срабатывания детектора (подтверждение трендового окна) — для
+    # трендовых (fusion) детекций. Отметка детекции стоит на начале тренда (onset),
+    # а это — когда детектор реально набрал доказательства.
+    if preds.empty or "trend_trigger_time" not in preds.columns:
+        return []
+    rows = preds[preds["trend_trigger_time"].notna()]
+    if rows.empty:
+        return []
+    return sorted({pd.Timestamp(t) for t in pd.to_datetime(rows["trend_trigger_time"]) if pd.notna(t)})
 
 
 def actionable_alerts(preds: pd.DataFrame) -> pd.DataFrame:
@@ -198,7 +211,16 @@ def build_explanation(
         ]
         if criticals:
             crit_list = ", ".join(ts.strftime("%d.%m.%Y %H:%M") for ts in criticals[:4])
-            reason_bits.append(f"Подтверждённые детекции (красные линии): {crit_list}.")
+            reason_bits.append(
+                f"Детекция отмечена на начале устойчивого тренда (красные линии): {crit_list}."
+            )
+            triggers = trend_triggers(preds)
+            if triggers:
+                trg_list = ", ".join(t.strftime("%d.%m.%Y %H:%M") for t in triggers[:4])
+                reason_bits.append(
+                    f"Детектор причинно подтвердил тренд позже, по накоплению окна "
+                    f"(серый пунктир): {trg_list}."
+                )
         if trend.get("p_start") is not None and abs(float(trend["delta_pct"])) >= 3.0:
             freq_part = (
                 "при стабильной выходной частоте"
@@ -339,7 +361,13 @@ def build_well_figure(
     annotations = []
     criticals = critical_detections(preds)
     alerts = actionable_alerts(preds)
-    if not alerts.empty:
+    # Оранжевую «первый действующий алерт» рисуем только если она НЕ совпадает с красной
+    # детекцией (после гейта первый алерт = начало тренда, иначе линии дублируются).
+    first_alert_coincides = bool(alerts.shape[0]) and any(
+        abs((pd.Timestamp(alerts["detected_time"].iloc[0]) - c).total_seconds()) <= 12 * 3600
+        for c in criticals
+    )
+    if not alerts.empty and not first_alert_coincides:
         first_alert = pd.Timestamp(alerts["detected_time"].iloc[0])
         shapes.append(
             {
@@ -367,8 +395,25 @@ def build_well_figure(
             annotations.append(
                 {
                     "x": ts.strftime("%Y-%m-%d %H:%M"), "y": 0.99, "xref": "x", "yref": "paper",
-                    "text": "Детекция", "showarrow": False, "textangle": -90,
+                    "text": "Детекция · начало тренда", "showarrow": False, "textangle": -90,
                     "font": {"size": 10, "color": COLOR_CRITICAL}, "xanchor": "right", "yanchor": "top",
+                }
+            )
+    # Вторичная метка — момент причинного срабатывания детектора (подтверждение тренда)
+    for idx, ts in enumerate(trend_triggers(preds)):
+        shapes.append(
+            {
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": ts.strftime("%Y-%m-%d %H:%M"), "x1": ts.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "line": {"color": COLOR_TRIGGER, "width": 1.3, "dash": "dot"},
+            }
+        )
+        if idx < 4:
+            annotations.append(
+                {
+                    "x": ts.strftime("%Y-%m-%d %H:%M"), "y": 0.99, "xref": "x", "yref": "paper",
+                    "text": "Подтверждение детектора", "showarrow": False, "textangle": -90,
+                    "font": {"size": 9, "color": COLOR_TRIGGER}, "xanchor": "left", "yanchor": "top",
                 }
             )
 

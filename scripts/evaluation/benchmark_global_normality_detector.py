@@ -46,6 +46,7 @@ from alma_service.generic_detection import (
     _predicted_with_early_warning,
     _prepare_all_wells,
     _resolve_torch_device,
+    _tag_trend_starts,
     _tune_config,
     load_anomaly_data,
     load_intervals,
@@ -607,7 +608,7 @@ def _evaluate_global_runs(
         )
         tuning_summary = {"retune": False}
 
-    score_rows, predicted, early_predicted, detail_map = _build_score_rows(
+    score_rows, predicted, early_predicted, detail_map, trend_predicted = _build_score_rows(
         "paano_shared",
         detector_runs,
         cfg,
@@ -622,6 +623,7 @@ def _evaluate_global_runs(
         pred_df["detector"] = "global_normality_paano"
         split_lookup = {well_id: run.prepared.split for well_id, run in detector_runs.items()}
         pred_df["split"] = pred_df["well_id"].map(split_lookup).fillna("train")
+    pred_df = _tag_trend_starts(pred_df, trend_predicted)
 
     incident_result = build_incidents(
         pred_df,

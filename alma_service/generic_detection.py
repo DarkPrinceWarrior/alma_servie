@@ -256,6 +256,10 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
             "freq_jump_buffer_days": float(os.getenv("ALMA_PTF_FREQ_BUFFER_DAYS", "2.0")),
             "dedupe_hours": 24.0,
         }
+        # Отметка детекции — начало тренда (ретроспективно); early_warning, стоящий сильно
+        # ДО начала тренда — нейрошум, его отсекаем (окно-предвестник перед onset сохраняем).
+        cfg["early_warning_trend_gate"] = True
+        cfg["early_warning_precursor_days"] = float(os.getenv("ALMA_PTF_EW_PRECURSOR_DAYS", "0.0"))
     return cfg
 
 
@@ -646,6 +650,7 @@ def _detect_starts_for_run(
     *,
     precursor_model: PrecursorLogregModel | None = None,
     labelled_mask: np.ndarray | None = None,
+    trend_sink: dict[str, Any] | None = None,
 ) -> tuple[np.ndarray, Any, list[pd.Timestamp], list[pd.Timestamp]]:
     cfg = {**BASE_ONSET_CONFIG, **cfg}
     score = _score_for_config(run, detector_key, cfg)
@@ -674,7 +679,10 @@ def _detect_starts_for_run(
         hysteresis_scale=float(cfg["hysteresis_scale"]),
         bypass_cooldown_after_clear=bool(cfg.get("bypass_cooldown_after_clear", True)),
     )
-    starts = _augment_with_pressure_trend_fusion(starts, run, score, cfg)
+    starts, trend_onsets = _augment_with_pressure_trend_fusion(starts, run, score, cfg)
+    starts = _gate_pre_trend_starts(starts, trend_onsets, cfg)
+    if trend_sink is not None:
+        trend_sink["onsets"] = list(trend_onsets)
     early_starts: list[pd.Timestamp] = []
     early_threshold_logreg = float(cfg.get("early_warning_logreg_threshold", 0.0))
     if precursor_model is not None and early_threshold_logreg > 0.0:
@@ -692,7 +700,7 @@ def _detect_starts_for_run(
             labelled_mask=labelled_mask,
             warmup_hours=float(cfg.get("early_warning_warmup_hours", 0.0)),
         )
-        return score, thresholds, starts, early_starts
+        return score, thresholds, starts, _gate_early_warning(early_starts, trend_onsets, cfg)
     early_scale = float(cfg.get("early_warning_threshold_scale", 0.0))
     if early_scale > 0.0 and 0.0 < early_scale < 1.0:
         early_thresholds = CausalThresholds(
@@ -726,7 +734,7 @@ def _detect_starts_for_run(
             t_ns = pd.Timestamp(t).value
             if all(abs(t_ns - c) > dedupe_ns for c in crit_ns):
                 early_starts.append(t)
-    return score, thresholds, starts, early_starts
+    return score, thresholds, starts, _gate_early_warning(early_starts, trend_onsets, cfg)
 
 
 def _augment_with_pressure_trend_fusion(
@@ -734,32 +742,69 @@ def _augment_with_pressure_trend_fusion(
     run: PreparedDetectorRun,
     score: np.ndarray,
     cfg: dict[str, Any],
-) -> list[pd.Timestamp]:
+) -> tuple[list[pd.Timestamp], list[Any]]:
     # Совмещённый трендовый детектор притока (наклон давления + скор нейросети).
     # По умолчанию выключен; включается только для класса приток через конфиг —
     # негермет и соль не затрагиваются. Подробности: docs/физика_аномалий…, раздел fusion.
+    # Возвращает (объединённые старты, принятые TrendOnset). Отметка эпизода — начало
+    # тренда (onset), плюс момент причинного срабатывания (trigger) для отчёта.
     fusion_cfg = cfg.get("pressure_trend_fusion")
     if not fusion_cfg or not bool(fusion_cfg.get("enabled", False)):
-        return starts
+        return starts, []
     from alma_service.pressure_trend_onset import (
         PressureTrendFusionConfig,
         detect_from_prepared,
     )
 
     config = PressureTrendFusionConfig.from_dict(fusion_cfg)
-    trend_starts = detect_from_prepared(run.prepared, score, config)
-    if not trend_starts:
-        return starts
-    dedupe_ns = int(float(fusion_cfg.get("dedupe_hours", 24.0)) * 3600 * 1e9)
+    trend_onsets = detect_from_prepared(run.prepared, score, config)
+    if not trend_onsets:
+        return starts, []
+    # Трендовый онсет добавляем ВСЕГДА (защита от подавления зависит от того, что строка
+    # старта существует ровно на onset). Дедуп — только по точному совпадению времени,
+    # чтобы не плодить буквальные дубли; ближний нейро-старт остаётся отдельной строкой и
+    # сольётся в один инцидент. (Старый 24-час дедуп терял онсет — скв. 46-806.)
     merged = list(starts)
-    existing_ns = [pd.Timestamp(t).value for t in merged]
-    for t in trend_starts:
-        t_ns = pd.Timestamp(t).value
-        if all(abs(t_ns - e) > dedupe_ns for e in existing_ns):
-            merged.append(pd.Timestamp(t))
-            existing_ns.append(t_ns)
+    existing_ns = {pd.Timestamp(t).value for t in merged}
+    accepted: list[Any] = list(trend_onsets)
+    for onset in trend_onsets:
+        t_ns = pd.Timestamp(onset.onset).value
+        if t_ns not in existing_ns:
+            merged.append(pd.Timestamp(onset.onset))
+            existing_ns.add(t_ns)
     merged.sort()
-    return merged
+    return merged, accepted
+
+
+def _gate_early_warning(
+    early_starts: list[pd.Timestamp],
+    trend_onsets: list[Any],
+    cfg: dict[str, Any],
+) -> list[pd.Timestamp]:
+    # Для притока: убираем early_warning, который стоит сильно ДО начала подтверждённого
+    # тренда (нейрошум до спада). Оставляем короткое окно-предвестник перед onset. Если
+    # тренда нет (в т.ч. на размеченных контрольных без fusion) — early_warning не трогаем.
+    if not bool(cfg.get("early_warning_trend_gate", False)) or not early_starts or not trend_onsets:
+        return early_starts
+    earliest = min(pd.Timestamp(onset.onset) for onset in trend_onsets)
+    cutoff = earliest - pd.Timedelta(days=float(cfg.get("early_warning_precursor_days", 7.0)))
+    return [t for t in early_starts if pd.Timestamp(t) >= cutoff]
+
+
+def _gate_pre_trend_starts(
+    starts: list[pd.Timestamp],
+    trend_onsets: list[Any],
+    cfg: dict[str, Any],
+) -> list[pd.Timestamp]:
+    # Для притока с подтверждённым трендом: критические старты, стоящие ДО начала тренда —
+    # нейрошум не по тренду (напр. 46-806: 06.12/15.12 сразу после reference). Убираем их,
+    # сами трендовые онсеты сохраняем. Без тренда (sharp/контроль) — не трогаем.
+    if not bool(cfg.get("early_warning_trend_gate", False)) or not starts or not trend_onsets:
+        return starts
+    earliest = min(pd.Timestamp(onset.onset) for onset in trend_onsets)
+    cutoff = earliest - pd.Timedelta(days=float(cfg.get("trend_gate_critical_buffer_days", 0.0)))
+    onset_ns = {pd.Timestamp(onset.onset).value for onset in trend_onsets}
+    return [t for t in starts if pd.Timestamp(t).value in onset_ns or pd.Timestamp(t) >= cutoff]
 
 
 def _score_unavailable_reason(run: PreparedDetectorRun) -> str | None:
@@ -1846,10 +1891,12 @@ def _build_score_rows(
     dict[str, list[pd.Timestamp]],
     dict[str, list[pd.Timestamp]],
     dict[str, dict[str, Any]],
+    dict[str, list[Any]],
 ]:
     score_rows: list[dict[str, Any]] = []
     predicted: dict[str, list[pd.Timestamp]] = {}
     early_predicted: dict[str, list[pd.Timestamp]] = {}
+    trend_predicted: dict[str, list[Any]] = {}
     detail_map: dict[str, dict[str, Any]] = {}
 
     for well_id, run in runs.items():
@@ -1863,13 +1910,16 @@ def _build_score_rows(
             first_start = pd.to_datetime(well_intervals["start_date"]).min()
             if pd.notna(first_start):
                 labelled_mask = np.asarray(ts_arr >= first_start, dtype=bool)
+        trend_sink: dict[str, Any] = {}
         score, thresholds, starts, early_starts = _detect_starts_for_run(
             detector_key, run, cfg,
             precursor_model=precursor_model,
             labelled_mask=labelled_mask,
+            trend_sink=trend_sink,
         )
         predicted[well_id] = starts
         early_predicted[well_id] = early_starts
+        trend_predicted[well_id] = trend_sink.get("onsets", [])
         score_unavailable_reason = _score_unavailable_reason(run)
         score_valid = score_unavailable_reason is None
         status_frame = build_telemetry_status(
@@ -1915,7 +1965,29 @@ def _build_score_rows(
                 row[name] = float(values[idx])
             score_rows.append(row)
 
-    return score_rows, predicted, early_predicted, detail_map
+    return score_rows, predicted, early_predicted, detail_map, trend_predicted
+
+
+def _tag_trend_starts(pred_df: pd.DataFrame, trend_predicted: dict[str, list[Any]]) -> pd.DataFrame:
+    # Помечаем строки-старты, совпадающие с началом тренда (onset), как защищённые
+    # (trend_protected) и проставляем момент причинного срабатывания (trend_trigger_time).
+    if pred_df.empty or not trend_predicted:
+        return pred_df
+    result = pred_df.copy()
+    if "trend_protected" not in result.columns:
+        result["trend_protected"] = False
+    if "trend_trigger_time" not in result.columns:
+        result["trend_trigger_time"] = pd.NaT
+    wid = result["well_id"].astype(str).str.strip().str.lower()
+    detected = pd.to_datetime(result["detected_time"])
+    for well, onsets in trend_predicted.items():
+        wkey = str(well).strip().lower()
+        for onset in onsets or []:
+            mask = (wid == wkey) & (detected == pd.Timestamp(onset.onset))
+            if mask.any():
+                result.loc[mask, "trend_protected"] = True
+                result.loc[mask, "trend_trigger_time"] = pd.Timestamp(onset.trigger)
+    return result
 
 
 def _predicted_with_early_warning(
@@ -2133,7 +2205,7 @@ def run_detection(
         verbose=verbose,
     )
 
-    score_rows, predicted, early_predicted, detail_map = _build_score_rows(
+    score_rows, predicted, early_predicted, detail_map, trend_predicted = _build_score_rows(
         detector_key,
         detector_runs,
         cfg,
@@ -2149,6 +2221,7 @@ def run_detection(
         pred_df["detector"] = detector_key
         split_lookup = {well_id: run.prepared.split for well_id, run in detector_runs.items()}
         pred_df["split"] = pred_df["well_id"].map(split_lookup).fillna("train")
+    pred_df = _tag_trend_starts(pred_df, trend_predicted)
     incident_result = build_incidents(
         pred_df,
         merge_window_hours=_incident_merge_window_hours(cfg),
@@ -2336,7 +2409,7 @@ def run_single_well(
     precursor_model = load_precursor_model(precursor_path(spec, detector_key))
 
     if save_dir is not None:
-        score_rows, predicted, early_predicted, _detail_map = _build_score_rows(
+        score_rows, predicted, early_predicted, _detail_map, trend_predicted = _build_score_rows(
             detector_key,
             {well_id: run},
             cfg,
@@ -2351,6 +2424,7 @@ def run_single_well(
             pred_df["anomaly"] = spec.anomaly_key
             pred_df["detector"] = detector_key
             pred_df["split"] = split
+        pred_df = _tag_trend_starts(pred_df, trend_predicted)
         incident_result = build_incidents(
             pred_df,
             merge_window_hours=_incident_merge_window_hours(cfg),

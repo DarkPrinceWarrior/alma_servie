@@ -75,6 +75,27 @@ class TestPredictionPostprocess(unittest.TestCase):
         )
         self.assertEqual(int(result["actionable_alert"].sum()), 1)
 
+    def test_trend_protected_survives_bad_data_suppression(self) -> None:
+        # Трендовый (fusion) старт притока, попавший на точку sensor_stuck/bad_data
+        # от замороженного вспомогательного датчика, НЕ подавляется; обычный bad_data — да.
+        predictions = pd.DataFrame(
+            {
+                "well_id": ["1", "1"],
+                "detected_time": pd.to_datetime(["2026-01-09 00:00", "2026-01-10 00:00"]),
+                "event_class": ["bad_data", "bad_data"],
+                "is_bad_data": [True, True],
+                "trend_protected": [True, False],
+            }
+        )
+
+        result = build_incidents(predictions, merge_window_hours=6.0).starts
+
+        self.assertEqual(
+            list(result["start_class"]),
+            [START_ANOMALY_CANDIDATE, START_BAD_DATA],
+        )
+        self.assertEqual(int(result["actionable_alert"].sum()), 1)
+
     def test_merges_repeated_actionable_starts_into_incident(self) -> None:
         predictions = pd.DataFrame(
             {
