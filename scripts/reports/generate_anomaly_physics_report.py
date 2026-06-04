@@ -101,6 +101,10 @@ INFLUENCE_FREQ_RECOVERY_RATIO = 0.95
 INFLUENCE_PRESSURE_RECOVERY_RATIO = 1.005
 INFLUENCE_BASE_WINDOW_HOURS = 12.0
 INFLUENCE_MAX_TAIL_HOURS = 36.0
+# Минимальный рост давления (бамп) от остановки, чтобы помечать зону: отсекает мелкие
+# остановки без заметного пика (эксперт 04.06.2026 — «два пика», а не каждый микро-стоп).
+# Порог ниже минимума одобренных зон (602 = +10%), поэтому одобренные не затрагиваются.
+MIN_ZONE_EXCESS_PCT = 9.0
 INFLUENCE_FULL_RESOLUTION_PAD_HOURS = 2.0
 
 CANONICAL_EXAMPLES = {
@@ -615,19 +619,45 @@ def trace_values(series: pd.DataFrame, column: str | None, digits: int) -> tuple
     return x, y
 
 
+def _prefix_zones(zones: list[dict[str, Any]], anomaly_start: pd.Timestamp | None) -> list[dict[str, Any]]:
+    # Оставляем только зоны, чьё ядро остановки в нормальной префиксной зоне (до аномалии).
+    if anomaly_start is None:
+        return list(zones)
+    return [z for z in zones if z["core_start"] < anomaly_start]
+
+
+def _prefix_peaks(peaks: list[dict[str, Any]], anomaly_start: pd.Timestamp | None) -> list[dict[str, Any]]:
+    if anomaly_start is None:
+        return list(peaks)
+    return [p for p in peaks if p["start"] < anomaly_start]
+
+
+def _clip_end(ts: pd.Timestamp, anomaly_start: pd.Timestamp | None) -> pd.Timestamp:
+    # Полоса не должна заходить в аномальную зону: обрезаем правый край по началу аномалии.
+    return min(ts, anomaly_start) if anomaly_start is not None else ts
+
+
 def build_well_figure(row: WellRow) -> dict[str, Any] | None:
     if row.series is None or row.series.empty:
         return None
     # Правило пиков и зон влияния остановок (указания эксперта 02-03.06.2026) применяется
     # только к классу приток: на негермете и солях резкое изменение давления — сама аномалия
+    # Зоны влияния остановок (полный охват: падение частоты → восстановление + возврат
+    # давления к базе) считаем для ВСЕХ классов — у salt/негермета раньше рисовалось узкое
+    # ядро f<1 (бралась только середина пика). Помечаем ТОЛЬКО в нормальной префиксной зоне:
+    # внутри размеченной аномалии резкое изменение давления это сама аномалия (эксперт 04.06.2026).
+    influence_zones_all = detect_stop_influence_zones(row.series)
+    stop_periods = [(zone["core_start"], zone["core_end"]) for zone in influence_zones_all]
+    influence_zones = [
+        z for z in _prefix_zones(influence_zones_all, row.anomaly_start)
+        if z["excess_pct"] >= MIN_ZONE_EXCESS_PCT
+    ]
     if row.class_key == "pritok":
-        influence_zones = detect_stop_influence_zones(row.series)
-        stop_periods = [(zone["core_start"], zone["core_end"]) for zone in influence_zones]
         pressure_peaks = detect_pressure_peaks(row.series)
-        orange_peaks = [peak for peak in pressure_peaks if not peak["from_stop"]]
+        orange_peaks = _prefix_peaks(
+            [peak for peak in pressure_peaks if not peak["from_stop"]], row.anomaly_start
+        )
     else:
-        influence_zones = []
-        stop_periods = detect_stop_periods(row.series)
         pressure_peaks = []
         orange_peaks = []
     freq_jumps = detect_frequency_jumps(row.series, stop_periods)
@@ -750,29 +780,8 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
             }
         )
 
-    # Серые зоны остановок насоса (негермет, соли, норма): рост давления внутри — гидростатика
-    if row.class_key != "pritok":
-        for stop_start, stop_end in stop_periods:
-            shapes.append(
-                {
-                    "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
-                    "x0": stop_start.strftime("%Y-%m-%d %H:%M"), "x1": stop_end.strftime("%Y-%m-%d %H:%M"),
-                    "y0": 0, "y1": 1, "fillcolor": COLOR_STOP_ZONE,
-                    "line": {"color": COLOR_STOP_TEXT, "width": 1, "dash": "dot"},
-                }
-            )
-            if len(stop_periods) <= 6:
-                annotations.append(
-                    {
-                        "x": stop_start.strftime("%Y-%m-%d %H:%M"), "y": 0.985, "xref": "x", "yref": "paper",
-                        "text": f"Остановка насоса {stop_start.strftime('%d.%m %H:%M')}–{stop_end.strftime('%H:%M')}",
-                        "showarrow": False, "textangle": -90,
-                        "font": {"size": 10, "color": COLOR_STOP_TEXT}, "xanchor": "right", "yanchor": "top",
-                    }
-                )
-
-    # Зоны влияния остановок (приток): от падения частоты до восстановления частоты
-    # И возврата давления к базе — границы по выбору эксперта от 03.06.2026
+    # Серые зоны влияния остановок (все классы): от падения частоты до восстановления частоты
+    # И возврата давления к базе — полный охват повышения, пика и спада, только в префиксе.
     for zone in influence_zones:
         label = (
             f"Остановка {zone['core_start'].strftime('%d.%m %H:%M')}–{zone['core_end'].strftime('%H:%M')}, "
@@ -783,10 +792,11 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
                 f"Остановка {zone['core_start'].strftime('%d.%m %H:%M')}–{zone['core_end'].strftime('%H:%M')}, "
                 f"давление (+{zone['excess_pct']:.0f}%) к базе не вернулось"
             )
+        zone_x1 = _clip_end(zone["end"], row.anomaly_start)
         shapes.append(
             {
                 "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
-                "x0": zone["start"].strftime("%Y-%m-%d %H:%M"), "x1": zone["end"].strftime("%Y-%m-%d %H:%M"),
+                "x0": zone["start"].strftime("%Y-%m-%d %H:%M"), "x1": zone_x1.strftime("%Y-%m-%d %H:%M"),
                 "y0": 0, "y1": 1, "fillcolor": COLOR_PEAK_STOP_ZONE,
                 "line": {"color": COLOR_PEAK_STOP_TEXT, "width": 1, "dash": "dot"},
             }
