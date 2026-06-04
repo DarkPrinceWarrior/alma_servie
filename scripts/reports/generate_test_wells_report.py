@@ -312,8 +312,8 @@ def build_well_figure(
 
     # Оригинал давления (с пиками остановок) — если есть сырой ряд до очистки
     show_cleaned_overlay = raw_source is not None and not raw_source.empty
-    if show_cleaned_overlay:
-        raw_display = downsample(raw_source)
+    raw_display = downsample(raw_source) if show_cleaned_overlay else None
+    if show_cleaned_overlay and raw_display is not None:
         raw_pcol_d = find_column(raw_display, "давление на приеме")
         if raw_pcol_d is not None:
             fig.add_trace(
@@ -353,35 +353,50 @@ def build_well_figure(
         ),
         row=2, col=1,
     )
+    # Для каждого канала: оригинал (сплошная) + «после очистки» (зелёный пунктир, склейка через
+    # вырез). Вырезается весь многомерный ряд синхронно — стык виден на всех параметрах.
+    def add_channel_pair(row_idx, col_key, name, color, digits, unit, *, secondary=False, base_dash="solid"):
+        col_d = find_column(display, col_key)
+        if col_d is None:
+            return
+        raw_col = find_column(raw_display, col_key) if (show_cleaned_overlay and raw_display is not None) else None
+        if raw_col is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=x_display, y=[None if pd.isna(v) else round(float(v), digits) for v in raw_display[raw_col]],
+                    mode="lines", name=name, line={"color": color, "width": 1.2, "dash": base_dash},
+                    hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name}: %{{y:.{digits}f}} {unit}<extra></extra>",
+                ),
+                row=row_idx, col=1, secondary_y=secondary,
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_display, y=[None if pd.isna(v) else round(float(v), digits) for v in display[col_d]],
+                    mode="lines", name=f"{name} — после очистки", showlegend=False,
+                    line={"color": COLOR_CLEANED, "width": 1.0, "dash": "dash"}, connectgaps=True,
+                    hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name} после очистки: %{{y:.{digits}f}} {unit}<extra></extra>",
+                ),
+                row=row_idx, col=1, secondary_y=secondary,
+            )
+        else:
+            fig.add_trace(
+                go.Scatter(
+                    x=x_display, y=[None if pd.isna(v) else round(float(v), digits) for v in display[col_d]],
+                    mode="lines", name=name, line={"color": color, "width": 1.2, "dash": base_dash},
+                    hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name}: %{{y:.{digits}f}} {unit}<extra></extra>",
+                ),
+                row=row_idx, col=1, secondary_y=secondary,
+            )
+
     if frequency_col:
-        freq_display = display[find_column(display, "выходная частота")]
-        fig.add_trace(
-            go.Scatter(
-                x=x_display, y=[None if pd.isna(v) else round(float(v), 1) for v in freq_display],
-                mode="lines", name="Выходная частота",
-                line={"color": COLOR_FREQUENCY, "width": 1.3},
-                hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Частота: %{y:.1f} Гц<extra></extra>",
-            ),
-            row=3, col=1,
-        )
+        add_channel_pair(3, "выходная частота", "Выходная частота", COLOR_FREQUENCY, 1, "Гц")
     for column_key, name, color, unit, secondary in (
         ("ток на фазе а", "Ток фазы А", COLOR_CURRENT, "А", False),
         ("коэффициент загрузки", "Загрузка ПЭД", COLOR_LOAD, "%", False),
         ("температура на приеме", "Температура на приёме", COLOR_TEMP_INTAKE, "°C", True),
         ("температура масла", "Температура масла", COLOR_TEMP_OIL, "°C", True),
     ):
-        column = find_column(display, column_key)
-        if column is None:
-            continue
-        fig.add_trace(
-            go.Scatter(
-                x=x_display, y=[None if pd.isna(v) else round(float(v), 1) for v in display[column]],
-                mode="lines", name=name,
-                line={"color": color, "width": 1.2, "dash": "dot" if secondary else "solid"},
-                hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name}: %{{y:.1f}} {unit}<extra></extra>",
-            ),
-            row=4, col=1, secondary_y=secondary,
-        )
+        add_channel_pair(4, column_key, name, color, 1, unit, secondary=secondary, base_dash="dot" if secondary else "solid")
 
     # Серые полосы — вырезанные зоны влияния остановок (пустой разрыв на линии = эта зона,
     # а НЕ пропуск в реальных данных; полный ряд — в свёрнутом блоке «оригинал» ниже).

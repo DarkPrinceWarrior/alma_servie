@@ -700,26 +700,34 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
         ),
         row=1, col=1,
     )
-    # Давление после очистки остановок (как видит банк/энкодер притока): зоны убраны,
-    # линия соединена через вырез. Только для притока — банк чистит остановки только там.
+    # Каналы «после очистки остановок» (как видит банк/энкодер притока): зоны убраны, линия
+    # соединена через вырез. Вырезается весь многомерный ряд синхронно — показываем стык на
+    # всех параметрах. Только для притока — банк чистит остановки только там.
+    cleaned_inside = None
     if row.class_key == "pritok" and influence_zones:
         series_ts = pd.to_datetime(series["timestamp"]).to_numpy()
-        inside = np.zeros(len(series_ts), dtype=bool)
+        cleaned_inside = np.zeros(len(series_ts), dtype=bool)
         for zone in influence_zones:
-            inside |= (series_ts >= np.datetime64(zone["start"])) & (series_ts <= np.datetime64(zone["end"]))
-        raw_p = series[pressure_col].to_numpy(dtype=float)
-        cleaned_y = [
-            None if (inside[i] or not np.isfinite(raw_p[i])) else round(float(raw_p[i]), 2)
-            for i in range(len(series_ts))
+            cleaned_inside |= (series_ts >= np.datetime64(zone["start"])) & (series_ts <= np.datetime64(zone["end"]))
+
+    def add_cleaned(row_idx, col, digits, unit, name, *, secondary=False):
+        if cleaned_inside is None or col is None or col not in series.columns:
+            return
+        raw_v = series[col].to_numpy(dtype=float)
+        y = [
+            None if (cleaned_inside[i] or not np.isfinite(raw_v[i])) else round(float(raw_v[i]), digits)
+            for i in range(len(raw_v))
         ]
         fig.add_trace(
             go.Scatter(
-                x=pressure[0], y=cleaned_y, mode="lines", name="Давление после очистки остановок",
-                line={"color": COLOR_CLEANED, "width": 1.5, "dash": "dash"}, connectgaps=True,
-                hovertemplate="%{x|%d.%m.%Y %H:%M}<br>После очистки: %{y:.2f} кгс/см²<extra></extra>",
+                x=pressure[0], y=y, mode="lines", name=name, showlegend=(row_idx == 1),
+                line={"color": COLOR_CLEANED, "width": 1.3, "dash": "dash"}, connectgaps=True,
+                hovertemplate=f"%{{x|%d.%m.%Y %H:%M}}<br>{name}: %{{y:.{digits}f}} {unit}<extra></extra>",
             ),
-            row=1, col=1,
+            row=row_idx, col=1, secondary_y=secondary,
         )
+
+    add_cleaned(1, pressure_col, 2, "кгс/см²", "Давление после очистки остановок")
     if frequency is not None:
         fig.add_trace(
             go.Scatter(
@@ -765,6 +773,13 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
             ),
             row=3, col=1, secondary_y=True,
         )
+
+    # Стык «после очистки» для остальных параметров (тот же вырез по времени, синхронно)
+    add_cleaned(2, frequency_col, 1, "Гц", "Частота после очистки")
+    add_cleaned(3, current_col, 2, "А", "Ток после очистки", secondary=False)
+    add_cleaned(3, load_col, 1, "%", "Загрузка после очистки", secondary=False)
+    add_cleaned(3, temp_intake_col, 1, "°C", "Темп. на приёме после очистки", secondary=True)
+    add_cleaned(3, temp_oil_col, 1, "°C", "Темп. масла после очистки", secondary=True)
 
     shapes: list[dict[str, Any]] = []
     annotations: list[dict[str, Any]] = []
