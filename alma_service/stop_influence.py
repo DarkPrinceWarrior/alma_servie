@@ -9,7 +9,10 @@ import pandas as pd
 STOP_FREQUENCY_THRESHOLD_HZ = 1.0
 STOP_MIN_SAMPLES = 2
 FREQ_RECOVERY_RATIO = 0.95
-PRESSURE_RECOVERY_RATIO = 1.05
+# Зона остановки тянется, пока давление не вернётся почти к base (0.5%). При 1.05 (5%)
+# зона обрывалась на спаде пика и оставляла видимый хвост (46-806: пик до 92.7, обрыв на
+# 78.99 при base ~75.4); 1.005 доводит обрезку до возврата к норме (~75.8).
+PRESSURE_RECOVERY_RATIO = 1.005
 BASE_WINDOW_HOURS = 12.0
 MAX_TAIL_HOURS = 36.0
 

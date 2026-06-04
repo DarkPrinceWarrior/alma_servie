@@ -275,6 +275,7 @@ def build_well_figure(
     source: pd.DataFrame,
     preds: pd.DataFrame,
     anomaly: str,
+    zones: list | None = None,
 ) -> go.Figure | None:
     pressure_col = find_column(source, "давление на приеме")
     if source.empty or pressure_col is None:
@@ -356,9 +357,26 @@ def build_well_figure(
             row=4, col=1, secondary_y=secondary,
         )
 
-    # Вертикальные линии: подтверждённые детекции (красные) и первый действующий алерт (оранжевая)
+    # Серые полосы — вырезанные зоны влияния остановок (пустой разрыв на линии = эта зона,
+    # а НЕ пропуск в реальных данных; полный ряд — в свёрнутом блоке «оригинал» ниже).
     shapes = []
     annotations = []
+    for zi, zone in enumerate(zones or []):
+        shapes.append(
+            {
+                "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
+                "x0": zone.start.strftime("%Y-%m-%d %H:%M"), "x1": zone.end.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "fillcolor": "rgba(100, 116, 139, 0.20)", "line": {"width": 0},
+            }
+        )
+        if zi == 0:
+            annotations.append(
+                {
+                    "x": zone.start.strftime("%Y-%m-%d %H:%M"), "y": 0.02, "xref": "x", "yref": "paper",
+                    "text": "остановка (вырезана)", "showarrow": False,
+                    "font": {"size": 9, "color": "#64748b"}, "xanchor": "left",
+                }
+            )
     criticals = critical_detections(preds)
     alerts = actionable_alerts(preds)
     # Оранжевую «первый действующий алерт» рисуем только если она НЕ совпадает с красной
@@ -518,7 +536,7 @@ def render_well_card(well_id: str, well_dir: Path, anomaly: str) -> str:
         end = source["timestamp"].iloc[-1]
         period_text = f"Период данных: {start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
 
-    figure = build_well_figure(source, preds, anomaly)
+    figure = build_well_figure(source, preds, anomaly, zones)
     if figure is None:
         chart_html = "<div class='нет-данных'>Нет данных по давлению для этой скважины.</div>"
     else:
