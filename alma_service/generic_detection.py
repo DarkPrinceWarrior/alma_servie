@@ -1943,25 +1943,38 @@ def _build_score_rows(
         components = dict(run.score_output.components)
         components["score"] = score
 
-        for idx, ts in enumerate(run.prepared.timestamps):
+        # Векторно: статус-колонки и компоненты заранее в numpy (раньше status_frame.iloc[idx]
+        # на каждую из ~115k точек давал 12-16с pandas-оверхеда — узкое место профиля).
+        n_points = len(run.prepared.timestamps)
+        ts_values = np.asarray(run.prepared.timestamps)
+        ref_mask = np.asarray(run.prepared.reference_mask, dtype=bool)
+        stab_mask = np.asarray(run.prepared.stability_mask, dtype=bool)
+        onset_mask = np.asarray(run.prepared.onset_allowed_mask, dtype=bool)
+        input_contract = str(run.score_output.detail.get("input_contract", "real_window"))
+        reason_value = score_unavailable_reason or ""
+        status_arrays = (
+            {name: status_frame[name].to_numpy() for name in STATUS_COLUMNS}
+            if len(status_frame) == len(score)
+            else {}
+        )
+        component_arrays = {name: values for name, values in components.items() if len(values) == len(score)}
+
+        for idx in range(n_points):
             row = {
                 "well_id": well_id,
-                "timestamp": ts,
+                "timestamp": ts_values[idx],
                 "split": run.prepared.split,
                 "score": float(score[idx]),
-                "reference_mask": bool(run.prepared.reference_mask[idx]),
-                "stability_mask": bool(run.prepared.stability_mask[idx]),
-                "onset_allowed_mask": bool(run.prepared.onset_allowed_mask[idx]),
+                "reference_mask": bool(ref_mask[idx]),
+                "stability_mask": bool(stab_mask[idx]),
+                "onset_allowed_mask": bool(onset_mask[idx]),
                 "score_valid": bool(score_valid),
-                "score_unavailable_reason": score_unavailable_reason or "",
-                "input_contract": str(run.score_output.detail.get("input_contract", "real_window")),
+                "score_unavailable_reason": reason_value,
+                "input_contract": input_contract,
             }
-            if len(status_frame) == len(score):
-                for name in STATUS_COLUMNS:
-                    row[name] = status_frame.iloc[idx][name]
-            for name, values in components.items():
-                if len(values) != len(score):
-                    continue
+            for name, arr in status_arrays.items():
+                row[name] = arr[idx]
+            for name, values in component_arrays.items():
                 row[name] = float(values[idx])
             score_rows.append(row)
 
