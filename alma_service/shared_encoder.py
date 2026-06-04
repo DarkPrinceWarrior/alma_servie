@@ -11,6 +11,7 @@ Provides utilities to:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import random
 import sys
@@ -722,6 +723,51 @@ def load_or_train_shared_encoder(
     return state
 
 
+# Кэш memory bank для больших (популяционных) эталонов: банк 48212 точек одинаков на всех
+# скважинах батча, а create_memory_bank (эмбеддинг патчей + детерминированный kmeans seed=42)
+# даёт бит-в-бит тот же результат — нет смысла пересчитывать на каждую скважину.
+_POPULATION_BANK_CACHE: dict[Any, Any] = {}
+_BANK_CACHE_MIN_REF = 5000
+_BANK_CACHE_MAX_ENTRIES = 8
+
+
+def _array_fingerprint(arr: np.ndarray) -> str:
+    contiguous = np.ascontiguousarray(arr, dtype=np.float32)
+    return hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).hexdigest()
+
+
+def _model_fingerprint(model: nn.Module) -> str:
+    try:
+        param = next(model.parameters())
+    except StopIteration:
+        return "noparams"
+    flat = param.detach().to("cpu", dtype=torch.float32).contiguous().view(-1)[:4096]
+    return hashlib.blake2b(flat.numpy().tobytes(), digest_size=8).hexdigest()
+
+
+def _cached_memory_bank(model, ref_norm, patch_creator, patch_size, device):
+    use_cache = len(ref_norm) >= _BANK_CACHE_MIN_REF
+    key = None
+    if use_cache:
+        key = (int(patch_size), tuple(ref_norm.shape),
+               _array_fingerprint(ref_norm), _model_fingerprint(model))
+        cached = _POPULATION_BANK_CACHE.get(key)
+        if cached is not None:
+            return cached
+    ref_loader, _, _ = patch_creator.create_dataloaders(
+        ref_norm, ref_norm, np.zeros(len(ref_norm), dtype=np.float32),
+        batch_size=PAANO_INFER_BATCH_SIZE,
+    )
+    memory_bank, _ = create_memory_bank(
+        model, ref_loader, device, num_cores=PAANO_MEMORY_BANK_RATIO,
+    )
+    if use_cache and key is not None:
+        if len(_POPULATION_BANK_CACHE) >= _BANK_CACHE_MAX_ENTRIES:
+            _POPULATION_BANK_CACHE.clear()
+        _POPULATION_BANK_CACHE[key] = memory_bank
+    return memory_bank
+
+
 def _score_well_single_scale(
     model: nn.Module,
     well_data: np.ndarray,
@@ -743,21 +789,14 @@ def _score_well_single_scale(
 
     patch_creator = PatchCreator(L=patch_size, s=1, random_seed=SEED)
 
-    # DataLoader for local memory bank (from reference data)
-    ref_loader, _, _ = patch_creator.create_dataloaders(
-        ref_norm, ref_norm, np.zeros(len(ref_data), dtype=np.float32),
-        batch_size=PAANO_INFER_BATCH_SIZE,
-    )
     # DataLoader for full well scoring
     _, full_loader, _ = patch_creator.create_dataloaders(
         ref_norm, well_norm, dummy_labels,
         batch_size=PAANO_INFER_BATCH_SIZE,
     )
 
-    # Local memory bank from this well's reference data
-    memory_bank, _ = create_memory_bank(
-        model, ref_loader, device, num_cores=PAANO_MEMORY_BANK_RATIO,
-    )
+    # Memory bank из эталона (кэшируется для популяционного банка — см. _cached_memory_bank)
+    memory_bank = _cached_memory_bank(model, ref_norm, patch_creator, patch_size, device)
 
     patch_scores = calculate_anomaly_scores(
         model, full_loader, memory_bank, top_k=PAANO_TOP_K, device=device,
