@@ -40,6 +40,7 @@ COLOR_TEMP_OIL = "#9f1239"
 COLOR_CRITICAL = "#b91c1c"
 COLOR_FIRST_ALERT = "#d97706"
 COLOR_TRIGGER = "#475569"
+COLOR_CLEANED = "#059669"
 
 _PLOTLY_EMBEDDED = {"done": False}
 
@@ -276,6 +277,7 @@ def build_well_figure(
     preds: pd.DataFrame,
     anomaly: str,
     zones: list | None = None,
+    raw_source: pd.DataFrame | None = None,
 ) -> go.Figure | None:
     pressure_col = find_column(source, "давление на приеме")
     if source.empty or pressure_col is None:
@@ -308,12 +310,36 @@ def build_well_figure(
     x_display = display["timestamp"].dt.strftime("%Y-%m-%d %H:%M").tolist()
     pressure_display = display[find_column(display, "давление на приеме")]
 
+    # Оригинал давления (с пиками остановок) — если есть сырой ряд до очистки
+    show_cleaned_overlay = raw_source is not None and not raw_source.empty
+    if show_cleaned_overlay:
+        raw_display = downsample(raw_source)
+        raw_pcol_d = find_column(raw_display, "давление на приеме")
+        if raw_pcol_d is not None:
+            fig.add_trace(
+                go.Scatter(
+                    x=raw_display["timestamp"].dt.strftime("%Y-%m-%d %H:%M").tolist(),
+                    y=[None if pd.isna(v) else round(float(v), 2) for v in raw_display[raw_pcol_d]],
+                    mode="lines", name="Давление (оригинал)",
+                    line={"color": COLOR_PRESSURE, "width": 1.4},
+                    hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Оригинал: %{y:.2f} кгс/см²<extra></extra>",
+                ),
+                row=1, col=1,
+            )
+
+    # Давление после очистки остановок (как видит банк/энкодер): зоны убраны, линия
+    # соединена через вырез (гладкая склейка). При наличии оригинала — пунктиром поверх.
     fig.add_trace(
         go.Scatter(
             x=x_display, y=[None if pd.isna(v) else round(float(v), 2) for v in pressure_display],
-            mode="lines", name="Давление на приёме",
-            line={"color": COLOR_PRESSURE, "width": 1.4},
-            hovertemplate="%{x|%d.%m.%Y %H:%M}<br>Давление: %{y:.2f} кгс/см²<extra></extra>",
+            mode="lines",
+            name="Давление после очистки остановок" if show_cleaned_overlay else "Давление на приёме",
+            line=(
+                {"color": COLOR_CLEANED, "width": 1.8, "dash": "dash"}
+                if show_cleaned_overlay else {"color": COLOR_PRESSURE, "width": 1.4}
+            ),
+            connectgaps=show_cleaned_overlay,
+            hovertemplate="%{x|%d.%m.%Y %H:%M}<br>После очистки: %{y:.2f} кгс/см²<extra></extra>",
         ),
         row=1, col=1,
     )
@@ -536,7 +562,7 @@ def render_well_card(well_id: str, well_dir: Path, anomaly: str) -> str:
         end = source["timestamp"].iloc[-1]
         period_text = f"Период данных: {start.strftime('%d.%m.%Y')} — {end.strftime('%d.%m.%Y')}"
 
-    figure = build_well_figure(source, preds, anomaly, zones)
+    figure = build_well_figure(source, preds, anomaly, zones, raw_source=raw_source)
     if figure is None:
         chart_html = "<div class='нет-данных'>Нет данных по давлению для этой скважины.</div>"
     else:

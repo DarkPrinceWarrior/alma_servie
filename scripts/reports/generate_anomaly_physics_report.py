@@ -85,6 +85,7 @@ COLOR_PEAK_STOP_ZONE = "rgba(100, 116, 139, 0.28)"
 COLOR_PEAK_STOP_TEXT = "#475569"
 COLOR_PEAK_OTHER_ZONE = "rgba(249, 115, 22, 0.28)"
 COLOR_PEAK_OTHER_TEXT = "#c2410c"
+COLOR_CLEANED = "#059669"
 
 STOP_FREQUENCY_THRESHOLD_HZ = 1.0
 STOP_MIN_DURATION_MINUTES = 30.0
@@ -699,6 +700,26 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
         ),
         row=1, col=1,
     )
+    # Давление после очистки остановок (как видит банк/энкодер притока): зоны убраны,
+    # линия соединена через вырез. Только для притока — банк чистит остановки только там.
+    if row.class_key == "pritok" and influence_zones:
+        series_ts = pd.to_datetime(series["timestamp"]).to_numpy()
+        inside = np.zeros(len(series_ts), dtype=bool)
+        for zone in influence_zones:
+            inside |= (series_ts >= np.datetime64(zone["start"])) & (series_ts <= np.datetime64(zone["end"]))
+        raw_p = series[pressure_col].to_numpy(dtype=float)
+        cleaned_y = [
+            None if (inside[i] or not np.isfinite(raw_p[i])) else round(float(raw_p[i]), 2)
+            for i in range(len(series_ts))
+        ]
+        fig.add_trace(
+            go.Scatter(
+                x=pressure[0], y=cleaned_y, mode="lines", name="Давление после очистки остановок",
+                line={"color": COLOR_CLEANED, "width": 1.5, "dash": "dash"}, connectgaps=True,
+                hovertemplate="%{x|%d.%m.%Y %H:%M}<br>После очистки: %{y:.2f} кгс/см²<extra></extra>",
+            ),
+            row=1, col=1,
+        )
     if frequency is not None:
         fig.add_trace(
             go.Scatter(
