@@ -225,6 +225,25 @@ def _is_paano_production_detector(detector_key: str) -> bool:
     return detector_key in PAANO_PRODUCTION_DETECTORS
 
 
+def _global_pressure_branch_env() -> bool:
+    """Blind/single-well global path: fuse the pritok pressure-trend branch into
+    the score before the onset threshold (ALMA_GLOBAL_PRESSURE_BRANCH=1)."""
+    return os.getenv("ALMA_GLOBAL_PRESSURE_BRANCH", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _global_pressure_branch_weight_env() -> float:
+    try:
+        return float(os.getenv("ALMA_GLOBAL_PRESSURE_WEIGHT", "0.0025"))
+    except ValueError:
+        return 0.0025
+
+
+def _global_domain_gate_env() -> bool:
+    """Blind/single-well global path: let the domain decision layer actually
+    suppress 'reject' starts (ALMA_GLOBAL_DOMAIN_GATE=1), not just annotate."""
+    return os.getenv("ALMA_GLOBAL_DOMAIN_GATE", "0").strip().lower() in ("1", "true", "yes")
+
+
 @dataclass
 class PreparedDetectorRun:
     prepared: PreparedWellData
@@ -2391,6 +2410,8 @@ def run_single_well(
             device,
             verbose=True,
             population_reference=population_reference,
+            pressure_branch=_global_pressure_branch_env(),
+            anomaly_key=spec.anomaly_key,
         )
     else:
         from alma_service.shared_encoder import load_shared_encoder_state
@@ -2419,6 +2440,9 @@ def run_single_well(
 
     cfg_payload = load_json(config_path(spec, detector_key))
     cfg = {**_default_onset_config(spec.anomaly_key, detector_key), **(cfg_payload.get("config", cfg_payload) if cfg_payload else {})}
+    if detector_key == "paano_global" and _global_pressure_branch_env() and spec.anomaly_key == "pritok":
+        # Вес физ-ветки давления для blind-пути global (A/B/C-сравнение).
+        cfg = {**cfg, "pressure_trend_weight": _global_pressure_branch_weight_env()}
     precursor_model = load_precursor_model(precursor_path(spec, detector_key))
 
     if save_dir is not None:
@@ -2443,6 +2467,13 @@ def run_single_well(
             merge_window_hours=_incident_merge_window_hours(cfg),
         )
         pred_df = incident_result.starts
+        if detector_key == "paano_global" and _global_domain_gate_env() and spec.anomaly_key == "pritok":
+            # V3: доменный слой реально снимает 'reject'-старты в blind-пути (а не только аннотирует).
+            from alma_service.domain_decision_layer import attach_domain_decisions_to_starts
+            from alma_service.prediction_postprocess import gate_starts_by_domain
+
+            pred_df = attach_domain_decisions_to_starts(pred_df, {well_id: run}, anomaly_key=spec.anomaly_key)
+            pred_df = gate_starts_by_domain(pred_df)
         incident_df = incident_result.incidents
         out_dir = Path(save_dir)
         out_dir.mkdir(parents=True, exist_ok=True)

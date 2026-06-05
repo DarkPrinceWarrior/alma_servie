@@ -487,6 +487,8 @@ def build_global_single_runs(
     *,
     verbose: bool,
     population_reference: np.ndarray | None = None,
+    pressure_branch: bool = False,
+    anomaly_key: str | None = None,
 ) -> dict[str, Any]:
     from alma_service.generic_detection import PreparedDetectorRun
 
@@ -565,6 +567,8 @@ def build_global_single_runs(
                 "input_contract": _compose_input_contract(raw_contract, memory_bank_source),
             },
         )
+        if pressure_branch and anomaly_key == "pritok":
+            score_output = _fuse_pressure_trend_into_output(prepared, score_output)
         detector_runs[well_id] = PreparedDetectorRun(
             prepared=prepared,
             score_output=score_output,
