@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from dataclasses import dataclass, field
@@ -86,6 +87,8 @@ COLOR_PEAK_STOP_TEXT = "#475569"
 COLOR_PEAK_OTHER_ZONE = "rgba(249, 115, 22, 0.28)"
 COLOR_PEAK_OTHER_TEXT = "#c2410c"
 COLOR_CLEANED = "#059669"
+COLOR_PRITOK_PREV_ZONE = "rgba(139, 92, 246, 0.16)"
+COLOR_PRITOK_PREV_TEXT = "#6d28d9"
 
 STOP_FREQUENCY_THRESHOLD_HZ = 1.0
 STOP_MIN_DURATION_MINUTES = 30.0
@@ -263,6 +266,7 @@ class WellRow:
     anomaly_start: pd.Timestamp | None = None
     anomaly_end: pd.Timestamp | None = None
     series: pd.DataFrame | None = None
+    extra_intervals: list[dict[str, Any]] = field(default_factory=list)
 
 
 def normalize_id(value: object) -> str:
@@ -346,6 +350,26 @@ def load_anomaly_cases(rows: dict[int, WellRow]) -> None:
             row.anomaly_end = pd.Timestamp(interval["end_date"])
             series = dataset[dataset["well_id"] == row.case_id].sort_values("timestamp").reset_index(drop=True)
             row.series = series if not series.empty else None
+
+
+def attach_extra_intervals(rows: dict[int, WellRow]) -> None:
+    """Подтянуть extra_intervals из alma_summary_overrides.json — дополнительные
+    интервалы аномалий другого класса на той же скважине (например приток в
+    префиксе соляной скважины 3245(2)), зафиксированные, но не встроенные в
+    конвейер. Рисуются отдельной зоной «предыдущая аномалия»."""
+    path = PROJECT_ROOT / "configs" / "alma_summary_overrides.json"
+    if not path.exists():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return
+    if not payload.get("enabled", True):
+        return
+    for item in payload.get("extra_intervals", []):
+        summary_row = item.get("summary_row")
+        if summary_row in rows:
+            rows[summary_row].extra_intervals.append(dict(item))
 
 
 def load_norm_cases(rows: dict[int, WellRow]) -> None:
@@ -813,6 +837,42 @@ def build_well_figure(row: WellRow) -> dict[str, Any] | None:
                 "x": row.anomaly_start.strftime("%Y-%m-%d %H:%M"), "y": 1.04, "xref": "x", "yref": "paper",
                 "text": "Начало аномалии (разметка эксперта)", "showarrow": False,
                 "font": {"size": 11, "color": COLOR_ANOMALY_LINE}, "xanchor": "left",
+            }
+        )
+
+    # Фиолетовая зона «предыдущая аномалия» — extra_intervals из alma_summary_overrides.json
+    # (например приток в префиксе соляной скважины 3245(2): 17.09→04.10 до начала соли).
+    for extra in row.extra_intervals:
+        try:
+            ex_start = pd.Timestamp(extra["start"])
+            ex_end = pd.Timestamp(extra["end"])
+        except (KeyError, ValueError):
+            continue
+        ex_x0 = max(ex_start, first_ts)
+        ex_x1 = min(ex_end, last_ts)
+        if ex_x1 <= ex_x0:
+            continue
+        ex_label = str(extra.get("anomaly_type", "аномалия"))
+        shapes.append(
+            {
+                "type": "rect", "xref": "x", "yref": "paper", "layer": "below",
+                "x0": ex_x0.strftime("%Y-%m-%d %H:%M"), "x1": ex_x1.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "fillcolor": COLOR_PRITOK_PREV_ZONE,
+                "line": {"color": COLOR_PRITOK_PREV_TEXT, "width": 1, "dash": "dot"},
+            }
+        )
+        shapes.append(
+            {
+                "type": "line", "xref": "x", "yref": "paper",
+                "x0": ex_x0.strftime("%Y-%m-%d %H:%M"), "x1": ex_x0.strftime("%Y-%m-%d %H:%M"),
+                "y0": 0, "y1": 1, "line": {"color": COLOR_PRITOK_PREV_TEXT, "width": 1.4, "dash": "dash"},
+            }
+        )
+        annotations.append(
+            {
+                "x": ex_x0.strftime("%Y-%m-%d %H:%M"), "y": 0.96, "xref": "x", "yref": "paper",
+                "text": f"{ex_label} (предыдущая аномалия) {ex_start.strftime('%d.%m')}–{ex_end.strftime('%d.%m')}",
+                "showarrow": False, "font": {"size": 10, "color": COLOR_PRITOK_PREV_TEXT}, "xanchor": "left",
             }
         )
 
@@ -1284,6 +1344,7 @@ def render_legend() -> str:
         f"<div class='элемент'><span class='образец' style='border-top:2px dotted {COLOR_FREQ_JUMP_LINE};height:0;margin-top:8px'></span> Скачок выходной частоты</div>"
         f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_STOP_ZONE};border:1px dotted {COLOR_PEAK_STOP_TEXT}'></span> Остановка насоса и её влияние на давление (приток): от падения частоты до возврата давления к базе</div>"
         f"<div class='элемент'><span class='образец' style='background:{COLOR_PEAK_OTHER_ZONE};border:1px dotted {COLOR_PEAK_OTHER_TEXT}'></span> Пик давления НЕ от остановки (приток, причина неизвестна)</div>"
+        f"<div class='элемент'><span class='образец' style='background:{COLOR_PRITOK_PREV_ZONE};border:1px dotted {COLOR_PRITOK_PREV_TEXT}'></span> Предыдущая аномалия другого класса в префиксе (например приток до начала соли — скв. 3245(2))</div>"
         "</div>"
         "<div class='правило-чтения'>"
         "<p><strong>Главное правило чтения графиков:</strong> рост давления — признак аномалии только тогда, когда насос работает, "
@@ -1771,6 +1832,7 @@ def main() -> None:
 
     load_anomaly_cases(rows)
     load_norm_cases(rows)
+    attach_extra_intervals(rows)
     load_excluded_1123l(rows)
 
     n_series = sum(1 for row in rows.values() if row.series is not None)
