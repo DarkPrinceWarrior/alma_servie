@@ -99,6 +99,35 @@ def filter_actionable_starts(predictions: pd.DataFrame) -> pd.DataFrame:
     return predictions[predictions["actionable_alert"].fillna(True).astype(bool)].copy()
 
 
+def gate_starts_by_domain(
+    predictions: pd.DataFrame,
+    *,
+    drop_uncertain: bool = False,
+) -> pd.DataFrame:
+    """Turn domain-decision verdicts into an actual gate on actionable starts.
+
+    Without this, attach_domain_decisions_to_starts only annotates; the eval
+    keeps every actionable start. Here a 'reject' verdict suppresses the start
+    (actionable_alert=False, suppression_reason='domain_reject'); with
+    drop_uncertain, 'uncertain' is suppressed too. No-op if the 'domain_action'
+    column is absent (decision layer not attached).
+    """
+    if predictions.empty or "domain_action" not in predictions.columns:
+        return predictions
+    result = predictions.copy()
+    action = result["domain_action"].astype(str).str.strip().str.lower()
+    suppress = action.eq("reject")
+    if drop_uncertain:
+        suppress = suppress | action.eq("uncertain")
+    if "actionable_alert" not in result.columns:
+        result["actionable_alert"] = True
+    if "suppression_reason" not in result.columns:
+        result["suppression_reason"] = ""
+    result.loc[suppress, "actionable_alert"] = False
+    result.loc[suppress, "suppression_reason"] = "domain_" + action[suppress]
+    return result
+
+
 def build_incidents(
     predictions: pd.DataFrame,
     *,

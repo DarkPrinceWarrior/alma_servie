@@ -61,10 +61,15 @@ from alma_service.generic_detectors import (
 from alma_service.global_normality import (
     _apply_norm_pool_hygiene,
     _apply_stop_influence_cleaning,
+    _fuse_pressure_trend_into_output,
     load_global_normality_settings,
 )
 from alma_service.paano_defaults import PATCH_SIZES
-from alma_service.prediction_postprocess import build_incidents, filter_actionable_starts
+from alma_service.prediction_postprocess import (
+    build_incidents,
+    filter_actionable_starts,
+    gate_starts_by_domain,
+)
 from alma_service.shared_encoder import (
     collect_shared_train_pool,
     select_shared_columns,
@@ -519,12 +524,35 @@ def _feature_schema_preview(
     print(f"Wrote {path}")
 
 
+def _global_pressure_branch_enabled() -> bool:
+    """V2/V3: fuse the shared-style pritok pressure-trend branch into the global
+    score BEFORE the onset threshold (ALMA_GLOBAL_PRESSURE_BRANCH=1)."""
+    return os.getenv("ALMA_GLOBAL_PRESSURE_BRANCH", "0").strip().lower() in ("1", "true", "yes")
+
+
+def _global_pressure_branch_weight() -> float:
+    """pressure_trend_weight applied in _score_for_config. Default = shared prod
+    value (0.0025). Sweep via ALMA_GLOBAL_PRESSURE_WEIGHT for scale sensitivity."""
+    try:
+        return float(os.getenv("ALMA_GLOBAL_PRESSURE_WEIGHT", "0.0025"))
+    except ValueError:
+        return 0.0025
+
+
+def _global_domain_gate_enabled() -> bool:
+    """V3: let the domain decision layer actually suppress 'reject' starts
+    AFTER the threshold (ALMA_GLOBAL_DOMAIN_GATE=1), not just annotate."""
+    return os.getenv("ALMA_GLOBAL_DOMAIN_GATE", "0").strip().lower() in ("1", "true", "yes")
+
+
 def _build_global_core_runs(
     prepared_runs: dict[str, Any],
     shared_state: Any,
     device: Any,
     *,
     verbose: bool,
+    pressure_branch: bool = False,
+    anomaly_key: str | None = None,
 ) -> dict[str, PreparedDetectorRun]:
     detector_runs: dict[str, PreparedDetectorRun] = {}
     input_padding_mode = _global_paano_input_padding_mode()
@@ -557,6 +585,8 @@ def _build_global_core_runs(
                 "physical_branches": False,
             },
         )
+        if pressure_branch and anomaly_key == "pritok":
+            score_output = _fuse_pressure_trend_into_output(prepared, score_output)
         detector_runs[well_id] = PreparedDetectorRun(
             prepared=prepared,
             score_output=score_output,
@@ -575,11 +605,14 @@ def _evaluate_global_runs(
     verbose: bool,
 ) -> dict[str, Any]:
     spec = get_detection_spec(anomaly_key)
+    pressure_branch = _global_pressure_branch_enabled()
     detector_runs = _build_global_core_runs(
         prepared_runs,
         shared_state,
         device,
         verbose=False,
+        pressure_branch=pressure_branch,
+        anomaly_key=anomaly_key,
     )
     train_runs = {
         well_id: run
@@ -608,6 +641,12 @@ def _evaluate_global_runs(
         )
         tuning_summary = {"retune": False}
 
+    if pressure_branch and anomaly_key == "pritok":
+        # Вес физической ветки давления (как у shared). Порог калибруется от
+        # reference-части фьюзенного скора, поэтому абсолютный масштаб скора global
+        # порог не ломает; вес регулирует относительный вклад давления.
+        cfg = {**cfg, "pressure_trend_weight": _global_pressure_branch_weight()}
+
     score_rows, predicted, early_predicted, detail_map, trend_predicted = _build_score_rows(
         "paano_shared",
         detector_runs,
@@ -634,6 +673,10 @@ def _evaluate_global_runs(
         detector_runs,
         anomaly_key=anomaly_key,
     )
+    if _global_domain_gate_enabled():
+        # V3: вердикт 'reject' доменного слоя реально снимает старт (а не только
+        # аннотирует) — actionable_alert=False, дальше его отсекает filter_actionable_starts.
+        pred_df = gate_starts_by_domain(pred_df)
     incident_df = attach_domain_decisions_to_incidents(
         incident_result.incidents,
         pred_df,
@@ -649,6 +692,15 @@ def _evaluate_global_runs(
     return {
         "config": cfg,
         "tuning_summary": tuning_summary,
+        "physics_variant": {
+            "pressure_branch": bool(pressure_branch),
+            "pressure_trend_weight": (
+                _global_pressure_branch_weight()
+                if (pressure_branch and anomaly_key == "pritok")
+                else 0.0
+            ),
+            "domain_gate": bool(_global_domain_gate_enabled()),
+        },
         "splits": {
             split: _compact_metrics(metrics)
             for split, metrics in split_summaries.items()

@@ -288,6 +288,44 @@ def prepare_global_normality_runtime(
     )
 
 
+def _fuse_pressure_trend_into_output(
+    prepared: Any,
+    base_output: DetectorScoreOutput,
+) -> DetectorScoreOutput:
+    """Attach the pritok pressure-trend physical branch to a global score output.
+
+    Mirrors the shared-detector path (generic_detection._build_local_runs): the
+    causal pressure-trend score is persisted as components so the onset layer can
+    weight it via cfg['pressure_trend_weight']. ``primary`` stays equal to the
+    neural score (the actual fusion happens in _score_for_config), and the
+    'paano_score' component is added so _score_for_config combines it with the
+    weighted pressure component. Encoder-agnostic: the pressure branch is computed
+    from raw pressure + reference_mask, so it ports onto the global encoder as-is.
+    """
+    from alma_service.pressure_trend import (
+        build_pressure_trend_branch,
+        fuse_model_with_pressure_trend,
+    )
+
+    primary = np.asarray(base_output.primary, dtype=np.float32)
+    pressure_output = build_pressure_trend_branch(prepared)
+    fused, fusion_components, fusion_detail = fuse_model_with_pressure_trend(
+        model_score=primary,
+        pressure_output=pressure_output,
+        reference_mask=np.asarray(prepared.reference_mask, dtype=bool),
+    )
+    return DetectorScoreOutput(
+        primary=np.asarray(fused, dtype=np.float32),
+        components={**base_output.components, **fusion_components},
+        detail={
+            **base_output.detail,
+            **fusion_detail,
+            "physical_branches": True,
+            "physical_branch": "pressure_trend",
+        },
+    )
+
+
 def build_global_core_runs(
     prepared_runs: dict[str, Any],
     shared_state: Any,
@@ -296,6 +334,8 @@ def build_global_core_runs(
     verbose: bool,
     labelled_wells: set[str] | None = None,
     population_pool: dict[str, Any] | None = None,
+    pressure_branch: bool = False,
+    anomaly_key: str | None = None,
 ) -> dict[str, Any]:
     from alma_service.generic_detection import PreparedDetectorRun
 
@@ -431,6 +471,8 @@ def build_global_core_runs(
                 "input_contract": _compose_input_contract(raw_contract, memory_bank_source),
             },
         )
+        if pressure_branch and anomaly_key == "pritok":
+            score_output = _fuse_pressure_trend_into_output(prepared, score_output)
         detector_runs[well_id] = PreparedDetectorRun(
             prepared=prepared,
             score_output=score_output,
