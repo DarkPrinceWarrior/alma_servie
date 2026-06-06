@@ -2447,9 +2447,25 @@ def run_single_well(
                 f"{well_id}: {schema_audit}"
             )
         prepared = prepared_global
-        shared_state = load_shared_encoder_state(GLOBAL_ENCODER_KEY, device=device, verbose=True)
+        from alma_service.shared_encoder import shared_encoder_path
+
+        # Per-class боевые артефакты: если для целевого класса есть СВОЯ пара
+        # (энкодер + банк) — берём её, иначе fallback на общий энкодер/банк. Так один
+        # боевой каталог models/ обслуживает разные классы без ручного переключения
+        # файлов: приток-only пара для притока, негермет-фокусная для негермета.
+        # Пара берётся целиком (энкодер+банк) — каналы энкодера и банка должны совпадать.
+        default_enc = shared_encoder_path(GLOBAL_ENCODER_KEY)
+        per_class_enc = default_enc.with_name(f"{default_enc.stem}.{spec.anomaly_key}{default_enc.suffix}")
+        default_bank = MODELS_DIR / f"population_memory_bank_{detector_key}_{GLOBAL_ENCODER_KEY}.npz"
+        per_class_bank = default_bank.with_name(f"{default_bank.stem}.{spec.anomaly_key}{default_bank.suffix}")
+        use_per_class = bool(use_population_memory_bank) and per_class_enc.exists() and per_class_bank.exists()
+        if use_per_class:
+            print(f"Per-class боевая пара для {spec.anomaly_key}: {per_class_enc.name} + {per_class_bank.name}")
+        shared_state = load_shared_encoder_state(
+            GLOBAL_ENCODER_KEY, per_class_enc if use_per_class else None, device=device, verbose=True
+        )
         if use_population_memory_bank:
-            bank_path = MODELS_DIR / f"population_memory_bank_{detector_key}_{GLOBAL_ENCODER_KEY}.npz"
+            bank_path = per_class_bank if use_per_class else default_bank
             if not bank_path.exists():
                 raise FileNotFoundError(
                     f"Population memory bank not found: {bank_path}. "
