@@ -263,6 +263,18 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     default_thr = ANOMALY_PRECURSOR_DEFAULT_THRESHOLD.get(anomaly_key)
     if default_thr is not None:
         cfg["early_warning_logreg_threshold"] = float(default_thr)
+    # Нижняя граница основного порога онсета негермета в blind-пути. Blind-скор
+    # калибруется на коротком reference-окне и «протекает» из-за патч-окна, поэтому
+    # онсет ловит ранний склон, а не сам скачок. Флор на уровне precursor переносит
+    # детект к скачку. По умолчанию выкл. (env пуст) → бенчмарк/обучение/production
+    # не затрагиваются. Для blind-отчёта задаётся ALMA_NEGERMET_SCORE_FLOOR.
+    if anomaly_key == "negermet":
+        floor_env = os.getenv("ALMA_NEGERMET_SCORE_FLOOR", "").strip()
+        if floor_env:
+            try:
+                cfg["score_threshold_floor"] = float(floor_env)
+            except ValueError:
+                pass
     # fusion-критерий притока (наклон давления + скор нейросети) — дефолт для класса
     # приток после проверки 03.06.2026 (5/5 на тестовых, 0 ложных на 39 контрольных).
     # Отключается ALMA_PRESSURE_TREND_FUSION=0. Для негермет/соль не применяется.
@@ -682,6 +694,17 @@ def _detect_starts_for_run(
         min_run_points=int(cfg["min_run_points"]),
         ema_alpha=float(cfg["ema_alpha"]),
     )
+    score_threshold_floor = float(cfg.get("score_threshold_floor", 0.0) or 0.0)
+    if score_threshold_floor > 0.0 and thresholds.score_threshold < score_threshold_floor:
+        thresholds = CausalThresholds(
+            score_threshold=float(score_threshold_floor),
+            ema_z_threshold=thresholds.ema_z_threshold,
+            cusum_threshold=thresholds.cusum_threshold,
+            drift=thresholds.drift,
+            baseline_median=thresholds.baseline_median,
+            baseline_mad=thresholds.baseline_mad,
+            quantile=thresholds.quantile,
+        )
     if score_unavailable_reason is not None:
         return score, thresholds, [], []
     starts = detect_causal_onsets_masked(
