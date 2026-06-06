@@ -263,18 +263,19 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
     default_thr = ANOMALY_PRECURSOR_DEFAULT_THRESHOLD.get(anomaly_key)
     if default_thr is not None:
         cfg["early_warning_logreg_threshold"] = float(default_thr)
-    # Нижняя граница основного порога онсета негермета в blind-пути. Blind-скор
-    # калибруется на коротком reference-окне и «протекает» из-за патч-окна, поэтому
-    # онсет ловит ранний склон, а не сам скачок. Флор на уровне precursor переносит
-    # детект к скачку. По умолчанию выкл. (env пуст) → бенчмарк/обучение/production
-    # не затрагиваются. Для blind-отчёта задаётся ALMA_NEGERMET_SCORE_FLOOR.
-    if anomaly_key == "negermet":
-        floor_env = os.getenv("ALMA_NEGERMET_SCORE_FLOOR", "").strip()
-        if floor_env:
-            try:
-                cfg["score_threshold_floor"] = float(floor_env)
-            except ValueError:
-                pass
+    # Универсальный детектор СОБЫТИЯ негермета: резкая относительная ступень давления —
+    # дефолт для класса негермет. Метка ставится в момент скачка (у негермета нет
+    # предвестника: авария = само событие). Порог относительный (% от уровня скважины) →
+    # самонормируется, без подбора порогов под скважину. Отключается/тюнится через env.
+    if anomaly_key == "negermet" and os.getenv("ALMA_NEGERMET_PRESSURE_STEP", "1").strip().lower() in ("1", "true", "yes"):
+        cfg["pressure_step_fusion"] = {
+            "enabled": True,
+            "mode": "replace",
+            "rise_pct": float(os.getenv("ALMA_NEGERMET_STEP_RISE_PCT", "12.0")),
+            "window_hours": float(os.getenv("ALMA_NEGERMET_STEP_WINDOW_HOURS", "3.0")),
+            "min_run": int(os.getenv("ALMA_NEGERMET_STEP_MIN_RUN", "2")),
+            "resample": os.getenv("ALMA_NEGERMET_STEP_RESAMPLE", "15min"),
+        }
     # fusion-критерий притока (наклон давления + скор нейросети) — дефолт для класса
     # приток после проверки 03.06.2026 (5/5 на тестовых, 0 ложных на 39 контрольных).
     # Отключается ALMA_PRESSURE_TREND_FUSION=0. Для негермет/соль не применяется.
@@ -694,17 +695,6 @@ def _detect_starts_for_run(
         min_run_points=int(cfg["min_run_points"]),
         ema_alpha=float(cfg["ema_alpha"]),
     )
-    score_threshold_floor = float(cfg.get("score_threshold_floor", 0.0) or 0.0)
-    if score_threshold_floor > 0.0 and thresholds.score_threshold < score_threshold_floor:
-        thresholds = CausalThresholds(
-            score_threshold=float(score_threshold_floor),
-            ema_z_threshold=thresholds.ema_z_threshold,
-            cusum_threshold=thresholds.cusum_threshold,
-            drift=thresholds.drift,
-            baseline_median=thresholds.baseline_median,
-            baseline_mad=thresholds.baseline_mad,
-            quantile=thresholds.quantile,
-        )
     if score_unavailable_reason is not None:
         return score, thresholds, [], []
     starts = detect_causal_onsets_masked(
@@ -723,8 +713,14 @@ def _detect_starts_for_run(
     )
     starts, trend_onsets = _augment_with_pressure_trend_fusion(starts, run, score, cfg)
     starts = _gate_pre_trend_starts(starts, trend_onsets, cfg)
+    starts = _augment_with_pressure_step_fusion(starts, run, cfg)
     if trend_sink is not None:
         trend_sink["onsets"] = list(trend_onsets)
+    step_cfg = cfg.get("pressure_step_fusion")
+    if step_cfg and bool(step_cfg.get("enabled", False)):
+        # Негермет: показываем только событие-ступень, без early_warning — у аварии нет
+        # предвестника, ранние «watch»-метки эксперту необъяснимы.
+        return score, thresholds, starts, []
     early_starts: list[pd.Timestamp] = []
     early_threshold_logreg = float(cfg.get("early_warning_logreg_threshold", 0.0))
     if precursor_model is not None and early_threshold_logreg > 0.0:
@@ -816,6 +812,39 @@ def _augment_with_pressure_trend_fusion(
             existing_ns.add(t_ns)
     merged.sort()
     return merged, accepted
+
+
+def _augment_with_pressure_step_fusion(
+    starts: list[pd.Timestamp],
+    run: PreparedDetectorRun,
+    cfg: dict[str, Any],
+) -> list[pd.Timestamp]:
+    # Универсальный детектор СОБЫТИЯ негермета: резкая относительная ступень давления.
+    # По умолчанию включён только для класса негермет (см. _default_onset_config) — приток
+    # и соль не затрагиваются. mode="replace": метка ставится в момент скачка, а текущие
+    # PaAno-старты (стоящие заранее из-за патч-окна и требующие подбора порогов под
+    # скважину) заменяются. Если ступеней не найдено — fallback на исходные старты, чтобы
+    # не потерять детект. Подробности: docs/физика_аномалий…, раздел про негермет.
+    step_cfg = cfg.get("pressure_step_fusion")
+    if not step_cfg or not bool(step_cfg.get("enabled", False)):
+        return starts
+    from alma_service.pressure_step_onset import PressureStepConfig, detect_step_from_prepared
+
+    config = PressureStepConfig.from_dict(step_cfg)
+    step_onsets = detect_step_from_prepared(run.prepared, config)
+    if not step_onsets:
+        return starts
+    if str(step_cfg.get("mode", "replace")) == "replace":
+        return sorted(pd.Timestamp(t) for t in step_onsets)
+    merged = list(starts)
+    existing_ns = {pd.Timestamp(t).value for t in merged}
+    for onset in step_onsets:
+        t_ns = pd.Timestamp(onset).value
+        if t_ns not in existing_ns:
+            merged.append(pd.Timestamp(onset))
+            existing_ns.add(t_ns)
+    merged.sort()
+    return merged
 
 
 def _gate_early_warning(
