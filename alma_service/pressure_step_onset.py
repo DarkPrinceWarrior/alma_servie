@@ -18,11 +18,12 @@ from alma_service.stop_influence import detect_stop_influence_zones, find_channe
 # именно резкая ступень давления. Зоны влияния остановок исключаются (рост давления при
 # остановке/перезапуске — гидростатика, не авария).
 
-DEFAULT_RISE_PCT = 12.0          # относительный рост давления для срабатывания
-DEFAULT_WINDOW_HOURS = 3.0       # причинное окно «резкости» (ступень за часы)
+DEFAULT_RISE_PCT = 10.0          # относительный рост давления для срабатывания
+DEFAULT_WINDOW_HOURS = 6.0       # причинное окно (негермет = рост за ЧАСЫ: резкий 524 и медленный 3509г)
 DEFAULT_MIN_RUN = 2              # подтверждающих подряд точек (анти-спайк)
 DEFAULT_RESAMPLE = "15min"       # сетка медианы (баланс точность/шум)
-DEFAULT_EXCLUDE_STOPS = True
+DEFAULT_EXCLUDE_STOPS = True     # полные стопы (<1 Гц) — гидростатика, не авария
+DEFAULT_ANCHOR_EPS_PCT = 3.0     # подножие подъёма: точка, где давление ещё в пределах +3% от базы
 
 
 @dataclass(frozen=True)
@@ -32,6 +33,7 @@ class PressureStepConfig:
     min_run: int = DEFAULT_MIN_RUN
     resample: str = DEFAULT_RESAMPLE
     exclude_stops: bool = DEFAULT_EXCLUDE_STOPS
+    anchor_eps_pct: float = DEFAULT_ANCHOR_EPS_PCT
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any] | None) -> "PressureStepConfig":
@@ -42,7 +44,20 @@ class PressureStepConfig:
             min_run=int(payload.get("min_run", DEFAULT_MIN_RUN)),
             resample=str(payload.get("resample", DEFAULT_RESAMPLE)),
             exclude_stops=bool(payload.get("exclude_stops", DEFAULT_EXCLUDE_STOPS)),
+            anchor_eps_pct=float(payload.get("anchor_eps_pct", DEFAULT_ANCHOR_EPS_PCT)),
         )
+
+
+def _anchor_step_foot(idx: pd.DatetimeIndex, vals: np.ndarray, run_start: pd.Timestamp, base: float, anchor_eps_pct: float) -> pd.Timestamp:
+    # Подножие подъёма: от точки превышения порога идём назад по давлению, пока оно выше
+    # базы +eps; метка — последняя точка у базы (фактическое начало роста). Так для медленного
+    # негермета (3509г) отметка садится на старт подъёма, а не на момент накопления порога.
+    thr = base * (1.0 + anchor_eps_pct / 100.0)
+    pos = max(0, int(idx.searchsorted(run_start, side="right")) - 1)
+    k = pos
+    while k > 0 and vals[k] > thr:
+        k -= 1
+    return pd.Timestamp(idx[k])
 
 
 def detect_pressure_step_onsets(
@@ -114,7 +129,7 @@ def detect_pressure_step_onsets(
                 run_start = current
             run += 1
             if run >= config.min_run and armed:
-                onsets.append(pd.Timestamp(run_start))
+                onsets.append(_anchor_step_foot(idx, vals, run_start, base, config.anchor_eps_pct))
                 armed = False
         else:
             run = 0

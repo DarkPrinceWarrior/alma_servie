@@ -271,8 +271,8 @@ def _default_onset_config(anomaly_key: str, detector_key: str) -> dict[str, Any]
         cfg["pressure_step_fusion"] = {
             "enabled": True,
             "mode": "replace",
-            "rise_pct": float(os.getenv("ALMA_NEGERMET_STEP_RISE_PCT", "12.0")),
-            "window_hours": float(os.getenv("ALMA_NEGERMET_STEP_WINDOW_HOURS", "3.0")),
+            "rise_pct": float(os.getenv("ALMA_NEGERMET_STEP_RISE_PCT", "10.0")),
+            "window_hours": float(os.getenv("ALMA_NEGERMET_STEP_WINDOW_HOURS", "6.0")),
             "min_run": int(os.getenv("ALMA_NEGERMET_STEP_MIN_RUN", "2")),
             "resample": os.getenv("ALMA_NEGERMET_STEP_RESAMPLE", "15min"),
         }
@@ -832,10 +832,12 @@ def _augment_with_pressure_step_fusion(
 
     config = PressureStepConfig.from_dict(step_cfg)
     step_onsets = detect_step_from_prepared(run.prepared, config)
+    if str(step_cfg.get("mode", "replace")) == "replace":
+        # нет ступени давления = нет негермета. PaAno-fallback НЕ используем: его ранние
+        # метки (патч-окно течёт вперёд) — артефакт, эксперту необъяснимый.
+        return sorted(pd.Timestamp(t) for t in step_onsets)
     if not step_onsets:
         return starts
-    if str(step_cfg.get("mode", "replace")) == "replace":
-        return sorted(pd.Timestamp(t) for t in step_onsets)
     merged = list(starts)
     existing_ns = {pd.Timestamp(t).value for t in merged}
     for onset in step_onsets:
