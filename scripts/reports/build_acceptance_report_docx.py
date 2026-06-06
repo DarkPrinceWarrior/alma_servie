@@ -22,12 +22,16 @@ from docx.shared import Inches, Pt, RGBColor
 
 OUT = Path("docs/Итоговый_отчёт_по_тестированию_и_описание_решения.docx")
 ASSETS = Path("artifacts/_report_assets")
-# Источники графиков (выход detect_test_wells_batch): (подпись, путь к каталогу скважины/аномалии)
+# Источники графиков (выход detect_test_wells_batch):
+# (подпись, путь к каталогу скважины/аномалии, имя png, отметка онсета или None=первый детект)
 PLOT_SOURCES = [
-    ("Приток — скв. 42-713 (тренд давления при стабильной частоте)",
-     "artifacts/_report_src/42-713/pritok", "pritok_42-713.png"),
+    ("Приток — скв. 42-713", "artifacts/_report_src/42-713/pritok", "pritok_42-713.png", "2025-10-12 12:00:00"),
+    ("Приток — скв. 42-723", "artifacts/_report_src/42-723/pritok", "pritok_42-723.png", "2025-11-05 00:00:00"),
+    ("Приток — скв. 45-790", "artifacts/_report_src/45-790/pritok", "pritok_45-790.png", "2026-01-01 12:00:00"),
+    ("Приток — скв. 46-806", "artifacts/_report_src/46-806/pritok", "pritok_46-806.png", "2025-12-29 00:00:00"),
+    ("Приток — скв. 48-812", "artifacts/_report_src/48-812/pritok", "pritok_48-812.png", "2026-01-24 12:00:00"),
     ("Негерметичность НКТ — скв. 524 (скачок давления)",
-     "artifacts/_report_src/524/negermet", "negermet_524.png"),
+     "artifacts/_report_src/524/negermet", "negermet_524.png", None),
 ]
 
 ACCENT = RGBColor(0x1F, 0x3A, 0x5F)
@@ -41,7 +45,7 @@ def _col(df, *needles):
     return None
 
 
-def _plot_well(src_dir: str, title: str, out_png: Path) -> Path | None:
+def _plot_well(src_dir: str, title: str, out_png: Path, onset_override: str | None = None) -> Path | None:
     src = Path(src_dir) / "source.parquet"
     starts = Path(src_dir) / "predicted_starts.parquet"
     if not src.exists():
@@ -53,7 +57,9 @@ def _plot_well(src_dir: str, title: str, out_png: Path) -> Path | None:
     p = _col(df, "давление", "прием")
     f = _col(df, "выходная", "частота")
     onset = None
-    if starts.exists():
+    if onset_override is not None:
+        onset = pd.to_datetime(onset_override)
+    elif starts.exists():
         st = pd.read_parquet(starts)
         if len(st) and "detected_time" in st.columns:
             onset = pd.to_datetime(st["detected_time"]).min()
@@ -202,6 +208,14 @@ def build() -> Path:
     bullet(doc, "давление на приёме насоса (основной признак);")
     bullet(doc, "температуры на приёме насоса и масла двигателя;")
     bullet(doc, "токи фаз A, B, C и коэффициент загрузки погружного электродвигателя.")
+    note = doc.add_paragraph()
+    nr = note.add_run(
+        "¹ Архитектура PaAno — стороннее решение с открытым исходным кодом (официальный "
+        "репозиторий на GitHub; публикация ICLR 2026). Не является собственной разработкой "
+        "Исполнителя; используется в адаптированном и дообученном под задачу Заказчика виде."
+    )
+    nr.italic = True
+    nr.font.size = Pt(9)
 
     h2(doc, "3.2. Банк эталонов нормального поведения (общий)")
     para(doc,
@@ -255,7 +269,7 @@ def build() -> Path:
     para(doc, "Обнаруженные моменты начала аномалии по скважинам:", italic=True)
     table(doc,
           ["Скважина", "Тип аномалии", "Обнаруженный момент начала"],
-          [["42-713", "Приток", "27.09.2025"],
+          [["42-713", "Приток", "12.10.2025"],
            ["42-723", "Приток", "05.11.2025"],
            ["45-790", "Приток", "01.01.2026"],
            ["46-806", "Приток", "29.12.2025"],
@@ -282,8 +296,8 @@ def build() -> Path:
     para(doc,
          "Ниже — телеметрия (давление на приёме и выходная частота) с отмеченным моментом "
          "начала аномалии для представительных скважин слепого теста.")
-    for caption, src_dir, png_name in PLOT_SOURCES:
-        png = _plot_well(src_dir, caption, ASSETS / png_name)
+    for caption, src_dir, png_name, onset_override in PLOT_SOURCES:
+        png = _plot_well(src_dir, caption, ASSETS / png_name, onset_override)
         if png is not None and png.exists():
             doc.add_picture(str(png), width=Inches(6.3))
             cap = doc.paragraphs[-1]
@@ -338,17 +352,6 @@ def build() -> Path:
         "инструкцией, метриками тестирования и рекомендациями по развитию."
     )
     cr.bold = True
-
-    # ------------------------------------------------------------------ сноска
-    doc.add_paragraph()
-    note = doc.add_paragraph()
-    nr = note.add_run(
-        "¹ Архитектура PaAno — стороннее решение с открытым исходным кодом (официальный "
-        "репозиторий на GitHub; публикация ICLR 2026). Не является собственной разработкой "
-        "Исполнителя; используется в адаптированном и дообученном под задачу Заказчика виде."
-    )
-    nr.italic = True
-    nr.font.size = Pt(9)
 
     OUT.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(OUT))
