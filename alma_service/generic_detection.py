@@ -97,6 +97,12 @@ INVALID_SCORE_REASONS = {
 
 
 def _incident_merge_window_hours(cfg: dict[str, Any]) -> float:
+    # Явное переопределение из конфига имеет приоритет: окно группировки инцидентов
+    # для отчёта крутится независимо от cooldown/rearm детекции и НЕ меняет сами
+    # детекции (старты). Если не задано — производная по умолчанию (как было).
+    explicit = cfg.get("incident_merge_window_hours")
+    if explicit is not None:
+        return max(float(explicit), 0.0)
     cooldown_hours = float(cfg.get("cooldown_hours", 0.0))
     rearm_hours = float(cfg.get("rearm_window_minutes", 0.0)) / 60.0
     return max(cooldown_hours * 2.0, rearm_hours * 2.0, 1.0)

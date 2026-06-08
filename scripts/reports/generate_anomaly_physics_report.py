@@ -297,7 +297,7 @@ def load_md_rows(md_text: str) -> dict[int, WellRow]:
     sections = split_md_sections(md_text)
     wells_section = find_section(sections, "Скважины из сводной")
     physics_section = find_section(sections, "Проверка физики по каждой строке сводной")
-    prefix_section = find_section(sections, "Префиксы 39 аномальных скважин")
+    prefix_section = find_section(sections, "Префиксы 38 аномальных скважин")
     if wells_section is None or physics_section is None:
         raise RuntimeError("В md не найдены разделы «Скважины из сводной» / «Проверка физики»")
 
