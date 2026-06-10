@@ -205,7 +205,7 @@ scp -rp salym salym_prepared a100:/root/projects/alma_servie/
 - `rsync` отсутствует — использовать `scp -p`.
 - На серваке отдельный SSH-ключ для GitLab (`/root/.ssh/id_ed25519`, Title `a100-server` в GitLab) — push с сервера работает напрямую.
 - DDP (если PaAno будет тренироваться на нескольких GPU): NCCL на VM135 требует `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
-- Основной репозиторий хранит `paano` как gitlink без `.gitmodules`. На сервере `paano/` восстановлен вручную из `https://github.com/jinnnju/PaAno.git` на commit `0e93e93a857af216642d1685f2ce2d2589b35e2e`, затем поверх перенесены локальные изменения `paano/main.py` и `paano/train.py`. Поэтому на сервере ожидаемый `git status` показывает `m paano`.
+- Основной репозиторий хранит `paano` как gitlink без `.gitmodules`. На сервере `paano/` восстановлен вручную из `https://github.com/jinnnju/PaAno.git` на commit `0e93e93a857af216642d1685f2ce2d2589b35e2e`, затем поверх перенесены локальные изменения **четырёх** файлов: `paano/main.py`, `paano/train.py`, `paano/utils/evaluation.py`, `paano/utils/utils.py` (GPU-kmeans коресет банка, seed=42; guard'ы скоринга). Поэтому на сервере ожидаемый `git status` показывает `m paano`. Сверка с апстримом 2026-06-10: после `0e93e93` в апстриме менялись только `main.py` (раннер TSB-AD), README и картинки — ядро метода (`model.py`, `train.py`, `utils/`) актуально, обновление не требуется.
 
 ## Architecture
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -67,6 +68,22 @@ EPS = 1e-6
 REFERENCE_POLICY_DEFAULT = "default"
 REFERENCE_POLICY_NORMAL_WINDOWS = "normal_windows"
 REFERENCE_POLICIES = {REFERENCE_POLICY_DEFAULT, REFERENCE_POLICY_NORMAL_WINDOWS}
+
+# Стриминг-контракт: ALMA_CAUSAL_GAP_FILL=1 заменяет линейную интерполяцию разрывов
+# (использует будущее значение) на каузальный ffill; ALMA_CAUSAL_MASK_THRESHOLDS=1
+# считает пороги маски нестабильности только по reference-окну, а не по всей серии.
+CAUSAL_GAP_FILL_ENV = "ALMA_CAUSAL_GAP_FILL"
+CAUSAL_MASK_THRESHOLDS_ENV = "ALMA_CAUSAL_MASK_THRESHOLDS"
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "0").strip().lower() in ("1", "true", "yes")
+
+
+def _fill_raw_gaps(matrix: np.ndarray) -> np.ndarray:
+    if _env_flag(CAUSAL_GAP_FILL_ENV):
+        return forward_fill_causal(matrix)
+    return interpolate_linear(matrix)
 
 
 @dataclass
@@ -165,9 +182,14 @@ def _build_instability_mask(
     include_missing_events: bool = True,
     include_flatline_events: bool = True,
     include_start_stop_events: bool = True,
+    stats_end_idx: int | None = None,
 ) -> tuple[np.ndarray, list[str]]:
     if len(base_columns) == 0:
         return np.ones(len(raw_df), dtype=bool), []
+
+    # stats_end_idx ограничивает ОЦЕНКУ порогов (MAD/квантили) первым отрезком серии,
+    # детекция событий всё равно идёт по всей длине.
+    stats_slice = slice(0, int(stats_end_idx)) if stats_end_idx else slice(None)
 
     anchors = _choose_anchor_columns(raw_df, base_columns)
     event_mask = np.zeros(len(raw_df), dtype=bool)
@@ -182,7 +204,7 @@ def _build_instability_mask(
         raw_series = pd.to_numeric(raw_df[column], errors="coerce")
         filled = filled_matrix[:, idx]
         delta = np.diff(filled, prepend=filled[0])
-        abs_delta = np.abs(delta[1:])
+        abs_delta = np.abs(delta[1:][stats_slice])
         delta_mad = _robust_mad(abs_delta)
         if delta_mad > 0.0:
             step_thr = step_sigma * delta_mad
@@ -203,7 +225,8 @@ def _build_instability_mask(
             event_mask |= missing_run >= missing_run_length
 
         if column in (FREQ_COL, POWER_COL, OUTPUT_CURRENT_COL):
-            abs_values = np.abs(filled[np.isfinite(filled)])
+            stats_filled = filled[stats_slice]
+            abs_values = np.abs(stats_filled[np.isfinite(stats_filled)])
             positive = abs_values[abs_values > EPS]
             if len(positive):
                 low_thr = max(float(np.quantile(positive, 0.10)) * 0.2, EPS)
@@ -400,18 +423,19 @@ def prepare_engineered_well(
 
     raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
     raw_matrix = raw_df.to_numpy(dtype=np.float32)
-    raw_matrix = interpolate_linear(raw_matrix)
+    raw_matrix = _fill_raw_gaps(raw_matrix)
     if np.isnan(raw_matrix).any():
         keep_columns = [column for idx, column in enumerate(base_columns) if not np.isnan(raw_matrix[:, idx]).any()]
         if not keep_columns:
             return None
         base_columns = keep_columns
         raw_df = wd[base_columns].apply(pd.to_numeric, errors="coerce")
-        raw_matrix = interpolate_linear(raw_df.to_numpy(dtype=np.float32))
+        raw_matrix = _fill_raw_gaps(raw_df.to_numpy(dtype=np.float32))
 
     step_seconds = infer_step_seconds(timestamps)
     min_ref_points = max(patch_size * 2, 64)
     mask_target = MASK_TARGETS.get(anomaly_key, MASK_TARGETS["salt"])
+    mask_stats_end_idx = int(reference_end_idx) if _env_flag(CAUSAL_MASK_THRESHOLDS_ENV) else None
     chosen_profile_name = "default"
     chosen_masked_fraction = 0.0
     anchor_columns: list[str] = []
@@ -426,6 +450,7 @@ def prepare_engineered_well(
             base_columns=base_columns,
             step_seconds=step_seconds,
             profile=profile,
+            stats_end_idx=mask_stats_end_idx,
         )
         candidate_reference_mask = np.zeros(len(wd), dtype=bool)
         candidate_reference_mask[:reference_end_idx] = True
@@ -535,6 +560,7 @@ def prepare_engineered_well(
             },
             include_step_events=False,
             include_start_stop_events=False,
+            stats_end_idx=mask_stats_end_idx,
         )
         onset_allowed_mask[:reference_end_idx] = False
     else:

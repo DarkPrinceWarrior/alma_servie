@@ -43,10 +43,12 @@ from alma_service.generic_detectors import (
     PAANO_LR,
     PAANO_MEMORY_BANK_RATIO,
     PAANO_NUM_ITERS,
+    PAANO_SCORE_DISTRIBUTION_CAUSAL,
     PAANO_TOP_K,
     SEED,
     _ensure_2d_float32,
     _maybe_compile_module,
+    _paano_score_distribution_mode,
 )
 from alma_service.feature_schema import feature_root
 from alma_service.paths import MODELS_DIR, ensure_parent
@@ -643,7 +645,11 @@ def load_or_train_shared_encoder(
     match. Override with ALMA_FORCE_RETRAIN_ENCODER=1.
     """
     force_retrain = os.environ.get("ALMA_FORCE_RETRAIN_ENCODER", "0") == "1"
-    cache_path = shared_encoder_path(anomaly_key)
+    # ALMA_SHARED_ENCODER_CACHE_PATH позволяет читать/писать per-class боевую пару
+    # (например models/global_normality_paano_shared_encoder.negermet.pt), не трогая
+    # дефолтный файл энкодера.
+    cache_override = os.environ.get("ALMA_SHARED_ENCODER_CACHE_PATH", "").strip()
+    cache_path = Path(cache_override) if cache_override else shared_encoder_path(anomaly_key)
     meta = _peek_saved_encoder_meta(cache_path) if not force_retrain else None
     if enable_reduction is None:
         enable_reduction = anomaly_key != "negermet"
@@ -768,6 +774,36 @@ def _cached_memory_bank(model, ref_norm, patch_creator, patch_size, device):
     return memory_bank
 
 
+def distribute_patch_scores_to_points_causal(
+    patch_scores: np.ndarray,
+    patch_size: int,
+    num_points: int,
+) -> np.ndarray:
+    # Стриминг-контракт: точка t получает скользящее среднее последних patch_size
+    # ЗАВЕРШИВШИХСЯ патчей (патч j накрывает [j, j+L-1] и доступен с момента j+L-1).
+    # Префикс до первого завершённого патча реплицируется первым значением, чтобы
+    # не ломать калибровку порогов нулями.
+    scores = np.nan_to_num(
+        np.asarray(patch_scores, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0
+    )
+    point_scores = np.zeros(num_points, dtype=np.float32)
+    if len(scores) == 0 or num_points <= 0:
+        return point_scores
+
+    kernel = np.ones(patch_size, dtype=np.float32)
+    sums = np.convolve(scores, kernel, mode="full")[: len(scores)]
+    counts = np.convolve(np.ones_like(scores), kernel, mode="full")[: len(scores)]
+    trailing = np.divide(sums, counts, out=np.zeros_like(sums), where=counts != 0)
+
+    usable = max(min(num_points - patch_size + 1, len(trailing)), 0)
+    point_scores[: min(patch_size - 1, num_points)] = trailing[0]
+    if usable > 0:
+        point_scores[patch_size - 1 : patch_size - 1 + usable] = trailing[:usable]
+        if patch_size - 1 + usable < num_points:
+            point_scores[patch_size - 1 + usable :] = trailing[usable - 1]
+    return np.nan_to_num(point_scores, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def _score_well_single_scale(
     model: nn.Module,
     well_data: np.ndarray,
@@ -801,9 +837,14 @@ def _score_well_single_scale(
     patch_scores = calculate_anomaly_scores(
         model, full_loader, memory_bank, top_k=PAANO_TOP_K, device=device,
     )
-    point_scores = distribute_patch_scores_to_points(
-        patch_scores, patch_size=patch_size, num_points=len(well_data),
-    )
+    if _paano_score_distribution_mode() == PAANO_SCORE_DISTRIBUTION_CAUSAL:
+        point_scores = distribute_patch_scores_to_points_causal(
+            patch_scores, patch_size=patch_size, num_points=len(well_data),
+        )
+    else:
+        point_scores = distribute_patch_scores_to_points(
+            patch_scores, patch_size=patch_size, num_points=len(well_data),
+        )
 
     if verbose:
         print(f"    Shared score patch={patch_size}: well_pts={len(well_data)}, ref_pts={len(ref_data)}")

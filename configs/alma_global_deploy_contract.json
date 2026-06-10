@@ -1,0 +1,46 @@
+{
+    "name": "alma_global_deploy_contract",
+    "description": "Боевой контракт детектора paano_global: какие файлы энкодера и банка нормы развёрнуты, какие env-переключатели зафиксированы. Снимок состояния сервера a100 (/root/projects/alma_servie). Проверка/установка: scripts/detection/deploy_per_class_assets.py.",
+    "snapshot_at": "2026-06-10",
+    "detector": "paano_global",
+    "encoder_config": "configs/alma_global_normality_5min.json",
+    "feature_schema": "configs/alma_global_feature_schema.json",
+    "default_pair_source": "pritok",
+    "pairs": {
+        "default": {
+            "encoder": "models/global_normality_paano_shared_encoder.pt",
+            "encoder_sha256": "362fc3b93d4ce0a33237e3093648856ab5d33df57377cdf1036c6e6050807a11",
+            "bank": "models/population_memory_bank_paano_global_global_normality.npz",
+            "bank_sha256": "5a4961b5ae109e7e5c381b3c3d3d1834ac5577cc0d26785863895dc0522889f2",
+            "bank_shape": [48212, 273]
+        },
+        "pritok": {
+            "encoder": "models/global_normality_paano_shared_encoder.pritok.pt",
+            "encoder_sha256": "362fc3b93d4ce0a33237e3093648856ab5d33df57377cdf1036c6e6050807a11",
+            "bank": "models/population_memory_bank_paano_global_global_normality.pritok.npz",
+            "bank_sha256": "5a4961b5ae109e7e5c381b3c3d3d1834ac5577cc0d26785863895dc0522889f2",
+            "bank_shape": [48212, 273]
+        },
+        "negermet": {
+            "encoder": "models/global_normality_paano_shared_encoder.negermet.pt",
+            "encoder_sha256": "97667630dde18d3a968b2db44af21768817874a5b9a3e7c10ed4b94b578a430c",
+            "bank": "models/population_memory_bank_paano_global_global_normality.negermet.npz",
+            "bank_sha256": "a87759fc0f68952b05b3b3fd4a5bc479e233f18f4666670483aa68877cc31d90",
+            "bank_shape": [19102, 210]
+        }
+    },
+    "per_class_resolution": "В blind-пути (alma_service/generic_detection.py, run_single_well) per-class пара <stem>.<anomaly>.pt + <bank>.<anomaly>.npz подхватывается автоматически при use_population_memory_bank=1, если оба файла существуют; иначе используется default-пара. Пара берётся целиком: каналы энкодера и банка должны совпадать.",
+    "env_contract": {
+        "ALMA_GLOBAL_PRESSURE_BRANCH": "0",
+        "ALMA_GLOBAL_DOMAIN_GATE": "0",
+        "ALMA_PAANO_INPUT_PADDING": "edge_hold",
+        "ALMA_PAANO_TOP_K": "1",
+        "ALMA_PAANO_MEMORY_BANK_RATIO": "0.10",
+        "ALMA_PAANO_SCORE_DISTRIBUTION": "covering",
+        "ALMA_CAUSAL_GAP_FILL": "0",
+        "ALMA_CAUSAL_MASK_THRESHOLDS": "0",
+        "ALMA_GLOBAL_POOL_CLASS_ONLY": "0",
+        "ALMA_SHARED_ENCODER_CACHE_PATH": ""
+    },
+    "env_notes": "Значения = дефолты кода; перечислены явно, чтобы прогон был воспроизводим без чтения исходников. ALMA_PAANO_INPUT_PADDING=edge_hold — дефолт только глобального пути (alma_service/global_normality.py); локальный paano_shared по умолчанию none. ALMA_GLOBAL_POOL_CLASS_ONLY=1 + ALMA_SHARED_ENCODER_CACHE_PATH=<per-class .pt> используются при пересборке/перемере per-class пары, в боевом скоринге обе выключены."
+}

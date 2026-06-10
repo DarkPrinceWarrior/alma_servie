@@ -33,6 +33,27 @@ PAANO_INPUT_PADDING_NONE = "none"
 PAANO_INPUT_PADDING_EDGE_HOLD = "edge_hold"
 PAANO_INPUT_PADDING_MODES = {PAANO_INPUT_PADDING_NONE, PAANO_INPUT_PADDING_EDGE_HOLD}
 
+# covering — точка получает среднее всех патчей, её накрывающих (контракт статьи PaAno,
+# заглядывает до patch-1 точек в будущее); causal — только завершившиеся патчи,
+# честный стриминг-контракт.
+PAANO_SCORE_DISTRIBUTION_ENV = "ALMA_PAANO_SCORE_DISTRIBUTION"
+PAANO_SCORE_DISTRIBUTION_COVERING = "covering"
+PAANO_SCORE_DISTRIBUTION_CAUSAL = "causal"
+PAANO_SCORE_DISTRIBUTION_MODES = {
+    PAANO_SCORE_DISTRIBUTION_COVERING,
+    PAANO_SCORE_DISTRIBUTION_CAUSAL,
+}
+
+
+def _paano_score_distribution_mode() -> str:
+    mode = os.getenv(PAANO_SCORE_DISTRIBUTION_ENV, PAANO_SCORE_DISTRIBUTION_COVERING).strip().lower()
+    if mode not in PAANO_SCORE_DISTRIBUTION_MODES:
+        raise ValueError(
+            f"Unsupported {PAANO_SCORE_DISTRIBUTION_ENV}={mode!r}. "
+            f"Expected one of: {', '.join(sorted(PAANO_SCORE_DISTRIBUTION_MODES))}."
+        )
+    return mode
+
 try:  # pragma: no branch - simple runtime guard
     torch.set_float32_matmul_precision("high")
 except Exception:
@@ -245,5 +266,6 @@ class SharedPaAnoDetector:
                 "train_wells": st.train_wells,
                 "input_padding": padding_detail,
                 "input_contract": _input_contract_from_padding(padding_detail),
+                "score_distribution": _paano_score_distribution_mode(),
             },
         )

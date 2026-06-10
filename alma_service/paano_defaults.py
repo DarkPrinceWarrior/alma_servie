@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-# Per-anomaly patch sizes: (short, long) adapted to anomaly speed and grid
+# Per-anomaly patch sizes for paano_shared: (short, long) adapted to anomaly speed.
+# Актуальные сетки в db/: negermet=5min, pritok=10min+5min, salt=10min+5min.
+# Глобальный детектор paano_global эти значения не использует — у него patch=(192, 384)
+# на общей 5min-сетке из configs/alma_global_normality_5min.json
+# (+ prepare_patch_size_overrides: negermet=52, pritok/salt=384).
 PATCH_SIZES = {
-    "negermet": (64, 128),   # fast anomaly (hours), 2min grid
-    "pritok":   (96, 192),   # slow anomaly (weeks), 10min grid
-    "salt":     (64, 128),   # slow anomaly (weeks), 15min grid
+    "negermet": (64, 128),   # fast anomaly (hours)
+    "pritok":   (96, 192),   # slow anomaly (weeks)
+    "salt":     (64, 128),   # slow anomaly (weeks)
 }
 # Fallback defaults
 SHORT_PATCH = 64
