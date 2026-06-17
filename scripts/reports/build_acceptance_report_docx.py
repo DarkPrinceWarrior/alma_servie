@@ -24,14 +24,20 @@ from docx.shared import Inches, Pt, RGBColor
 
 OUT = Path("docs/Итоговый_отчёт_по_тестированию_и_описание_решения.docx")
 ASSETS = Path("artifacts/_report_assets")
+# (заголовок, каталог детекции, имя png, выбранный момент начала аномалии, есть_аномалия)
+# Моменты начала по 5 размеченным приточным скв. выбраны экспертно (из нескольких
+# срабатываний оставлено верное) — не перетирать. Скв. 1071 — приток, момент по
+# исправленному якорю тренда (14.04.2026). Скв. 590 — аномалия не выявлена (без линии).
 PLOT_SOURCES = [
-    ("Приток — скв. 42-713", "artifacts/_report_src/42-713/pritok", "pritok_42-713.png", "2025-10-12 12:00:00"),
-    ("Приток — скв. 42-723", "artifacts/_report_src/42-723/pritok", "pritok_42-723.png", "2025-11-05 00:00:00"),
-    ("Приток — скв. 45-790", "artifacts/_report_src/45-790/pritok", "pritok_45-790.png", "2026-01-01 12:00:00"),
-    ("Приток — скв. 46-806", "artifacts/_report_src/46-806/pritok", "pritok_46-806.png", "2025-12-29 00:00:00"),
-    ("Приток — скв. 48-812", "artifacts/_report_src/48-812/pritok", "pritok_48-812.png", "2026-01-24 12:00:00"),
+    ("Приток — скв. 42-713", "artifacts/_report_src/42-713/pritok", "pritok_42-713.png", "2025-10-12 12:00:00", True),
+    ("Приток — скв. 42-723", "artifacts/_report_src/42-723/pritok", "pritok_42-723.png", "2025-11-05 00:00:00", True),
+    ("Приток — скв. 45-790", "artifacts/_report_src/45-790/pritok", "pritok_45-790.png", "2026-01-01 12:00:00", True),
+    ("Приток — скв. 46-806", "artifacts/_report_src/46-806/pritok", "pritok_46-806.png", "2025-12-29 00:00:00", True),
+    ("Приток — скв. 48-812", "artifacts/_report_src/48-812/pritok", "pritok_48-812.png", "2026-01-24 12:00:00", True),
+    ("Приток — скв. 1071", "artifacts/_report_src/1071_кус/pritok", "pritok_1071.png", "2026-04-14 12:00:00", True),
+    ("Приток — скв. 590 (аномалия не выявлена)", "artifacts/_report_src/590_кус/pritok", "pritok_590.png", None, False),
     ("Негерметичность НКТ — скв. 524 (скачок давления)",
-     "artifacts/_report_src/524/negermet", "negermet_524.png", None),
+     "artifacts/_report_src/524/negermet", "negermet_524.png", None, True),
 ]
 
 
@@ -44,7 +50,13 @@ def _col(df, *needles):
     return None
 
 
-def _plot_well(src_dir: str, title: str, out_png: Path, onset_override: str | None = None) -> Path | None:
+def _plot_well(
+    src_dir: str,
+    title: str,
+    out_png: Path,
+    onset_override: str | None = None,
+    has_anomaly: bool = True,
+) -> Path | None:
     src = Path(src_dir) / "source.parquet"
     starts = Path(src_dir) / "predicted_starts.parquet"
     if not src.exists():
@@ -55,35 +67,84 @@ def _plot_well(src_dir: str, title: str, out_png: Path, onset_override: str | No
     df = df.sort_values("timestamp")
     p = _col(df, "давление", "прием")
     f = _col(df, "выходная", "частота")
-    onset = None
-    if onset_override is not None:
-        onset = pd.to_datetime(onset_override)
-    elif starts.exists():
-        st = pd.read_parquet(starts)
-        if len(st) and "detected_time" in st.columns:
-            onset = pd.to_datetime(st["detected_time"]).min()
 
-    fig, axes = plt.subplots(2, 1, figsize=(9.2, 5.0), sharex=True, gridspec_kw={"height_ratios": [2, 1]})
-    ax0, ax1 = axes
-    ax0.plot(df["timestamp"], df[p], color="#1a1a1a", linewidth=1.1, label="Давление на приёме, кгс/см²")
-    ax0.set_ylabel("Давление, кгс/см²")
-    ax0.grid(True, alpha=0.25)
-    ax0.legend(loc="upper left", fontsize=8)
+    onset = None
+    if has_anomaly:
+        if onset_override is not None:
+            onset = pd.to_datetime(onset_override)
+        elif starts.exists():
+            st = pd.read_parquet(starts)
+            if len(st) and "detected_time" in st.columns:
+                onset = pd.to_datetime(st["detected_time"]).min()
+
+    ts = df["timestamp"]
+    pressure = pd.Series(pd.to_numeric(df[p], errors="coerce").to_numpy(), index=ts)
+    smooth = pressure.rolling("24h", min_periods=12).median()
+
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.size": 9,
+        "axes.linewidth": 0.7,
+        "axes.edgecolor": "#444444",
+        "mathtext.default": "regular",
+    })
+    fig, (ax0, ax1) = plt.subplots(
+        2, 1, figsize=(9.0, 4.9), sharex=True,
+        gridspec_kw={"height_ratios": [2.3, 1.0], "hspace": 0.12},
+    )
+    # верхняя панель — давление: исходный ряд (тонкий серый) + сглаженный тренд (тёмный)
+    ax0.plot(ts, pressure.to_numpy(), color="#aab1ba", linewidth=0.7, label="исходное давление", zorder=1)
+    ax0.plot(smooth.index, smooth.to_numpy(), color="#11304e", linewidth=1.8,
+             label="сглаженное (медиана 24 ч)", zorder=3)
+    ax0.set_ylabel("Давление на приёме,\nкгс/см²")
+    ax0.grid(True, linestyle=":", linewidth=0.6, color="#c9ced6")
+    ax0.legend(loc="upper left", fontsize=7.5, frameon=False, ncol=2)
+    ax0.spines["top"].set_visible(False)
+    ax0.spines["right"].set_visible(False)
+
+    # нижняя панель — выходная частота (контроль режима)
     if f is not None:
-        ax1.plot(df["timestamp"], df[f], color="#555555", linewidth=1.0, label="Выходная частота, Гц")
+        freq = pd.to_numeric(df[f], errors="coerce")
+        ax1.plot(ts, freq.to_numpy(), color="#5a3a86", linewidth=1.1, label="выходная частота")
         ax1.set_ylabel("Частота, Гц")
-        ax1.grid(True, alpha=0.25)
-        ax1.legend(loc="upper left", fontsize=8)
+        ax1.grid(True, linestyle=":", linewidth=0.6, color="#c9ced6")
+        ax1.legend(loc="upper right", fontsize=7.5, frameon=False)
+    ax1.set_xlabel("Дата")
+    ax1.spines["top"].set_visible(False)
+    ax1.spines["right"].set_visible(False)
+
     if onset is not None:
-        for ax in axes:
-            ax.axvline(onset, color="#b00000", linestyle="--", linewidth=1.4)
-        ax0.text(onset, ax0.get_ylim()[1], " момент начала аномалии",
-                 color="#b00000", fontsize=8, va="top", ha="left")
-    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m"))
-    fig.suptitle(title, fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+        for ax in (ax0, ax1):
+            ax.axvline(onset, color="#b00000", linestyle="--", linewidth=1.4, zorder=4)
+        ax0.axvspan(onset, ts.iloc[-1], color="#b00000", alpha=0.05, zorder=0)
+        span = (ts.iloc[-1] - ts.iloc[0]).total_seconds()
+        frac = (onset - ts.iloc[0]).total_seconds() / span if span > 0 else 0.0
+        right_side = frac > 0.78  # у правого края подпись уводим влево, чтобы не обрезалась
+        ax0.annotate(
+            f"начало аномалии\n{onset.strftime('%d.%m.%Y %H:%M')}",
+            xy=(onset, ax0.get_ylim()[1]),
+            xytext=(-6 if right_side else 6, -4), textcoords="offset points",
+            color="#b00000", fontsize=8, va="top", ha="right" if right_side else "left",
+        )
+    elif not has_anomaly:
+        ax0.text(
+            0.985, 0.06, "Аномалия не выявлена:\nдавление стабильно",
+            transform=ax0.transAxes, ha="right", va="bottom", fontsize=8.5, color="#0b6b3a",
+            bbox={"boxstyle": "round,pad=0.35", "facecolor": "#eef8f0",
+                  "edgecolor": "#0b6b3a", "linewidth": 0.7},
+        )
+
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%d.%m.%y"))
+    for label in ax1.get_xticklabels():
+        label.set_fontsize(8)
+    # подписи панелей в научном стиле
+    ax0.text(-0.085, 1.0, "а)", transform=ax0.transAxes, fontsize=10, fontweight="bold", va="top")
+    ax1.text(-0.085, 1.0, "б)", transform=ax1.transAxes, fontsize=10, fontweight="bold", va="top")
+
+    fig.suptitle(title, fontsize=11, fontweight="bold", y=0.975)
+    fig.subplots_adjust(left=0.105, right=0.985, top=0.92, bottom=0.11, hspace=0.12)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(out_png, dpi=130)
+    fig.savefig(out_png, dpi=300)
     plt.close(fig)
     print(f"график: {out_png}")
     return out_png
@@ -234,13 +295,15 @@ def build() -> Path:
     table(doc,
           ["Тип / назначение", "Предоставлено", "Обучение эталона нормы",
            "Внутренняя проверка", "Внешний слепой тест", "Исключено (гигиена)"],
-          [["Приток", "31", "24", "2 (скв. 3138, 5021)", "5 (42-713, 42-723, 45-790, 46-806, 48-812)", "—"],
+          [["Приток", "33", "24", "2 (скв. 3138, 5021)", "7 (42-713, 42-723, 45-790, 46-806, 48-812, 1071, 590)", "—"],
            ["Негерметичность НКТ", "4", "2 (172г, 3509г)", "1 (524)", "1 (524)", "1 (5271г)"],
            ["Нормальная работа (эталон нормы)", "23", "23", "—", "—", "—"]])
     para(doc,
-         "Пояснения к таблице. По притоку из 31 скважины 26 размечены экспертом (24 — "
-         "обучение, 2 — внутренняя проверка), ещё 5 предоставлены без разметки специально "
-         "для слепого теста. По негерметичности НКТ предоставлено 4 размеченных скважины: "
+         "Пояснения к таблице. По притоку из 33 скважин 26 размечены экспертом (24 — "
+         "обучение, 2 — внутренняя проверка), ещё 7 предоставлены без разметки специально "
+         "для слепого теста (в 6 из них приток выявлен, скважина 590 — без аномалии, что "
+         "подтверждает отсутствие ложных срабатываний на нормальной скважине). "
+         "По негерметичности НКТ предоставлено 4 размеченных скважины: "
          "две (172г, 3509г) использованы для обучения эталона нормы, одна (524) выведена в "
          "слепой тест — модель не использовала её при обучении, одна (5271г) исключена из "
          "эталона нормы (в её «нормальном» участке выявлен неоднозначный нисходящий тренд "
@@ -476,20 +539,24 @@ def build() -> Path:
               "модель не использовала при обучении (она «видит» их впервые).")
 
     para(doc, "7.2. Слепой тест на данных Заказчика", bold=True)
-    para(doc, "Проверка на скважинах, не участвовавших в обучении: 5 скважин по притоку и "
-              "1 скважина по негерметичности НКТ.")
+    para(doc, "Проверка на скважинах, не участвовавших в обучении: 7 скважин по притоку (в "
+              "6 из них приток присутствует, скважина 590 — без аномалии) и 1 скважина по "
+              "негерметичности НКТ. По всем скважинам с аномалией она обнаружена; по "
+              "нормальной скважине 590 ложных срабатываний нет.")
     table(doc,
-          ["Тип аномалии", "Скважин", "Обнаружено", "Полнота", "Ложные срабатывания"],
-          [["Приток", "5", "5", "100 %", "0"],
-           ["Негерметичность НКТ", "1", "1", "100 %", "0"]])
+          ["Тип аномалии", "Скважин", "С аномалией", "Обнаружено", "Полнота", "Ложные срабатывания"],
+          [["Приток", "7", "6", "6", "100 %", "0"],
+           ["Негерметичность НКТ", "1", "1", "1", "100 %", "0"]])
     para(doc, "Обнаруженные моменты начала аномалии по скважинам слепого теста:")
     table(doc,
-          ["Скважина", "Тип аномалии", "Обнаруженный момент начала"],
+          ["Скважина", "Тип аномалии", "Результат / момент начала"],
           [["42-713", "Приток", "12.10.2025"],
            ["42-723", "Приток", "05.11.2025"],
            ["45-790", "Приток", "01.01.2026"],
            ["46-806", "Приток", "29.12.2025"],
            ["48-812", "Приток", "24.01.2026"],
+           ["1071", "Приток", "14.04.2026"],
+           ["590", "Приток", "аномалия не выявлена (давление стабильно)"],
            ["524", "Негерметичность НКТ", "09.06.2025 (момент скачка давления)"]])
 
     para(doc, "7.3. Контрольная проверка на размеченных данных", bold=True)
@@ -506,10 +573,12 @@ def build() -> Path:
               "давления.")
 
     para(doc, "7.4. Визуализация результатов", bold=True)
-    para(doc, "Ниже для скважин слепого теста приведена телеметрия (давление на приёме и "
-              "выходная частота) с отмеченным моментом начала аномалии.")
-    for cap, src_dir, png_name, onset_override in PLOT_SOURCES:
-        png = _plot_well(src_dir, cap, ASSETS / png_name, onset_override)
+    para(doc, "Ниже для скважин слепого теста приведена телеметрия: (а) давление на приёме "
+              "(исходный ряд и сглаженный тренд — медиана за 24 часа) и (б) выходная частота. "
+              "Для скважин с аномалией красной штриховой линией отмечен момент её начала, "
+              "затенена зона аномалии; для нормальной скважины 590 аномалия не выявлена.")
+    for cap, src_dir, png_name, onset_override, has_anomaly in PLOT_SOURCES:
+        png = _plot_well(src_dir, cap, ASSETS / png_name, onset_override, has_anomaly)
         if png is not None and png.exists():
             doc.add_picture(str(png), width=Inches(6.3))
             doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
