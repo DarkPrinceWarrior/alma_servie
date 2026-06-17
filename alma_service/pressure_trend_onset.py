@@ -91,6 +91,7 @@ def _anchor_trend_onset(
     falling: bool,
     ref_end_ts: pd.Timestamp,
     config: PressureTrendFusionConfig,
+    freq12: pd.Series | None = None,
 ) -> pd.Timestamp:
     # От точки подтверждения идём назад по СГЛАЖЕННОЙ кривой, пока выполняется ЛИБО короткий
     # (trailing) наклон в сторону тренда, ЛИБО кривая держится за «полосой нормы» (заметно
@@ -110,6 +111,29 @@ def _anchor_trend_onset(
     band = float(config.anchor_band_frac) * base
     max_lookback = pd.Timedelta(days=config.anchor_max_lookback_days)
 
+    # Регим-локальная база. Подъём/спад «полки» из-за смены выходной частоты — это смена
+    # режима, а не приток. Если перед триггером был значимый скачок частоты и уровень нового
+    # режима сместился больше «полосы нормы», band отсчитываем от уровня этого режима и не
+    # уводим onset за сам скачок. Иначе band_ok тянул бы старт через плоскую послережимную
+    # полку (скв. 1071: полка 54.8 после падения частоты 207→200, реальный рост — позже).
+    regime_start: pd.Timestamp | None = None
+    band_base = base
+    if freq12 is not None:
+        jumps = freq12.index[freq12.diff().abs() > config.freq_jump_threshold_hz]
+        jumps = jumps[(jumps < trigger) & (jumps > ref_end_ts)]
+        if len(jumps):
+            candidate = jumps[-1]
+            level_window = smooth[
+                (smooth.index >= candidate)
+                & (smooth.index <= candidate + pd.Timedelta(days=config.anchor_short_window_days))
+            ]
+            if len(level_window):
+                level = float(level_window.median())
+                stepped = (base - level) >= band if falling else (level - base) >= band
+                if stepped:
+                    regime_start = candidate
+                    band_base = level
+
     def local_slope_pct(i: int) -> float:
         j = max(0, i - short_points)
         dt = (idx[i] - idx[j]).total_seconds() / 86400.0
@@ -122,8 +146,10 @@ def _anchor_trend_onset(
     while k - 1 >= 0:
         if idx[pos] - idx[k] > max_lookback:
             break
+        if regime_start is not None and idx[k] <= regime_start:
+            break
         slope_ok = trend_dir * local_slope_pct(k) >= eps_pct
-        band_ok = (base - vals[k]) >= band if falling else (vals[k] - base) >= band
+        band_ok = (band_base - vals[k]) >= band if falling else (vals[k] - band_base) >= band
         if slope_ok or band_ok:
             onset_pos = k
             k -= 1
@@ -224,6 +250,7 @@ def detect_pressure_trend_fusion_onsets(
                 onset = _anchor_trend_onset(
                     p12, pd.Timestamp(current),
                     base=base, falling=slope_raw < 0, ref_end_ts=ref_end_ts, config=config,
+                    freq12=f12,
                 )
                 onsets.append(TrendOnset(onset=onset, trigger=pd.Timestamp(current)))
                 armed = False
