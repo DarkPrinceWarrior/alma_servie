@@ -39,6 +39,18 @@ _MAX_TELEMETRY_POINTS = 1200
 _TELEMETRY_META_COLS = {"timestamp", "well_id"}
 
 
+def _parse_requested_anomalies(raw: str) -> tuple[str, ...]:
+    requested = {a.strip().lower() for a in raw.split(",") if a.strip()}
+    return tuple(a for a in _ANOMALIES if a in requested)
+
+
+def _anomalies_from_command(command: str) -> tuple[str, ...]:
+    match = re.search(r"--anomalies\s+(\S+)", command)
+    if match is None:
+        return _ANOMALIES
+    return _parse_requested_anomalies(match.group(1)) or _ANOMALIES
+
+
 @router.post(
     "/uploads",
     response_model=DetectionRunRead,
@@ -49,6 +61,7 @@ async def create_upload(
     db: DbDep,
     file: Annotated[UploadFile, File()],
     well_id: Annotated[str, Form()],
+    anomalies: Annotated[str, Form()] = "negermet,pritok",
 ) -> DetectionRunRead:
     well_id = well_id.strip()
     if not _WELL_ID_RE.match(well_id):
@@ -58,6 +71,12 @@ async def create_upload(
         )
     if not (file.filename or "").lower().endswith((".xlsx", ".xls")):
         raise HTTPException(status_code=422, detail="Ожидается файл .xlsx")
+    chosen = _parse_requested_anomalies(anomalies)
+    if not chosen:
+        raise HTTPException(
+            status_code=422,
+            detail="anomalies: допустимы negermet и/или pritok",
+        )
 
     run_id = uuid.uuid4()
     excel_dir = settings.uploads_root / "excel"
@@ -69,7 +88,7 @@ async def create_upload(
     command = (
         "python scripts/detection/detect_uploaded_well.py "
         f"--excel {excel_path} --well-id {well_id} --output-dir {out_dir} "
-        "--detector paano_global --anomalies negermet,pritok "
+        f"--detector paano_global --anomalies {','.join(chosen)} "
         "--use-population-memory-bank"
     )
     run = DetectionRun(
@@ -197,7 +216,8 @@ async def get_upload_result(run_id: uuid.UUID, db: DbDep) -> UploadResultBundle:
         raise HTTPException(status_code=404, detail=f"Прогон загрузки '{run_id}' не найден")
 
     out_dir = settings.uploads_root / "results" / str(run_id)
-    results = [_read_anomaly_result(a, out_dir / a) for a in _ANOMALIES]
+    anoms = _anomalies_from_command(run.command)
+    results = [_read_anomaly_result(a, out_dir / a) for a in anoms]
     n_done = sum(1 for r in results if r.status != "pending")
 
     return UploadResultBundle(
@@ -205,7 +225,7 @@ async def get_upload_result(run_id: uuid.UUID, db: DbDep) -> UploadResultBundle:
         well_id=_well_id_from_results(results) or _well_id_from_command(run.command),
         status=run.status,
         n_done=n_done,
-        n_total=len(_ANOMALIES),
+        n_total=len(anoms),
         results=results,
     )
 
@@ -219,10 +239,10 @@ def _well_id_from_command(command: str) -> str:
     return match.group(1) if match else ""
 
 
-def _summarize_run_dir(out_dir: Path) -> tuple[int, int]:
+def _summarize_run_dir(out_dir: Path, anomalies: tuple[str, ...]) -> tuple[int, int]:
     n_done = 0
     n_detected = 0
-    for anomaly in _ANOMALIES:
+    for anomaly in anomalies:
         sub = out_dir / anomaly
         if (sub / "summary.json").exists():
             n_done += 1
@@ -252,7 +272,8 @@ async def list_uploads(db: DbDep) -> UploadList:
     items: list[UploadListItem] = []
     for run in runs:
         out_dir = settings.uploads_root / "results" / str(run.id)
-        n_done, n_detected = _summarize_run_dir(out_dir)
+        anoms = _anomalies_from_command(run.command)
+        n_done, n_detected = _summarize_run_dir(out_dir, anoms)
         items.append(
             UploadListItem(
                 run_id=str(run.id),
@@ -260,7 +281,7 @@ async def list_uploads(db: DbDep) -> UploadList:
                 status=run.status,
                 created_at=run.created_at,
                 n_done=n_done,
-                n_total=len(_ANOMALIES),
+                n_total=len(anoms),
                 n_detected_total=n_detected,
             )
         )

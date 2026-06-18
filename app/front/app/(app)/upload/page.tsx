@@ -39,6 +39,8 @@ const ACCENT: Record<AnomalyType, string> = {
   pritok: "#2f6fb5",
 };
 
+const ANOMALIES: AnomalyType[] = ["negermet", "pritok"];
+
 type Phase = "idle" | "uploading" | "running" | "done" | "error";
 
 function fmtDt(s: string | null | undefined): string {
@@ -56,6 +58,7 @@ function fmtCreated(s: string): string {
 export default function UploadPage() {
   const { t } = useI18n();
   const [file, setFile] = useState<File | null>(null);
+  const [classes, setClasses] = useState<AnomalyType[]>(["negermet", "pritok"]);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
   const [bundle, setBundle] = useState<UploadResultBundle | null>(null);
@@ -166,6 +169,12 @@ export default function UploadPage() {
     }
   }
 
+  function toggleClass(a: AnomalyType) {
+    setClasses((prev) =>
+      prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a],
+    );
+  }
+
   function onFileChange(e: ChangeEvent<HTMLInputElement>) {
     setFile(e.target.files?.[0] ?? null);
   }
@@ -178,7 +187,7 @@ export default function UploadPage() {
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
-    if (!file) return;
+    if (!file || classes.length === 0) return;
     setError(null);
     setBundle(null);
     setElapsed(0);
@@ -192,7 +201,11 @@ export default function UploadPage() {
     );
 
     try {
-      const run = await uploads.createUpload(wellIdFromFile(file), file);
+      const run = await uploads.createUpload(
+        wellIdFromFile(file),
+        file,
+        classes,
+      );
       setPhase("running");
 
       let current: UploadResultBundle | null = null;
@@ -221,7 +234,7 @@ export default function UploadPage() {
 
   const busy = phase === "uploading" || phase === "running";
   const nDone = bundle?.n_done ?? 0;
-  const nTotal = bundle?.n_total ?? 2;
+  const nTotal = bundle?.n_total ?? classes.length;
   const progressPct =
     phase === "uploading" ? 6 : Math.round((nDone / nTotal) * 100);
 
@@ -280,14 +293,50 @@ export default function UploadPage() {
               )}
             </div>
 
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-[#797979]">
+                {t("upload.classes.label")}
+              </span>
+              {ANOMALIES.map((a) => {
+                const on = classes.includes(a);
+                return (
+                  <button
+                    key={a}
+                    type="button"
+                    onClick={() => toggleClass(a)}
+                    disabled={busy}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-sm font-medium transition-colors",
+                      on
+                        ? "border-transparent text-white"
+                        : "border-[#e5e5e5] bg-white text-[#797979] hover:bg-[#f3f3f3]",
+                      busy && "cursor-not-allowed opacity-60",
+                    )}
+                    style={on ? { background: ACCENT[a] } : undefined}
+                  >
+                    <span
+                      className="h-2 w-2 rounded-full"
+                      style={{ background: on ? "#ffffff" : "#cfcfcf" }}
+                    />
+                    {t(`anomaly.${a}`)}
+                  </button>
+                );
+              })}
+              {classes.length === 0 && (
+                <span className="text-xs text-[#c43232]">
+                  {t("upload.classes.hint")}
+                </span>
+              )}
+            </div>
+
             {error && <p className="text-sm text-destructive">{error}</p>}
 
             <button
               type="submit"
-              disabled={busy || !file}
+              disabled={busy || !file || classes.length === 0}
               className={cn(
                 "mt-1 inline-flex w-fit items-center gap-2 rounded-[12px] px-4 py-2 text-sm font-medium transition-colors",
-                busy || !file
+                busy || !file || classes.length === 0
                   ? "cursor-not-allowed bg-[rgba(75,76,230,0.4)] text-white"
                   : "bg-[#4b4ce6] text-white hover:bg-[#3f40d1]",
               )}
@@ -526,7 +575,7 @@ function HistoryStatusBadge({
 
 function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
   const { t } = useI18n();
-  const order: AnomalyType[] = ["negermet", "pritok"];
+  const order: AnomalyType[] = results.map((r) => r.anomaly);
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
   return (
@@ -570,7 +619,7 @@ function ProgressPanel({
   results: UploadAnomalyResult[];
 }) {
   const { t } = useI18n();
-  const order: AnomalyType[] = ["negermet", "pritok"];
+  const order: AnomalyType[] = results.map((r) => r.anomaly);
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
 

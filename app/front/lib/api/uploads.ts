@@ -4,10 +4,12 @@ import type { DetectionRunRead, UploadList, UploadResultBundle } from "./types";
 export async function createUpload(
   wellId: string,
   file: File,
+  anomalies: readonly string[],
 ): Promise<DetectionRunRead> {
   const form = new FormData();
   form.append("file", file);
   form.append("well_id", wellId);
+  form.append("anomalies", anomalies.join(","));
   return apiPostMultipart<DetectionRunRead>("/api/uploads", form);
 }
 

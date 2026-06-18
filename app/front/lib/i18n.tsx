@@ -139,8 +139,16 @@ const DICT: Record<string, Entry> = {
     en: "Detection from an uploaded Excel file",
   },
   "upload.instructions": {
-    ru: "Формат файла — как у отдельной скважины в сырых данных. Класс аномалии указывать не нужно: система прогонит инференс сразу по двум классам — негерметичность и приток — и покажет обнаруженные старты.",
-    en: "The file format is the same as a single well in the raw data. You don't need to specify the anomaly class: the system runs inference over both classes — tubing leak and inflow — and shows the detected onsets.",
+    ru: "Формат файла — как у отдельной скважины в сырых данных. Выберите класс(ы) аномалий для детекции (по умолчанию оба) — система прогонит инференс и покажет обнаруженные старты.",
+    en: "The file format is the same as a single well in the raw data. Choose the anomaly class(es) to detect (both by default) — the system runs inference and shows the detected onsets.",
+  },
+  "upload.classes.label": {
+    ru: "Классы для детекции:",
+    en: "Classes to detect:",
+  },
+  "upload.classes.hint": {
+    ru: "Выберите хотя бы один класс",
+    en: "Select at least one class",
   },
   "upload.chooseFile": { ru: "Выбрать Excel-файл", en: "Choose Excel file" },
   "upload.noFile": { ru: "Файл не выбран", en: "No file selected" },
