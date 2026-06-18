@@ -156,7 +156,8 @@ export default function WellPage() {
   const actualEnd =
     firstResult?.actual_end ??
     (degenerateInterval ? null : (firstInterval?.end_date ?? null));
-  const detectedAt = firstResult?.detected_time ?? null;
+  const detectedAt =
+    firstResult?.detected_time ?? series?.predicted_starts[0]?.t ?? null;
   const delay =
     firstResult?.delay_hours !== null && firstResult?.delay_hours !== undefined
       ? `${firstResult.delay_hours.toFixed(2)}ч`

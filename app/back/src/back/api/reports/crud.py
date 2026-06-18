@@ -219,6 +219,10 @@ def load_well_series(
     iv_path = intervals_parquet_path(data_root, anomaly)
     if iv_path.exists():
         iv = read_parquet_cached(iv_path).filter(pl.col("well_id") == well_id).sort("interval_idx")
+        # Слепые тест-скважины не размечены: их синтетический интервал (source_kind=
+        # "test_wells") не является фактической зоной аномалии — не отдаём его как зону.
+        if "source_kind" in iv.columns:
+            iv = iv.filter(pl.col("source_kind").fill_null("") != "test_wells")
         for row in iv.iter_rows(named=True):
             intervals.append(
                 AnomalyInterval(

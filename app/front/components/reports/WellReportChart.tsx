@@ -98,6 +98,11 @@ export function WellReportChart({ series, fi }: Props) {
       firstResult?.actual_start ?? fallbackInterval?.start ?? null;
     const actualEnd = firstResult?.actual_end ?? fallbackInterval?.end ?? null;
     const detected = firstResult?.detected_time ?? null;
+    // Размеченные скв. — время обнаружения из результата; слепые (без результата) —
+    // из предсказанных стартов (выбранная дата детекции, без зоны/факт. начала).
+    const onsetTimes: string[] = detected
+      ? [detected]
+      : series.predicted_starts.map((p) => p.t);
 
     const s: Partial<Shape>[] = [];
 
@@ -142,14 +147,14 @@ export function WellReportChart({ series, fi }: Props) {
         line: { color: END_COLOR, width: 1.5, dash: "dot" },
       });
     }
-    // Фиолетовая штрихпунктирная — время обнаружения
-    if (detected) {
+    // Фиолетовая штрихпунктирная — время обнаружения (предполагаемая дата)
+    for (const t of onsetTimes) {
       s.push({
         type: "line",
         xref: "x",
         yref: "paper",
-        x0: detected,
-        x1: detected,
+        x0: t,
+        x1: t,
         y0: 0,
         y1: 1,
         line: { color: ONSET_COLOR, width: 2, dash: "dashdot" },
