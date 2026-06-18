@@ -375,8 +375,14 @@ telemetry freq 5min; home page = "Тест" (8 blind wells, `split=test`) + "О�
 (28 labeled, `split=train`). Blind test wells are consolidated into `db/` by
 `runs/consolidate_app_data.py` (a100); backup at `db/_backup_app_20260618/`.
 
-**Upload history** — Postgres table `detection_runs` (`anomaly="multi"`); cleared from
-the UI ("Очистить всё", bulk-delete). Not part of git/data.
+**Well upload** (`/upload`) runs, via the worker,
+`scripts/detection/detect_uploaded_well.py --detector paano_global
+--anomalies negermet,pritok --use-population-memory-bank` — the same production pipeline
+as the last test-wells run (per-class encoder+bank pair). The command string is built in
+`app/back/.../uploads/views.py`; the worker reads it from the DB (no worker rebuild needed
+to change the command — only a backend rebuild). **Upload history** — Postgres table
+`detection_runs` (`anomaly="multi"`); cleared from the UI ("Очистить всё", bulk-delete).
+Not part of git/data.
 
 ## Coding conventions
 

@@ -246,8 +246,14 @@ docker compose up -d backend frontend
 `split=train`). Слепые тест-скважины сведены в `db/` скриптом
 `runs/consolidate_app_data.py` (a100), бэкап — `db/_backup_app_20260618/`.
 
-**История загрузок** — таблица Postgres `detection_runs` (`anomaly="multi"`); чистится
-из UI кнопкой «Очистить всё» (bulk-delete). Не входит в git/данные.
+**Загрузка скважины** (`/upload`) запускает воркером
+`scripts/detection/detect_uploaded_well.py --detector paano_global
+--anomalies negermet,pritok --use-population-memory-bank` — тот же боевой пайплайн, что
+последний прогон тест-скважин (per-class пара энкодер+банк). Команда строится в
+`app/back/.../uploads/views.py`; воркер берёт её из БД (рестарт воркера для смены команды
+не нужен, нужен rebuild backend). **История загрузок** — таблица Postgres
+`detection_runs` (`anomaly="multi"`); чистится из UI кнопкой «Очистить всё» (bulk-delete).
+Не входит в git/данные.
 
 ## Architecture
 
