@@ -375,6 +375,15 @@ telemetry freq 5min; home page = "Тест" (8 blind wells, `split=test`) + "О�
 (28 labeled, `split=train`). Blind test wells are consolidated into `db/` by
 `runs/consolidate_app_data.py` (a100); backup at `db/_backup_app_20260618/`.
 
+**Blind (unlabeled) test wells:** they have no ground-truth labeling — the app does NOT
+draw an anomaly zone or actual start/end for them, only a single "predicted date" =
+"Время обнаружения". In `db/` each gets one chosen onset (from the docx report) in
+`predicted_starts` plus a degenerate interval tagged `source_kind=test_wells` (needed only
+so the well is listed); `load_well_series` filters out `source_kind=test_wells` so it is
+not returned as a zone; the chart takes "Время обнаружения" from `predicted_starts` when
+there is no labeled result. Script: `runs/fix_blind_app_data.py`. Labeled wells (e.g.
+negermet 524) keep the full view (zone + actual start/end + delay).
+
 **Well upload** (`/upload`) runs, via the worker,
 `scripts/detection/detect_uploaded_well.py --detector paano_global
 --anomalies negermet,pritok --use-population-memory-bank` — the same production pipeline

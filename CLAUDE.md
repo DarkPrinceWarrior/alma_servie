@@ -246,6 +246,15 @@ docker compose up -d backend frontend
 `split=train`). Слепые тест-скважины сведены в `db/` скриптом
 `runs/consolidate_app_data.py` (a100), бэкап — `db/_backup_app_20260618/`.
 
+**Слепые (неразмеченные) тест-скважины:** у них нет фактической разметки — приложение
+НЕ рисует им зону аномалии и факт. начало/окончание, только одну «предполагаемую дату»
+= «Время обнаружения». В `db/` им задан один выбранный онсет (из docx-отчёта) в
+`predicted_starts` и вырожденный интервал с `source_kind=test_wells` (нужен лишь для
+списка); `load_well_series` фильтрует `source_kind=test_wells`, чтобы не отдавать его как
+зону; чарт берёт «Время обнаружения» из `predicted_starts`, когда нет размеченного
+результата. Скрипт — `runs/fix_blind_app_data.py`. Размеченные скв. (напр. негермет 524)
+сохраняют полный вид (зона + факт. начало/конец + задержка).
+
 **Загрузка скважины** (`/upload`) запускает воркером
 `scripts/detection/detect_uploaded_well.py --detector paano_global
 --anomalies negermet,pritok --use-population-memory-bank` — тот же боевой пайплайн, что
