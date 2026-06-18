@@ -11,9 +11,11 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/hooks/use-auth";
+import { LangToggle, useI18n } from "@/lib/i18n";
 
 export default function LoginPage() {
   const { login } = useAuth();
+  const { t } = useI18n();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +28,7 @@ export default function LoginPage() {
     try {
       await login(email, password);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Не удалось войти";
+      const msg = err instanceof Error ? err.message : t("login.failed");
       setError(msg);
     } finally {
       setLoading(false);
@@ -34,16 +36,20 @@ export default function LoginPage() {
   }
 
   return (
-    <Card className="w-full max-w-sm">
+    <div className="flex w-full max-w-sm flex-col gap-3">
+      <div className="flex justify-end">
+        <LangToggle />
+      </div>
+      <Card>
       <CardHeader>
-        <CardTitle>Вход в Alma</CardTitle>
-        <CardDescription>Система детекции аномалий</CardDescription>
+        <CardTitle>{t("login.title")}</CardTitle>
+        <CardDescription>{t("login.subtitle")}</CardDescription>
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
             <label htmlFor="email" className="text-sm font-medium">
-              Email
+              {t("login.email")}
             </label>
             <Input
               id="email"
@@ -57,7 +63,7 @@ export default function LoginPage() {
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor="password" className="text-sm font-medium">
-              Пароль
+              {t("login.password")}
             </label>
             <Input
               id="password"
@@ -70,10 +76,11 @@ export default function LoginPage() {
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <Button type="submit" disabled={loading} className="mt-2">
-            {loading ? "Вход..." : "Войти"}
+            {loading ? t("login.submitting") : t("login.submit")}
           </Button>
         </form>
       </CardContent>
-    </Card>
+      </Card>
+    </div>
   );
 }

@@ -7,6 +7,7 @@ import type {
   FeatureImportanceResponse,
   WellSeriesResponse,
 } from "@/lib/api/types";
+import { useI18n } from "@/lib/i18n";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
@@ -23,27 +24,14 @@ const END_COLOR = "#dc2626";
 
 const PRESSURE_CHANNEL = "Давление на приеме насоса кгс/см²";
 
-const STATUS_LABELS: Record<string, string> = {
-  Detected: "Обнаружено",
-  detected: "Обнаружено",
-  "Not found": "Не обнаружено",
-  "not found": "Не обнаружено",
-  "Not detected": "Не обнаружено",
-  Missed: "Пропуск",
+const STATUS_KEY: Record<string, string> = {
+  Detected: "status.detected",
+  detected: "status.detected",
+  "Not found": "status.notFound",
+  "not found": "status.notFound",
+  "Not detected": "status.notFound",
+  Missed: "status.missed",
 };
-
-function translateStatus(status: string): string {
-  return STATUS_LABELS[status] ?? status;
-}
-
-function pluralIntervals(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return `${n} размеченный интервал`;
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
-    return `${n} размеченных интервала`;
-  return `${n} размеченных интервалов`;
-}
 
 function pickDefaultChannels(
   telemetryNames: string[],
@@ -64,13 +52,14 @@ function pickDefaultChannels(
 }
 
 export function WellReportChart({ series, fi }: Props) {
+  const { t, ch: chLabel, plural } = useI18n();
   const { scoreTraces, telemetryTraces, shapes } = useMemo(() => {
     const tr: Data[] = [];
     if (series.score.length > 0) {
       tr.push({
         type: "scattergl",
         mode: "lines",
-        name: "Отклонение от нормы",
+        name: t("chart.scoreDeviation"),
         x: series.score.map((p) => p.t),
         y: series.score.map((p) => p.v),
         line: { color: "#111827", width: 1.6 },
@@ -84,7 +73,7 @@ export function WellReportChart({ series, fi }: Props) {
     const tel: Data[] = series.telemetry.map((ch) => ({
       type: "scattergl",
       mode: "lines",
-      name: ch.name,
+      name: chLabel(ch.name),
       x: ch.points.map((p) => p.t),
       y: ch.points.map((p) => p.v),
       line: { width: 1 },
@@ -162,7 +151,7 @@ export function WellReportChart({ series, fi }: Props) {
     }
 
     return { scoreTraces: tr, telemetryTraces: tel, shapes: s };
-  }, [series, fi]);
+  }, [series, fi, t, chLabel]);
 
   const data = [...scoreTraces, ...telemetryTraces];
 
@@ -172,14 +161,14 @@ export function WellReportChart({ series, fi }: Props) {
     margin: { l: 60, r: 60, t: 30, b: 70 },
     showlegend: true,
     legend: { orientation: "h", y: -0.18 },
-    xaxis: { title: { text: "Время" } },
+    xaxis: { title: { text: t("chart.time") } },
     yaxis: {
-      title: { text: "Отклонение от нормы" },
+      title: { text: t("chart.scoreDeviation") },
       side: "left",
       zeroline: true,
     },
     yaxis2: {
-      title: { text: "Каналы телеметрии" },
+      title: { text: t("chart.telemetryChannels") },
       overlaying: "y",
       side: "right",
       showgrid: false,
@@ -193,11 +182,11 @@ export function WellReportChart({ series, fi }: Props) {
   return (
     <div className="w-full space-y-2 rounded-md border bg-card p-2">
       <div className="flex flex-wrap items-center gap-4 px-2 text-xs text-muted-foreground">
-        <LegendDot color="#111827" label="Отклонение от нормы (score)" />
-        <LegendDot color={ANOMALY_BORDER} label="Зона аномалии" filled />
-        <LegendDot color={START_COLOR} label="Фактическое начало" />
-        <LegendDot color={END_COLOR} label="Фактическое окончание" dashed />
-        <LegendDot color={ONSET_COLOR} label="Время обнаружения" dashed />
+        <LegendDot color="#111827" label={t("chart.legend.score")} />
+        <LegendDot color={ANOMALY_BORDER} label={t("chart.legend.zone")} filled />
+        <LegendDot color={START_COLOR} label={t("chart.legend.actualStart")} />
+        <LegendDot color={END_COLOR} label={t("chart.legend.actualEnd")} dashed />
+        <LegendDot color={ONSET_COLOR} label={t("chart.legend.detected")} dashed />
       </div>
       <Plot
         data={data}
@@ -207,11 +196,17 @@ export function WellReportChart({ series, fi }: Props) {
         style={{ width: "100%", height: "560px" }}
       />
       <div className="flex flex-wrap gap-4 px-2 py-1 text-xs text-muted-foreground">
-        <span>{series.telemetry.length} каналов</span>
-        <span>{pluralIntervals(series.intervals.length)}</span>
+        <span>{t("chart.channelsCount", { n: series.telemetry.length })}</span>
+        <span>
+          {series.intervals.length}{" "}
+          {plural(series.intervals.length, "labeledInterval")}
+        </span>
         {firstResult?.status && (
           <span className="font-medium text-foreground">
-            Статус: {translateStatus(firstResult.status)}
+            {t("chart.statusPrefix")}
+            {STATUS_KEY[firstResult.status]
+              ? t(STATUS_KEY[firstResult.status])
+              : firstResult.status}
           </span>
         )}
       </div>

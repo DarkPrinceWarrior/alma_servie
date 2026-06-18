@@ -7,6 +7,7 @@ import type {
   FeatureImportanceResponse,
   WellSeriesResponse,
 } from "@/lib/api/types";
+import { useI18n } from "@/lib/i18n";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
@@ -25,6 +26,7 @@ const TOP_POSITIVE = 3;
 const TOP_NEGATIVE = 4;
 
 export function FeatureImportanceChart({ fi, series }: Props) {
+  const { t, ch: chLabel } = useI18n();
   // 1) Bar chart
   const {
     data: barData,
@@ -40,7 +42,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       type: "bar",
       orientation: "h",
       x: sorted.map((it) => it.importance),
-      y: sorted.map((it) => it.feature),
+      y: sorted.map((it) => chLabel(it.feature)),
       marker: { color: colors },
       hovertemplate: "%{y}: %{x:.3f}<extra></extra>",
     };
@@ -49,7 +51,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       height: Math.max(400, sorted.length * 24 + 100),
       margin: { l: 300, r: 40, t: 24, b: 40 },
       xaxis: {
-        title: { text: "Важность (%)" },
+        title: { text: t("fi.importancePct") },
         zeroline: true,
         zerolinecolor: "#9ca3af",
       },
@@ -57,7 +59,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       bargap: 0.3,
     };
     return { data: [trace], layout, count: sorted.length };
-  }, [fi]);
+  }, [fi, t, chLabel]);
 
   // 2) Time-series top-positive / top-negative channels
   const timeseries = useMemo(() => {
@@ -86,7 +88,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
         .map((c) => ({
           type: "scattergl",
           mode: "lines",
-          name: c.name,
+          name: chLabel(c.name),
           x: c.points.map((p) => p.t),
           y: c.points.map((p) => p.v),
           line: { width: 1.2, color },
@@ -103,7 +105,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
             {
               type: "scattergl",
               mode: "lines",
-              name: "Отклонение от нормы",
+              name: t("chart.scoreDeviation"),
               x: series.score.map((p) => p.t),
               y: series.score.map((p) => p.v),
               line: { color: "#111827", width: 1.6 },
@@ -154,10 +156,10 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       autosize: true,
       height: 460,
       margin: { l: 60, r: 60, t: 30, b: 70 },
-      xaxis: { title: { text: "Время" } },
-      yaxis: { title: { text: "Отклонение" }, side: "left" },
+      xaxis: { title: { text: t("chart.time") } },
+      yaxis: { title: { text: t("fi.deviation") }, side: "left" },
       yaxis2: {
-        title: { text: "Каналы" },
+        title: { text: t("fi.channels") },
         overlaying: "y",
         side: "right",
         showgrid: false,
@@ -173,12 +175,12 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       positiveCount: posTraces.length,
       negativeCount: negTraces.length,
     };
-  }, [fi, series]);
+  }, [fi, series, t, chLabel]);
 
   if (count === 0) {
     return (
       <div className="rounded-md border bg-card p-6 text-sm text-muted-foreground">
-        Важность признаков для скважины «{fi.well_id}» не найдена.
+        {t("fi.notFound", { id: fi.well_id })}
       </div>
     );
   }
@@ -186,9 +188,7 @@ export function FeatureImportanceChart({ fi, series }: Props) {
   return (
     <div className="space-y-4">
       <div className="rounded-md border bg-card p-2">
-        <p className="px-2 pt-2 text-sm font-medium">
-          Важность каналов (важность по перестановке, %)
-        </p>
+        <p className="px-2 pt-2 text-sm font-medium">{t("fi.panelTitle")}</p>
         <Plot
           data={barData}
           layout={barLayout}
@@ -201,8 +201,10 @@ export function FeatureImportanceChart({ fi, series }: Props) {
       {timeseries && (
         <div className="rounded-md border bg-card p-2">
           <p className="px-2 pt-2 text-sm font-medium">
-            Top-каналы во времени ({timeseries.positiveCount} полезных ·{" "}
-            {timeseries.negativeCount} «шумных»)
+            {t("fi.topChannels", {
+              p: timeseries.positiveCount,
+              n: timeseries.negativeCount,
+            })}
           </p>
           <Plot
             data={timeseries.data}

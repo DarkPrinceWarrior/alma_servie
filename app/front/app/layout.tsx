@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Commissioner, Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { LocaleProvider } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const geistSans = Geist({
@@ -35,7 +36,9 @@ export default function RootLayout({
         commissioner.variable,
       )}
     >
-      <body className="h-full">{children}</body>
+      <body className="h-full">
+        <LocaleProvider>{children}</LocaleProvider>
+      </body>
     </html>
   );
 }

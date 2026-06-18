@@ -29,14 +29,11 @@ import type {
   UploadListItem,
   UploadResultBundle,
 } from "@/lib/api/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 
-const LABEL: Record<AnomalyType, string> = {
-  negermet: "Негерметичность",
-  pritok: "Приток",
-};
 const ACCENT: Record<AnomalyType, string> = {
   negermet: "#c43232",
   pritok: "#2f6fb5",
@@ -49,15 +46,6 @@ function fmtDt(s: string | null | undefined): string {
   return s.replace("T", " ").slice(0, 16);
 }
 
-function pluralStarts(n: number): string {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return "обнаруженный старт";
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 10 || mod100 >= 20))
-    return "обнаруженных старта";
-  return "обнаруженных стартов";
-}
-
 function fmtCreated(s: string): string {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) return s;
@@ -66,6 +54,7 @@ function fmtCreated(s: string): string {
 }
 
 export default function UploadPage() {
+  const { t } = useI18n();
   const [file, setFile] = useState<File | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -93,11 +82,11 @@ export default function UploadPage() {
       // history is supplementary — surface in errors area but don't block uploads
       setError(
         err instanceof Error
-          ? `Не удалось загрузить историю: ${err.message}`
-          : "Не удалось загрузить историю",
+          ? `${t("upload.err.loadHistory")}: ${err.message}`
+          : t("upload.err.loadHistory"),
       );
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     refreshHistory();
@@ -123,9 +112,7 @@ export default function UploadPage() {
   async function deleteSelected() {
     if (selected.size === 0) return;
     if (
-      !window.confirm(
-        `Удалить выбранные загрузки (${selected.size})? Действие необратимо.`,
-      )
+      !window.confirm(t("upload.confirm.deleteSelected", { n: selected.size }))
     )
       return;
     const ids = [...selected];
@@ -138,17 +125,13 @@ export default function UploadPage() {
       }
       await refreshHistory();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось удалить");
+      setError(err instanceof Error ? err.message : t("upload.err.delete"));
     }
   }
 
   async function deleteAll() {
     if (history.length === 0) return;
-    if (
-      !window.confirm(
-        `Очистить всю историю (${history.length} загрузок)? Действие необратимо.`,
-      )
-    )
+    if (!window.confirm(t("upload.confirm.clearAll", { n: history.length })))
       return;
     try {
       await uploads.bulkDeleteUploads(history.map((it) => it.run_id));
@@ -157,7 +140,7 @@ export default function UploadPage() {
       setViewMode(null);
       await refreshHistory();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Не удалось очистить");
+      setError(err instanceof Error ? err.message : t("upload.err.clear"));
     }
   }
 
@@ -177,9 +160,7 @@ export default function UploadPage() {
           ?.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Не удалось открыть результат",
-      );
+      setError(err instanceof Error ? err.message : t("upload.err.open"));
     } finally {
       setOpeningRunId(null);
     }
@@ -224,15 +205,13 @@ export default function UploadPage() {
         }
       }
 
-      if (!current) throw new Error("Не удалось получить результат прогона.");
+      if (!current) throw new Error(t("upload.err.getResult"));
       if (current.status === "failed" && current.n_done === 0) {
-        throw new Error(
-          "Прогон завершился с ошибкой — ни один класс аномалий не обработан.",
-        );
+        throw new Error(t("upload.err.runFailed"));
       }
       setPhase("done");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Ошибка загрузки");
+      setError(err instanceof Error ? err.message : t("upload.err.chartLoad"));
       setPhase("error");
     } finally {
       clearInterval(ticker);
@@ -254,20 +233,16 @@ export default function UploadPage() {
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Главная
+          {t("breadcrumb.home")}
         </Link>
         <span className="text-muted-foreground">/</span>
-        <span className="text-sm font-medium">Загрузка скважины</span>
+        <span className="text-sm font-medium">{t("upload.title")}</span>
       </div>
 
       <h1 className="font-display text-[23.04px] font-medium tracking-[-0.576px] text-[#222226]">
-        Детекция по загруженному Excel
+        {t("upload.cardTitle")}
       </h1>
-      <p className="text-sm text-[#797979]">
-        Формат файла — как у отдельной скважины в сырых данных. Класс аномалии
-        указывать не нужно: система прогонит инференс сразу по двум классам —
-        негерметичность и приток — и покажет обнаруженные старты.
-      </p>
+      <p className="text-sm text-[#797979]">{t("upload.instructions")}</p>
 
       <Card>
         <CardContent className="py-5">
@@ -293,7 +268,7 @@ export default function UploadPage() {
                 )}
               >
                 <FileSpreadsheet className="h-4 w-4" />
-                Выбрать Excel-файл
+                {t("upload.chooseFile")}
               </button>
               {file ? (
                 <span className="inline-flex items-center gap-1.5 text-sm text-[#222226]">
@@ -301,7 +276,7 @@ export default function UploadPage() {
                   {file.name}
                 </span>
               ) : (
-                <span className="text-sm text-[#aaa]">Файл не выбран</span>
+                <span className="text-sm text-[#aaa]">{t("upload.noFile")}</span>
               )}
             </div>
 
@@ -323,10 +298,10 @@ export default function UploadPage() {
                 <Upload className="h-4 w-4" />
               )}
               {phase === "uploading"
-                ? "Загрузка файла…"
+                ? t("upload.btn.uploading")
                 : phase === "running"
-                  ? "Идёт инференс…"
-                  : "Загрузить и запустить детекцию"}
+                  ? t("upload.btn.running")
+                  : t("upload.btn.run")}
             </button>
           </form>
         </CardContent>
@@ -391,13 +366,13 @@ function HistoryPanel({
   activeRunId: string | null;
   openingRunId: string | null;
 }) {
+  const { t, plural } = useI18n();
   if (items.length === 0) {
     return (
       <Card>
         <CardContent className="py-5">
           <p className="text-sm text-muted-foreground">
-            Загрузок пока нет. Загрузите Excel выше — результаты сохранятся
-            здесь и будут доступны после перезагрузки страницы.
+            {t("upload.history.empty")}
           </p>
         </CardContent>
       </Card>
@@ -419,10 +394,10 @@ function HistoryPanel({
                 className="h-4 w-4 cursor-pointer accent-[#4b4ce6]"
               />
               <span>
-                История загрузок · {items.length}
+                {t("upload.history.title")} · {items.length}
                 {selected.size > 0 && (
                   <span className="ml-2 text-xs text-muted-foreground">
-                    выбрано {selected.size}
+                    {t("upload.history.selected", { n: selected.size })}
                   </span>
                 )}
               </span>
@@ -441,7 +416,7 @@ function HistoryPanel({
               )}
             >
               <Trash2 className="h-3.5 w-3.5" />
-              Удалить выбранные
+              {t("upload.history.deleteSelected")}
             </button>
             <button
               type="button"
@@ -449,7 +424,7 @@ function HistoryPanel({
               className="inline-flex items-center gap-1.5 rounded-[10px] border border-[#e5e5e5] px-3 py-1.5 text-xs font-medium text-[#797979] hover:bg-[#f3f3f3]"
             >
               <Trash2 className="h-3.5 w-3.5" />
-              Очистить всё
+              {t("upload.history.clearAll")}
             </button>
           </div>
         </div>
@@ -490,8 +465,8 @@ function HistoryPanel({
                   />
                   <span className="text-xs text-muted-foreground">
                     {it.n_detected_total > 0
-                      ? `${it.n_detected_total} ${pluralStarts(it.n_detected_total)}`
-                      : "аномалий не обнаружено"}
+                      ? `${it.n_detected_total} ${plural(it.n_detected_total, "start")}`
+                      : t("upload.history.noAnomalies")}
                   </span>
                 </button>
                 <button
@@ -508,10 +483,10 @@ function HistoryPanel({
                   )}
                 >
                   {openingRunId === it.run_id
-                    ? "Открываю…"
+                    ? t("upload.history.opening")
                     : isActive
-                      ? "Открыто"
-                      : "Открыть"}
+                      ? t("upload.history.opened")
+                      : t("upload.history.open")}
                 </button>
               </li>
             );
@@ -531,6 +506,7 @@ function HistoryStatusBadge({
   nDone: number;
   nTotal: number;
 }) {
+  const { t } = useI18n();
   const isRunning = status === "running" || status === "pending";
   const isDone = status === "succeeded";
   const isFailed = status === "failed";
@@ -541,20 +517,21 @@ function HistoryStatusBadge({
     isRunning && "bg-[rgba(75,76,230,0.08)] text-[#4b4ce6]",
   );
   const label = isDone
-    ? `Готово · ${nDone}/${nTotal}`
+    ? `${t("upload.status.done")} · ${nDone}/${nTotal}`
     : isFailed
-      ? `Сбой · ${nDone}/${nTotal}`
-      : `В работе · ${nDone}/${nTotal}`;
+      ? `${t("upload.status.failed")} · ${nDone}/${nTotal}`
+      : `${t("upload.status.running")} · ${nDone}/${nTotal}`;
   return <span className={cls}>{label}</span>;
 }
 
 function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
+  const { t } = useI18n();
   const order: AnomalyType[] = ["negermet", "pritok"];
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-1 text-xs text-muted-foreground">
-      <span>Открыто из истории · статусы:</span>
+      <span>{t("upload.history.fromHistory")}</span>
       {order.map((a) => {
         const st = statusOf(a);
         return (
@@ -569,7 +546,7 @@ function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
           >
             {st === "succeeded" && <CheckCircle2 className="h-3.5 w-3.5" />}
             {st === "failed" && <AlertTriangle className="h-3.5 w-3.5" />}
-            {LABEL[a]}
+            {t(`anomaly.${a}`)}
           </span>
         );
       })}
@@ -592,6 +569,7 @@ function ProgressPanel({
   elapsed: number;
   results: UploadAnomalyResult[];
 }) {
+  const { t } = useI18n();
   const order: AnomalyType[] = ["negermet", "pritok"];
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
@@ -602,10 +580,10 @@ function ProgressPanel({
         <div className="flex items-center justify-between">
           <span className="text-sm font-medium text-[#222226]">
             {phase === "uploading"
-              ? "Загрузка файла на сервер…"
+              ? t("upload.progress.uploading")
               : phase === "done"
-                ? `Готово — обработано ${nDone} из ${nTotal} классов аномалий`
-                : `Идёт инференс — обработано ${nDone} из ${nTotal} классов аномалий`}
+                ? t("upload.progress.done", { nDone, nTotal })
+                : t("upload.progress.running", { nDone, nTotal })}
           </span>
           <span className="text-sm tabular-nums text-[#797979]">
             {Math.floor(elapsed / 60)}:{String(elapsed % 60).padStart(2, "0")}
@@ -641,17 +619,14 @@ function ProgressPanel({
                 {st === "pending" && (
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 )}
-                {LABEL[a]}
+                {t(`anomaly.${a}`)}
               </span>
             );
           })}
         </div>
 
         {phase !== "done" && (
-          <p className="text-xs text-[#aaa]">
-            Инференс идёт на GPU последовательно по двум классам. Это может
-            занять несколько минут — страницу можно не обновлять.
-          </p>
+          <p className="text-xs text-[#aaa]">{t("upload.progress.note")}</p>
         )}
       </CardContent>
     </Card>
@@ -685,6 +660,7 @@ function channelColor(idx: number): string {
 }
 
 function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
+  const { t, ch: chLabel, plural } = useI18n();
   const accent = ACCENT[result.anomaly];
 
   const [visible, setVisible] = useState<Set<string>>(
@@ -713,7 +689,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
     const scoreTrace: Data = {
       type: "scattergl",
       mode: "lines",
-      name: "Отклонение от нормы",
+      name: t("chart.scoreDeviation"),
       x: result.score_series.map((p) => p.t),
       y: result.score_series.map((p) => p.score),
       line: { color: accent, width: 1.6 },
@@ -724,7 +700,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
     const telemetryTraces: Data[] = result.telemetry.map((ch, idx) => ({
       type: "scattergl",
       mode: "lines",
-      name: ch.name,
+      name: chLabel(ch.name),
       x: ch.points.map((p) => p.t),
       y: ch.points.map((p) => p.v),
       line: { width: 1, color: channelColor(idx) },
@@ -749,7 +725,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
         height: 380,
         margin: { l: 60, r: 60, t: 16, b: 44 },
         xaxis: {
-          title: { text: "Время" },
+          title: { text: t("chart.time") },
           hoverformat: "%d.%m.%Y %H:%M",
           tickformatstops: [
             { dtickrange: [null, 60_000], value: "%H:%M:%S" },
@@ -758,12 +734,12 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
           ],
         },
         yaxis: {
-          title: { text: "Отклонение от нормы" },
+          title: { text: t("chart.scoreDeviation") },
           side: "left",
           zeroline: true,
         },
         yaxis2: {
-          title: { text: "Каналы телеметрии" },
+          title: { text: t("chart.telemetryChannels") },
           overlaying: "y",
           side: "right",
           showgrid: false,
@@ -775,7 +751,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
         plot_bgcolor: "white",
       },
     };
-  }, [result, accent, visible, scoreVisible]);
+  }, [result, accent, visible, scoreVisible, t, chLabel]);
 
   return (
     <Card>
@@ -784,12 +760,12 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
           className="font-display text-[19.2px] font-medium tracking-[-0.192px]"
           style={{ color: accent }}
         >
-          {LABEL[result.anomaly]}
+          {t(`anomaly.${result.anomaly}`)}
         </h2>
 
         {result.status === "failed" ? (
           <p className="text-sm text-[#797979]">
-            {result.error || "Недостаточно данных для этого класса аномалии."}
+            {result.error || t("result.notEnoughData")}
           </p>
         ) : (
           <>
@@ -806,12 +782,12 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                   {result.n_detected ?? 0}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {pluralStarts(result.n_detected ?? 0)}
+                  {plural(result.n_detected ?? 0, "start")}
                 </span>
               </span>
               <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
                 <CalendarRange className="h-3.5 w-3.5 text-[#4b4ce6]" />
-                <span>Период:</span>
+                <span>{t("result.period")}</span>
                 <span className="font-medium tabular-nums text-[#222226]">
                   {fmtDt(result.time_start)}
                   <span className="mx-1.5 text-[#aaa]">→</span>
@@ -823,7 +799,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
             {result.detected_starts.length > 0 ? (
               <div className="space-y-2">
                 <p className="text-xs uppercase tracking-wide text-muted-foreground">
-                  Обнаруженные старты аномалии
+                  {t("result.detectedStarts")}
                 </p>
                 <ul className="flex flex-wrap gap-1.5">
                   {result.detected_starts.map((ts, idx) => (
@@ -840,9 +816,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 </ul>
               </div>
             ) : (
-              <p className="text-sm text-[#16a34a]">
-                Аномалий этого класса не обнаружено — скважина в норме.
-              </p>
+              <p className="text-sm text-[#16a34a]">{t("result.noAnomaly")}</p>
             )}
 
             {chart.data.length > 0 && (
@@ -853,7 +827,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                       className="inline-block h-0.5 w-4"
                       style={{ borderTop: "2px dashed #a855f7" }}
                     />
-                    Обнаруженный старт аномалии
+                    {t("result.detectedMarker")}
                   </span>
                 </div>
                 <Plot
@@ -866,7 +840,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 {result.telemetry.length > 0 && (
                   <div className="border-t border-[#eee] px-1 pt-2">
                     <p className="mb-2 text-xs font-medium text-[#797979]">
-                      Параметры — нажмите, чтобы показать/скрыть на графике
+                      {t("result.paramsHint")}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
                       <button
@@ -888,7 +862,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                           className="h-2 w-2 rounded-full"
                           style={{ background: scoreVisible ? accent : "#cfcfcf" }}
                         />
-                        Отклонение от нормы
+                        {t("chart.scoreDeviation")}
                       </button>
                       {result.telemetry.map((ch, idx) => {
                         const on = visible.has(ch.name);
@@ -912,7 +886,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                               className="h-2 w-2 rounded-full"
                               style={{ background: on ? color : "#cfcfcf" }}
                             />
-                            {ch.name}
+                            {chLabel(ch.name)}
                           </button>
                         );
                       })}

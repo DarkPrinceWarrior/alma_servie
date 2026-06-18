@@ -5,13 +5,10 @@ import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { type AnomalyType, reports, wells } from "@/lib/api";
 import type { AnomalyReportAvailability, WellSummary } from "@/lib/api/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 
 const ANOMALIES: AnomalyType[] = ["negermet", "pritok"];
-const LABEL: Record<AnomalyType, string> = {
-  negermet: "Негерметичность",
-  pritok: "Приток",
-};
 const ACCENT: Record<AnomalyType, string> = {
   negermet: "text-[#c43232]",
   pritok: "text-[#2f6fb5]",
@@ -27,6 +24,7 @@ type Grouped = Record<AnomalyType, WellSummary[]>;
 const emptyGrouped = (): Grouped => ({ negermet: [], pritok: [] });
 
 export default function HomePage() {
+  const { t } = useI18n();
   const [testWells, setTestWells] = useState<Grouped>(emptyGrouped());
   const [trainWells, setTrainWells] = useState<Grouped>(emptyGrouped());
   const [availability, setAvailability] = useState<
@@ -75,27 +73,27 @@ export default function HomePage() {
     <div className="min-h-screen bg-[#f9f9f9]">
       <div className="mx-auto flex max-w-[1440px] flex-col gap-8 px-10 pt-4 pb-10">
         <h1 className="font-display text-[23.04px] font-medium leading-[1.3] tracking-[-0.576px] text-[#222226]">
-          Главная — детекция аномалий (последняя модель: PaAno Global)
+          {t("home.title")}
         </h1>
 
         <GroupBlock
-          title="Тест"
-          subtitle="Слепые скважины — модель видит их впервые"
-          totalLabel="Тестовых скважин"
+          title={t("home.test.title")}
+          subtitle={t("home.test.subtitle")}
+          totalLabel={t("home.test.total")}
           total={totalTest}
           wellsByAnomaly={testWells}
           availability={availability}
-          groupWord="тестовых"
+          groupWord={t("home.test.word")}
         />
 
         <GroupBlock
-          title="Обучение"
-          subtitle="Размеченные скважины, использованные при обучении и калибровке"
-          totalLabel="Обучающих скважин"
+          title={t("home.train.title")}
+          subtitle={t("home.train.subtitle")}
+          totalLabel={t("home.train.total")}
           total={totalTrain}
           wellsByAnomaly={trainWells}
           availability={availability}
-          groupWord="обучающих"
+          groupWord={t("home.train.word")}
           defaultOpen={false}
         />
       </div>
@@ -122,6 +120,7 @@ function GroupBlock({
   groupWord: string;
   defaultOpen?: boolean;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(defaultOpen);
 
   return (
@@ -170,7 +169,7 @@ function GroupBlock({
               {ANOMALIES.map((a) => (
                 <KpiCard
                   key={a}
-                  label={LABEL[a]}
+                  label={t(`anomaly.${a}`)}
                   value={wellsByAnomaly[a].length}
                   color={KPI_COLOR[a]}
                 />
@@ -204,6 +203,7 @@ function AnomalySection({
   ready: boolean;
   groupWord: string;
 }) {
+  const { t, plural } = useI18n();
   return (
     <section className="flex flex-col gap-4 rounded-[16px] border border-[#e5e5e5] bg-white p-4">
       <div className="flex items-center gap-3">
@@ -213,7 +213,7 @@ function AnomalySection({
             ACCENT[anomaly],
           )}
         >
-          {LABEL[anomaly]}
+          {t(`anomaly.${anomaly}`)}
         </h2>
         <span className="rounded-full bg-[rgba(34,34,38,0.05)] px-2 py-1 text-[11.11px] font-medium text-[#424247]">
           {rows.length} {groupWord}
@@ -221,7 +221,7 @@ function AnomalySection({
       </div>
 
       {rows.length === 0 ? (
-        <p className="text-sm text-[#797979]">Скважин нет.</p>
+        <p className="text-sm text-[#797979]">{t("home.noWells")}</p>
       ) : (
         <ul>
           {rows.map((r, idx) => (
@@ -243,11 +243,11 @@ function AnomalySection({
                     {r.n_intervals}
                   </span>
                   <span className="text-base font-medium leading-[1.5] tracking-[-0.16px] text-[#c43232]">
-                    {r.n_intervals === 1 ? "интервал" : "интервалов"}
+                    {plural(r.n_intervals, "interval")}
                   </span>
                   {!ready && (
                     <span className="text-sm text-[#797979]">
-                      отчёты ещё не готовы
+                      {t("home.reportsNotReady")}
                     </span>
                   )}
                 </div>

@@ -21,17 +21,17 @@ import type {
   WellDetail,
   WellSeriesResponse,
 } from "@/lib/api/types";
+import { useI18n } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
-
-const ANOMALY_LABEL: Record<AnomalyType, string> = {
-  negermet: "Негермет",
-  pritok: "Приток",
-};
 
 const ANOMALY_ACCENT: Record<AnomalyType, string> = {
   negermet: "text-amber-500",
   pritok: "text-sky-500",
 };
+
+function anomalyLabelKey(a: AnomalyType): string {
+  return a === "negermet" ? "anomaly.negermet.short" : `anomaly.${a}`;
+}
 
 type Tab = "report" | "feature_importance";
 
@@ -42,13 +42,14 @@ function fmtDt(s: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-function hoursBetween(a: string, b: string): string {
+function hoursBetween(a: string, b: string, suffix: string): string {
   const ms = new Date(b).getTime() - new Date(a).getTime();
   if (!Number.isFinite(ms)) return "—";
-  return `${(ms / 3_600_000).toFixed(2)}ч`;
+  return `${(ms / 3_600_000).toFixed(2)}${suffix}`;
 }
 
 export default function WellPage() {
+  const { t, locale } = useI18n();
   const params = useParams<{ id: string }>();
   const searchParams = useSearchParams();
   const wellId = decodeURIComponent(params.id);
@@ -79,7 +80,7 @@ export default function WellPage() {
       .catch((err) => {
         if (!active) return;
         setError(
-          err instanceof Error ? err.message : "Не удалось загрузить данные",
+          err instanceof Error ? err.message : t("well.err.load"),
         );
       });
     return () => {
@@ -109,7 +110,7 @@ export default function WellPage() {
       .catch((err) => {
         if (active)
           setError(
-            err instanceof Error ? err.message : "Ошибка загрузки графика",
+            err instanceof Error ? err.message : t("well.err.chart"),
           );
       })
       .finally(() => {
@@ -131,7 +132,7 @@ export default function WellPage() {
         if (active) setFi(r);
       })
       .catch((err) => {
-        if (active) setError(err instanceof Error ? err.message : "Ошибка FI");
+        if (active) setError(err instanceof Error ? err.message : t("well.err.fi"));
       })
       .finally(() => {
         if (active) setFiLoading(false);
@@ -158,11 +159,12 @@ export default function WellPage() {
     (degenerateInterval ? null : (firstInterval?.end_date ?? null));
   const detectedAt =
     firstResult?.detected_time ?? series?.predicted_starts[0]?.t ?? null;
+  const hSuffix = locale === "ru" ? "ч" : "h";
   const delay =
     firstResult?.delay_hours !== null && firstResult?.delay_hours !== undefined
-      ? `${firstResult.delay_hours.toFixed(2)}ч`
+      ? `${firstResult.delay_hours.toFixed(2)}${hSuffix}`
       : actualStart && detectedAt
-        ? hoursBetween(actualStart, detectedAt)
+        ? hoursBetween(actualStart, detectedAt, hSuffix)
         : "—";
 
   return (
@@ -173,7 +175,7 @@ export default function WellPage() {
           className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
         >
           <ArrowLeft className="h-4 w-4" />
-          Главная
+          {t("breadcrumb.home")}
         </Link>
         <span className="text-muted-foreground">/</span>
         <span className="text-sm font-medium">{wellId}</span>
@@ -182,32 +184,32 @@ export default function WellPage() {
       <Card>
         <CardContent className="flex flex-col gap-5 py-5">
           <div className="flex items-center gap-4">
-            <span className="text-2xl font-semibold">Аномалии:</span>
+            <span className="text-2xl font-semibold">{t("well.anomalies")}</span>
             <AnomalyChip anomaly={anomaly} />
           </div>
 
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <MetricCard
               icon={<CalendarCheck2 className="h-5 w-5" />}
-              label="Фактическое начало"
+              label={t("well.actualStart")}
               value={fmtDt(actualStart)}
               color="#16a34a"
             />
             <MetricCard
               icon={<CalendarX2 className="h-5 w-5" />}
-              label="Фактическое окончание"
+              label={t("well.actualEnd")}
               value={fmtDt(actualEnd)}
               color="#dc2626"
             />
             <MetricCard
               icon={<Clock className="h-5 w-5" />}
-              label="Время обнаружения"
+              label={t("well.detectedTime")}
               value={fmtDt(detectedAt)}
               color="#a855f7"
             />
             <MetricCard
               icon={<Timer className="h-5 w-5" />}
-              label="Задержка"
+              label={t("well.delay")}
               value={delay}
               color="#4b4ce6"
             />
@@ -221,23 +223,28 @@ export default function WellPage() {
           onClick={() => setTab("report")}
           disabled={!hasReport}
         >
-          Основной отчёт
+          {t("well.tab.report")}
         </TabButton>
         <TabButton
           active={activeTab === "feature_importance"}
           onClick={() => setTab("feature_importance")}
           disabled={!hasFI}
         >
-          Важность признаков
+          {t("well.tab.fi")}
         </TabButton>
       </div>
 
-      {error && <p className="text-sm text-destructive">Ошибка: {error}</p>}
+      {error && (
+        <p className="text-sm text-destructive">
+          {t("common.errorPrefix")}
+          {error}
+        </p>
+      )}
 
       {activeTab === "report" ? (
         <>
           {seriesLoading && !series && (
-            <LoadingCard text="Загружаем временные ряды…" />
+            <LoadingCard text={t("well.loadingSeries")} />
           )}
           {series && <WellReportChart series={series} fi={fi} />}
           {!seriesLoading && !series && !hasReport && (
@@ -246,9 +253,7 @@ export default function WellPage() {
         </>
       ) : (
         <>
-          {fiLoading && !fi && (
-            <LoadingCard text="Загружаем feature importance…" />
-          )}
+          {fiLoading && !fi && <LoadingCard text={t("well.loadingFi")} />}
           {fi && <FeatureImportanceChart fi={fi} series={series} />}
         </>
       )}
@@ -257,9 +262,10 @@ export default function WellPage() {
 }
 
 function AnomalyChip({ anomaly }: { anomaly: AnomalyType }) {
+  const { t } = useI18n();
   return (
     <span className={cn("text-2xl font-semibold", ANOMALY_ACCENT[anomaly])}>
-      {ANOMALY_LABEL[anomaly]}
+      {t(anomalyLabelKey(anomaly))}
     </span>
   );
 }
@@ -335,14 +341,15 @@ function LoadingCard({ text }: { text: string }) {
 }
 
 function NoReportCard({ anomaly }: { anomaly: AnomalyType }) {
+  const { t } = useI18n();
   return (
     <Card>
       <CardContent className="flex flex-col items-center gap-3 py-16 text-center">
         <p className="text-muted-foreground">
-          Отчёт для аномалии «{ANOMALY_LABEL[anomaly]}» ещё не сгенерирован.
+          {t("well.noReport", { label: t(anomalyLabelKey(anomaly)) })}
         </p>
         <Link href="/">
-          <Button variant="outline">Вернуться на главную</Button>
+          <Button variant="outline">{t("well.backHome")}</Button>
         </Link>
       </CardContent>
     </Card>
