@@ -242,7 +242,7 @@ export default function UploadPage() {
 
   const busy = phase === "uploading" || phase === "running";
   const nDone = bundle?.n_done ?? 0;
-  const nTotal = bundle?.n_total ?? 3;
+  const nTotal = bundle?.n_total ?? 2;
   const progressPct =
     phase === "uploading" ? 6 : Math.round((nDone / nTotal) * 100);
 
@@ -649,7 +649,7 @@ function ProgressPanel({
 
         {phase !== "done" && (
           <p className="text-xs text-[#aaa]">
-            Инференс идёт на GPU последовательно по трём классам. Это может
+            Инференс идёт на GPU последовательно по двум классам. Это может
             занять несколько минут — страницу можно не обновлять.
           </p>
         )}
