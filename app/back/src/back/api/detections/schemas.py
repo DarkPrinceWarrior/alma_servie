@@ -6,7 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from back.api.wells.schemas import AnomalyType
 
-DetectorType = Literal["paano_shared"]
+DetectorType = Literal["paano_global", "paano_shared"]
 StatusType = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 
 

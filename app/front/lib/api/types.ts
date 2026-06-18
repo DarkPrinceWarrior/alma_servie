@@ -1,9 +1,9 @@
 // TS types mirroring pydantic schemas in app/back/src/back/api/*/schemas.py.
 // Keep in sync manually; a codegen from openapi.json is a follow-up.
 
-export type AnomalyType = "negermet" | "pritok" | "salt";
+export type AnomalyType = "negermet" | "pritok";
 export type SplitType = "train" | "test";
-export type DetectorType = "paano_shared";
+export type DetectorType = "paano_global" | "paano_shared";
 export type RunStatus =
   | "pending"
   | "running"

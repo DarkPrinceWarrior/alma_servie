@@ -36,12 +36,10 @@ const Plot = dynamic(() => import("react-plotly.js"), { ssr: false });
 const LABEL: Record<AnomalyType, string> = {
   negermet: "Негерметичность",
   pritok: "Приток",
-  salt: "Солеотложение",
 };
 const ACCENT: Record<AnomalyType, string> = {
   negermet: "#c43232",
   pritok: "#2f6fb5",
-  salt: "#d2a232",
 };
 
 type Phase = "idle" | "uploading" | "running" | "done" | "error";
@@ -267,8 +265,8 @@ export default function UploadPage() {
       </h1>
       <p className="text-sm text-[#797979]">
         Формат файла — как у отдельной скважины в сырых данных. Класс аномалии
-        указывать не нужно: система прогонит инференс сразу по трём классам —
-        негерметичность, приток и солеотложение — и покажет обнаруженные старты.
+        указывать не нужно: система прогонит инференс сразу по двум классам —
+        негерметичность и приток — и покажет обнаруженные старты.
       </p>
 
       <Card>
@@ -551,7 +549,7 @@ function HistoryStatusBadge({
 }
 
 function HistoryStatusStrip({ results }: { results: UploadAnomalyResult[] }) {
-  const order: AnomalyType[] = ["negermet", "pritok", "salt"];
+  const order: AnomalyType[] = ["negermet", "pritok"];
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
   return (
@@ -594,7 +592,7 @@ function ProgressPanel({
   elapsed: number;
   results: UploadAnomalyResult[];
 }) {
-  const order: AnomalyType[] = ["negermet", "pritok", "salt"];
+  const order: AnomalyType[] = ["negermet", "pritok"];
   const statusOf = (a: AnomalyType) =>
     results.find((r) => r.anomaly === a)?.status ?? "pending";
 

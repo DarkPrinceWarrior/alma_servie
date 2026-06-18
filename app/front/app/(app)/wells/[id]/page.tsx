@@ -26,13 +26,11 @@ import { cn } from "@/lib/utils";
 const ANOMALY_LABEL: Record<AnomalyType, string> = {
   negermet: "Негермет",
   pritok: "Приток",
-  salt: "Соли",
 };
 
 const ANOMALY_ACCENT: Record<AnomalyType, string> = {
   negermet: "text-amber-500",
   pritok: "text-sky-500",
-  salt: "text-rose-500",
 };
 
 type Tab = "report" | "feature_importance";

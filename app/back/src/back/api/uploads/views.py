@@ -32,7 +32,7 @@ from back.rbac.guards import require_permission
 
 router = APIRouter(tags=["Uploads"])
 
-_ANOMALIES = ("negermet", "pritok", "salt")
+_ANOMALIES = ("negermet", "pritok")
 _WELL_ID_RE = re.compile(r"^[\w\-.]{1,64}$", re.UNICODE)
 _MAX_SERIES_POINTS = 2000
 _MAX_TELEMETRY_POINTS = 1200
@@ -73,7 +73,7 @@ async def create_upload(
     run = DetectionRun(
         id=run_id,
         anomaly="multi",
-        detector="paano_shared",
+        detector="paano_global",
         status="pending",
         command=command,
     )

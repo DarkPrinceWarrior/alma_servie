@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-AnomalyType = Literal["negermet", "pritok", "salt"]
+AnomalyType = Literal["negermet", "pritok"]
 SplitType = Literal["train", "test"]
 
 

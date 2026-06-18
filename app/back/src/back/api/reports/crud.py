@@ -38,9 +38,8 @@ META_COLS = {"timestamp", "well_id"}
 # Canonical frequency of the anomaly_database parquet used by the latest
 # research runs. Keep in sync with scripts/reports/generate_*_report.py --source.
 CANONICAL_TELEMETRY_FREQ: dict[str, str] = {
-    "negermet": "2min",
-    "pritok": "10min",
-    "salt": "15min",
+    "negermet": "5min",
+    "pritok": "5min",
 }
 
 
