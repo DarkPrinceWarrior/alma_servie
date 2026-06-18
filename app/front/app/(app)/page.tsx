@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronRight } from "lucide-react";
+import { ChevronDown, ChevronRight } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { type AnomalyType, reports, wells } from "@/lib/api";
@@ -96,6 +96,7 @@ export default function HomePage() {
           wellsByAnomaly={trainWells}
           availability={availability}
           groupWord="обучающих"
+          defaultOpen={false}
         />
       </div>
     </div>
@@ -110,6 +111,7 @@ function GroupBlock({
   wellsByAnomaly,
   availability,
   groupWord,
+  defaultOpen = true,
 }: {
   title: string;
   subtitle: string;
@@ -118,37 +120,75 @@ function GroupBlock({
   wellsByAnomaly: Grouped;
   availability: Record<AnomalyType, AnomalyReportAvailability | null>;
   groupWord: string;
+  defaultOpen?: boolean;
 }) {
+  const [open, setOpen] = useState(defaultOpen);
+
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h2 className="font-display text-[28px] font-medium leading-[1.2] tracking-[-0.7px] text-[#222226]">
-          {title}
-        </h2>
-        <p className="text-sm text-[#797979]">{subtitle}</p>
+    <div className="overflow-hidden rounded-[20px] border border-[#e5e5e5] bg-white">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors hover:bg-[#f9f9f9]"
+      >
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center gap-3">
+            <h2 className="font-display text-[28px] font-medium leading-[1.2] tracking-[-0.7px] text-[#222226]">
+              {title}
+            </h2>
+            <span className="rounded-full bg-[rgba(34,34,38,0.06)] px-2.5 py-1 text-[12px] font-semibold tabular-nums text-[#424247]">
+              {total}
+            </span>
+          </div>
+          <p className="text-sm text-[#797979]">{subtitle}</p>
+        </div>
+        <span
+          className={cn(
+            "flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[rgba(34,34,38,0.05)] text-[#222226] transition-transform duration-300",
+            open ? "rotate-180" : "rotate-0",
+          )}
+        >
+          <ChevronDown className="h-5 w-5" />
+        </span>
+      </button>
+
+      <div
+        className={cn(
+          "grid transition-all duration-300 ease-out",
+          open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+        )}
+      >
+        <div className="overflow-hidden">
+          <div className="flex flex-col gap-4 border-t border-[#e5e5e5] bg-[#f9f9f9] px-5 py-5">
+            <section className="flex gap-2">
+              <KpiCard
+                label={totalLabel}
+                value={total}
+                color={KPI_COLOR.total}
+              />
+              {ANOMALIES.map((a) => (
+                <KpiCard
+                  key={a}
+                  label={LABEL[a]}
+                  value={wellsByAnomaly[a].length}
+                  color={KPI_COLOR[a]}
+                />
+              ))}
+            </section>
+
+            {ANOMALIES.map((a) => (
+              <AnomalySection
+                key={a}
+                anomaly={a}
+                wells={wellsByAnomaly[a]}
+                ready={availability[a]?.has_any_report ?? false}
+                groupWord={groupWord}
+              />
+            ))}
+          </div>
+        </div>
       </div>
-
-      <section className="flex gap-2">
-        <KpiCard label={totalLabel} value={total} color={KPI_COLOR.total} />
-        {ANOMALIES.map((a) => (
-          <KpiCard
-            key={a}
-            label={LABEL[a]}
-            value={wellsByAnomaly[a].length}
-            color={KPI_COLOR[a]}
-          />
-        ))}
-      </section>
-
-      {ANOMALIES.map((a) => (
-        <AnomalySection
-          key={a}
-          anomaly={a}
-          wells={wellsByAnomaly[a]}
-          ready={availability[a]?.has_any_report ?? false}
-          groupWord={groupWord}
-        />
-      ))}
     </div>
   );
 }
@@ -165,7 +205,7 @@ function AnomalySection({
   groupWord: string;
 }) {
   return (
-    <section className="flex flex-col gap-4 rounded-[16px] bg-white p-4">
+    <section className="flex flex-col gap-4 rounded-[16px] border border-[#e5e5e5] bg-white p-4">
       <div className="flex items-center gap-3">
         <h2
           className={cn(
