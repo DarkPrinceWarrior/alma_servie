@@ -333,6 +333,51 @@ Known gotchas:
   `paano/main.py` and `paano/train.py` were copied over. Therefore server
   `git status` is expected to show `m paano`.
 
+## Web application (app/) — deployment & data
+
+Public anomaly-detection web service: **https://alma-anomaly.ds-mind-lab.ru/**.
+Frontend `app/front` (Next.js/React/TS), backend `app/back` (FastAPI/SQLAlchemy/Postgres).
+
+**Where it runs:** production is deployed **on the a100 itself** via
+`docker compose -f app/back/compose.yaml` (project `alma_servie`; services
+`postgres`/`backend`/`frontend`; containers `alma_servie_postgres`/`alma_servie_api`/
+`alma_servie_front`; ports 8000 API, 3000 front). Auth is enabled (Postgres + RBAC);
+ask the owner for a login — **never commit credentials**.
+
+**Deploy is MANUAL — a `git push` alone does NOT redeploy** (containers run a baked
+image). After changing `app/` code, on the a100:
+
+```bash
+cd /root/projects/alma_servie/app/back
+docker compose build backend frontend     # only changed services
+docker compose up -d backend frontend
+```
+
+Builds may fail with a TLS timeout to `auth.docker.io` (Docker Hub + IPv6 grief) — then
+use `DOCKER_BUILDKIT=0 docker compose build ...` (the classic builder reuses the cached
+base image without contacting the registry).
+
+**Data is a live mount, NOT via git:** prod reads `/data` = `db/` + `artifacts/` from
+the a100 repo. Editing `db/*.parquet` on the a100 changes the live site **immediately,
+without a rebuild**. `db/` is gitignored — a push never carries data.
+
+**App data model** (fully data-driven from `db/`):
+- well lists — `db/{anomaly}_intervals.parquet`, `split` column = `test`/`train`;
+- per-well metrics/chart — `db/{anomaly}_{detector}_scores.parquet` +
+  `_predicted_starts.parquet` + telemetry `db/{anomaly}_anomaly_database_{freq}.parquet`
+  + results `artifacts/results/{anomaly}_{detector}_results.parquet`;
+- report availability — existence of
+  `artifacts/reports/{anomaly}/{anomaly}_{detector}_report.html`.
+
+**Current config (2026-06):** active detector `paano_global`; anomaly classes
+`negermet` + `pritok` only (`salt` removed from `app/`, kept in research code);
+telemetry freq 5min; home page = "Тест" (8 blind wells, `split=test`) + "Обучение"
+(28 labeled, `split=train`). Blind test wells are consolidated into `db/` by
+`runs/consolidate_app_data.py` (a100); backup at `db/_backup_app_20260618/`.
+
+**Upload history** — Postgres table `detection_runs` (`anomaly="multi"`); cleared from
+the UI ("Очистить всё", bulk-delete). Not part of git/data.
+
 ## Coding conventions
 
 - Use `from __future__ import annotations` at the top of Python modules.

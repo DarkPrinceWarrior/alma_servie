@@ -207,6 +207,48 @@ scp -rp salym salym_prepared a100:/root/projects/alma_servie/
 - DDP (если PaAno будет тренироваться на нескольких GPU): NCCL на VM135 требует `NCCL_P2P_DISABLE=1 NCCL_IB_DISABLE=1`.
 - Основной репозиторий хранит `paano` как gitlink без `.gitmodules`. На сервере `paano/` восстановлен вручную из `https://github.com/jinnnju/PaAno.git` на commit `0e93e93a857af216642d1685f2ce2d2589b35e2e`, затем поверх перенесены локальные изменения **четырёх** файлов: `paano/main.py`, `paano/train.py`, `paano/utils/evaluation.py`, `paano/utils/utils.py` (GPU-kmeans коресет банка, seed=42; guard'ы скоринга). Поэтому на сервере ожидаемый `git status` показывает `m paano`. Сверка с апстримом 2026-06-10: после `0e93e93` в апстриме менялись только `main.py` (раннер TSB-AD), README и картинки — ядро метода (`model.py`, `train.py`, `utils/`) актуально, обновление не требуется.
 
+## Веб-приложение (app/) — деплой и данные
+
+Публичный веб-сервис детекции аномалий: **https://alma-anomaly.ds-mind-lab.ru/**.
+Фронт `app/front` (Next.js/React/TS), бэк `app/back` (FastAPI/SQLAlchemy/Postgres).
+
+**Где крутится:** прод развёрнут **на самом a100** через `docker compose -f
+app/back/compose.yaml` (проект `alma_servie`; сервисы `postgres`/`backend`/`frontend`;
+контейнеры `alma_servie_postgres`/`alma_servie_api`/`alma_servie_front`; порты 8000 API,
+3000 фронт). Есть авторизация (Postgres + RBAC); учётку запрашивать у владельца — **в
+репозиторий не коммитить**.
+
+**Деплой РУЧНОЙ — `git push` сам по себе ничего не выкатывает** (контейнеры крутят
+запечённый образ). После правок `app/` на a100:
+```bash
+cd /root/projects/alma_servie/app/back
+docker compose build backend frontend     # только изменённые сервисы
+docker compose up -d backend frontend
+```
+Сборка может падать на TLS-таймауте к `auth.docker.io` (Docker Hub + IPv6-грабли) —
+тогда `DOCKER_BUILDKIT=0 docker compose build ...` (классический билдер берёт
+кэшированный базовый образ без обращения к реестру).
+
+**Данные — живой mount, НЕ через git:** прод читает `/data` = `db/` + `artifacts/` из
+репозитория на a100. Правки `db/*.parquet` на a100 меняют живой сайт **сразу, без
+пересборки**. `db/` в `.gitignore` — push никогда не переносит данные.
+
+**Модель данных приложения** (всё data-driven из `db/`):
+- списки скважин — `db/{anomaly}_intervals.parquet`, поле `split` = `test`/`train`;
+- метрики/график — `db/{anomaly}_{detector}_scores.parquet` + `_predicted_starts.parquet`
+  + телеметрия `db/{anomaly}_anomaly_database_{freq}.parquet` + результаты
+  `artifacts/results/{anomaly}_{detector}_results.parquet`;
+- доступность отчёта — наличие `artifacts/reports/{anomaly}/{anomaly}_{detector}_report.html`.
+
+**Текущая конфигурация (06.2026):** активный детектор — `paano_global`; классы — только
+`negermet` + `pritok` (`salt` убран из `app/`, в research-коде остаётся); частота
+телеметрии 5min; главная = «Тест» (8 слепых, `split=test`) + «Обучение» (28 размеченных,
+`split=train`). Слепые тест-скважины сведены в `db/` скриптом
+`runs/consolidate_app_data.py` (a100), бэкап — `db/_backup_app_20260618/`.
+
+**История загрузок** — таблица Postgres `detection_runs` (`anomaly="multi"`); чистится
+из UI кнопкой «Очистить всё» (bulk-delete). Не входит в git/данные.
+
 ## Architecture
 
 ### Data flow
