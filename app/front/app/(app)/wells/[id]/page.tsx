@@ -146,9 +146,16 @@ export default function WellPage() {
 
   const firstResult = series?.results[0] ?? null;
   const firstInterval = well?.intervals[0];
+  // Слепая скв. без аномалии: вырожденный интервал (начало == конец) — фактического
+  // старта нет, показываем «—» вместо служебной даты.
+  const degenerateInterval =
+    !!firstInterval && firstInterval.start_date === firstInterval.end_date;
   const actualStart =
-    firstResult?.actual_start ?? firstInterval?.start_date ?? null;
-  const actualEnd = firstResult?.actual_end ?? firstInterval?.end_date ?? null;
+    firstResult?.actual_start ??
+    (degenerateInterval ? null : (firstInterval?.start_date ?? null));
+  const actualEnd =
+    firstResult?.actual_end ??
+    (degenerateInterval ? null : (firstInterval?.end_date ?? null));
   const detectedAt = firstResult?.detected_time ?? null;
   const delay =
     firstResult?.delay_hours !== null && firstResult?.delay_hours !== undefined
