@@ -590,6 +590,33 @@ def _detected_time_for_interval(
     return pd.Timestamp(well_preds.iloc[0]["detected_time"])
 
 
+def _synthetic_blind_interval(
+    well_id: str,
+    well_df: pd.DataFrame,
+    predictions_df: pd.DataFrame,
+    interval_row: pd.Series,
+) -> pd.Series | None:
+    # Слепые тест-скважины несут вырожденный интервал (start == end) только для
+    # списка. FI осмысленна лишь там, где детектор НАШЁЛ аномалию — онсет берём
+    # из predicted_starts и строим окно [онсет, последний отсчёт] (базлайн —
+    # downstream по доонсетной части). Если предсказанного онсета нет (детектор
+    # аномалию не нашёл, напр. 590), FI не строим — объяснять нечего.
+    if well_df.empty or predictions_df.empty:
+        return None
+    preds = predictions_df[predictions_df["well_id"] == well_id]
+    if preds.empty or pd.isna(preds.iloc[0].get("detected_time")):
+        return None
+    onset = pd.Timestamp(preds.iloc[0]["detected_time"])
+    ts = pd.to_datetime(well_df["timestamp"])
+    t_lo, t_hi = ts.min(), ts.max()
+    if pd.isna(t_lo) or pd.isna(t_hi) or not (t_lo < onset < t_hi):
+        return None
+    row = interval_row.copy()
+    row["start_date"] = onset
+    row["end_date"] = t_hi
+    return row
+
+
 def _analyze_well(
     anomaly_key: str,
     well_id: str,
@@ -609,6 +636,13 @@ def _analyze_well(
 
     channel_evidence: dict[str, list[IntervalChannelEvidence]] = {ch: [] for ch in channels}
     for _, interval_row in well_intervals.iterrows():
+        start = pd.Timestamp(interval_row["start_date"])
+        end = pd.Timestamp(interval_row["end_date"])
+        if pd.isna(start) or pd.isna(end) or end <= start:
+            synth = _synthetic_blind_interval(well_id, well_df, predictions_df, interval_row)
+            if synth is None:
+                continue
+            interval_row = synth
         detected_time = _detected_time_for_interval(results_df, predictions_df, well_id, interval_row)
         for channel in channels:
             evidence = _interval_evidence(
