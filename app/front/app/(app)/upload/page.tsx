@@ -848,23 +848,6 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
             {chart.data.length > 0 && (
               <div className="space-y-2 rounded-md border border-[#e5e5e5] p-2">
                 <div className="flex flex-wrap items-center gap-4 px-1 text-xs text-muted-foreground">
-                  <button
-                    type="button"
-                    onClick={() => setScoreVisible((v) => !v)}
-                    title="Нажмите, чтобы скрыть/показать на графике"
-                    className={cn(
-                      "inline-flex items-center gap-1.5 transition-opacity hover:opacity-80",
-                      !scoreVisible && "opacity-40",
-                    )}
-                  >
-                    <span
-                      className="inline-block h-0.5 w-4"
-                      style={{ background: accent }}
-                    />
-                    <span className={cn(!scoreVisible && "line-through")}>
-                      Отклонение от нормы (score)
-                    </span>
-                  </button>
                   <span className="inline-flex items-center gap-1.5">
                     <span
                       className="inline-block h-0.5 w-4"
@@ -883,9 +866,30 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
                 {result.telemetry.length > 0 && (
                   <div className="border-t border-[#eee] px-1 pt-2">
                     <p className="mb-2 text-xs font-medium text-[#797979]">
-                      Каналы телеметрии — нажмите, чтобы показать на графике
+                      Параметры — нажмите, чтобы показать/скрыть на графике
                     </p>
                     <div className="flex flex-wrap gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setScoreVisible((v) => !v)}
+                        className={cn(
+                          "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors",
+                          scoreVisible
+                            ? "bg-white font-medium"
+                            : "border-[#e5e5e5] bg-white text-[#9a9a9a] hover:border-[#cfcfcf]",
+                        )}
+                        style={
+                          scoreVisible
+                            ? { color: accent, borderColor: accent }
+                            : undefined
+                        }
+                      >
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ background: scoreVisible ? accent : "#cfcfcf" }}
+                        />
+                        Отклонение от нормы
+                      </button>
                       {result.telemetry.map((ch, idx) => {
                         const on = visible.has(ch.name);
                         const color = channelColor(idx);
