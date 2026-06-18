@@ -696,6 +696,8 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
       ),
   );
 
+  const [scoreVisible, setScoreVisible] = useState(true);
+
   function toggleChannel(name: string) {
     setVisible((prev) => {
       const next = new Set(prev);
@@ -716,6 +718,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
       y: result.score_series.map((p) => p.score),
       line: { color: accent, width: 1.6 },
       yaxis: "y",
+      visible: scoreVisible,
     };
 
     const telemetryTraces: Data[] = result.telemetry.map((ch, idx) => ({
@@ -772,7 +775,7 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
         plot_bgcolor: "white",
       },
     };
-  }, [result, accent, visible]);
+  }, [result, accent, visible, scoreVisible]);
 
   return (
     <Card>
@@ -845,13 +848,23 @@ function AnomalyResultCard({ result }: { result: UploadAnomalyResult }) {
             {chart.data.length > 0 && (
               <div className="space-y-2 rounded-md border border-[#e5e5e5] p-2">
                 <div className="flex flex-wrap items-center gap-4 px-1 text-xs text-muted-foreground">
-                  <span className="inline-flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setScoreVisible((v) => !v)}
+                    title="Нажмите, чтобы скрыть/показать на графике"
+                    className={cn(
+                      "inline-flex items-center gap-1.5 transition-opacity hover:opacity-80",
+                      !scoreVisible && "opacity-40",
+                    )}
+                  >
                     <span
                       className="inline-block h-0.5 w-4"
                       style={{ background: accent }}
                     />
-                    Отклонение от нормы (score)
-                  </span>
+                    <span className={cn(!scoreVisible && "line-through")}>
+                      Отклонение от нормы (score)
+                    </span>
+                  </button>
                   <span className="inline-flex items-center gap-1.5">
                     <span
                       className="inline-block h-0.5 w-4"
