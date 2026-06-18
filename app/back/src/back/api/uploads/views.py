@@ -68,7 +68,9 @@ async def create_upload(
     out_dir = settings.uploads_root / "results" / str(run_id)
     command = (
         "python scripts/detection/detect_uploaded_well.py "
-        f"--excel {excel_path} --well-id {well_id} --output-dir {out_dir}"
+        f"--excel {excel_path} --well-id {well_id} --output-dir {out_dir} "
+        "--detector paano_global --anomalies negermet,pritok "
+        "--use-population-memory-bank"
     )
     run = DetectionRun(
         id=run_id,
