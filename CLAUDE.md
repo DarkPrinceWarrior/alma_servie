@@ -10,23 +10,20 @@ Code navigation uses three MCP servers, each with one job — do not duplicate t
   Use fff instead of shell `find`/`grep`/`rg`. One bare identifier per query;
   after two greps, read the code.
 - **codegraph** — structural questions over a tree-sitter symbol graph.
-  `codegraph_context "<task>"` is the primary tool (entry points + related
-  symbols + code in one call). Also `codegraph_search` (symbol by name —
-  prefer over `fff grep`), `codegraph_callers`/`codegraph_callees`,
-  `codegraph_impact` (blast radius before a refactor), `codegraph_node`,
-  `codegraph_explore` (deeper architecture/module exploration after
-  `codegraph_search` or `codegraph_context` surfaces concrete symbol/file
-  names; in CodeGraph 0.8+ source sections include line numbers for direct
-  `file:line` citations).
+  `codegraph_explore "<task>"` is the primary tool (entry points + related
+  symbols + code in one call); use `codegraph_context` only on hosts where that
+  tool is exposed. Also use `codegraph_search` (symbol by name — prefer over
+  `fff grep`), `codegraph_callers`/`codegraph_callees`, `codegraph_impact`
+  (blast radius before a refactor), `codegraph_node`, `codegraph_files`, and
+  `codegraph_status`.
   Trust its results — full AST parse; do not re-verify with grep.
 - **serena** — LSP-precise symbol navigation and the only tool that *edits*
   at symbol level (`find_symbol`, `get_symbols_overview`,
   `find_referencing_symbols`, `replace_symbol_body`, `insert_*`,
   `rename_symbol`, `safe_delete_symbol`). Prefer over reading whole files.
 
-Cycle: locate (fff / `codegraph_search`) → understand (`codegraph_context`,
-then one precise `codegraph_explore` for deep architecture questions) → assess
-risk (`codegraph_impact`) → read and edit (serena) → verify.
+Cycle: locate (fff / `codegraph_search`) → understand (`codegraph_explore`) →
+assess risk (`codegraph_impact`) → read and edit (serena) → verify.
 
 **codegraph index sync** — the MCP server auto-syncs (~2 s debounce), but keep
 it fresh explicitly: run `codegraph status` at the start of a session and
@@ -41,19 +38,25 @@ Other MCP: **context7** for version-sensitive library docs (Next.js, React,
 FastAPI, PyTorch — prefer over web search); **tavily** for general web search;
 **playwright** for browser smoke-checks after UI changes.
 
-Verified local tool versions on 2026-05-26: `fff-mcp 0.8.4`, `Serena 1.5.3`,
-and `codegraph 0.9.5`.
+Verified local tool versions on 2026-06-29: `fff-mcp 0.9.6`,
+`Serena 1.5.4.dev0`, `codegraph 1.1.3`, `codex-cli 0.142.4`,
+`codex-honcho 0.1.0`, `node 22.20.0`, and `npm 11.17.0`.
 
 ## Memory (Honcho)
 
-Use Honcho as the memory layer for this repository. Before answering questions
-about project preferences, working rules, prior decisions, or remembered
-context, consult Honcho in addition to this file and local repository docs.
+Use Honcho through the installed host plugin as the memory layer for this
+repository. In Claude Code this is the `honcho@honcho` plugin from
+`plastic-labs/claude-honcho`; in Codex this is `codex-honcho`. Before answering
+questions about project preferences, working rules, prior decisions, or
+remembered context, consult Honcho in addition to this file and local repository
+docs.
 
-Current Honcho MCP tools expose peer cards, conclusions, chat over peer
-representations, and dream scheduling: `get_peer_card`, `set_peer_card`,
-`list_conclusions`, `create_conclusions`, `chat`, `schedule_dream`. Use those
-current names rather than older `search`/`create_conclusion` notes.
+Context is loaded automatically at session start; trust it, but consult Honcho
+again when deeper recall is needed. Prefer `search` and `chat` for recall,
+`get_peer_context`/`get_context` or `get_representation` for the current
+user/project model, and `create_conclusions`/`create_conclusion` to save durable
+preferences, decisions, patterns, and gotchas. Use host-specific config tools
+such as `get_config` and `set_config` when available.
 
 Separate confirmed facts from inference. Treat files and command outputs as
 confirmed; treat Honcho memory and architectural guesses as inference unless

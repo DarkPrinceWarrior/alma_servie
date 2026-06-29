@@ -54,6 +54,11 @@ numba, optuna и т.п.) в бэк **не тащим** — `pyproject.toml` ко
 
 Use **fff** first for file/code search (`find_files`, `grep`, `multi_grep`).
 
+Use **CodeGraph** for structural questions over the symbol graph. Prefer
+`codegraph_explore` as the primary entry point for unfamiliar backend features
+or bugs; use `codegraph_context` only on hosts where that tool is exposed. Use
+`codegraph_search` for symbol lookup and `codegraph_impact` before refactors.
+
 Use **Serena** for symbol-level navigation and edits (`find_symbol`,
 `find_referencing_symbols`, `replace_symbol_body`).
 
@@ -61,6 +66,15 @@ Use **Context7** when FastAPI / Starlette / Pydantic / SQLAlchemy /
 Alembic / HTTPX / pytest behaviour зависит от версии.
 
 Use **Tavily** для внешнего веб-поиска (релизы, changelogs, docs gaps).
+
+Use **Honcho** through the installed host plugin (`codex-honcho` in Codex,
+`honcho@honcho` in Claude Code) for remembered project decisions, preferences,
+and gotchas. Prefer `search`/`chat` for recall and
+`create_conclusions`/`create_conclusion` for durable writeback when available.
+
+Standard cycle: locate (`fff` / `codegraph_search`) → understand
+(`codegraph_explore`) → assess risk (`codegraph_impact`) → read/edit
+(`serena`) → verify.
 
 ## Validation
 

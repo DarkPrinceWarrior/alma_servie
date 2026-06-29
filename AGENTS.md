@@ -2,13 +2,19 @@
 
 ## Memory and context
 
-Use Honcho as the memory layer for this repository. Before answering questions
-about project preferences, working rules, prior decisions, or remembered
-context, consult Honcho in addition to this file and local repository docs.
-Current Honcho MCP tools expose peer cards, conclusions, chat over peer
-representations, and dream scheduling (`get_peer_card`, `set_peer_card`,
-`list_conclusions`, `create_conclusions`, `chat`, `schedule_dream`). Use those
-current names rather than older `search`/`create_conclusion` notes.
+Use Honcho through the installed host plugin as the memory layer for this
+repository. In Codex this is `codex-honcho`; in Claude Code this is the
+`honcho@honcho` plugin from `plastic-labs/claude-honcho`. Before answering
+questions about project preferences, working rules, prior decisions, or
+remembered context, consult Honcho in addition to this file and local repository
+docs.
+
+Context is loaded automatically at session start; trust it, but consult Honcho
+again when deeper recall is needed. Prefer `search` and `chat` for recall,
+`get_peer_context`/`get_context` or `get_representation` for the current
+user/project model, and `create_conclusions`/`create_conclusion` to save durable
+preferences, decisions, patterns, and gotchas. Use host-specific config tools
+such as `get_config` and `set_config` when available.
 
 Separate confirmed facts from inference. Treat facts from files and command
 outputs as confirmed; treat remembered context and architectural guesses as
@@ -20,8 +26,9 @@ Code navigation uses three MCP servers with a strict division of labour:
 `fff` to locate, `codegraph` to understand structure, `serena` to read a
 symbol precisely and edit it. Do not duplicate them — each owns one job.
 
-Verified local tool versions on 2026-05-26: `fff-mcp 0.8.4`, `Serena 1.5.3`,
-and `codegraph 0.9.5`.
+Verified local tool versions on 2026-06-29: `fff-mcp 0.9.6`,
+`Serena 1.5.4.dev0`, `codegraph 1.1.3`, `codex-cli 0.142.4`,
+`codex-honcho 0.1.0`, `node 22.20.0`, and `npm 11.17.0`.
 
 ### fff — locate files and literal text
 
@@ -43,18 +50,14 @@ instead of grepping variations.
 `codegraph` is a tree-sitter knowledge graph (SQLite) of every symbol, edge,
 and file. Use it for structural questions, not literal text:
 
-- `codegraph_context "<task>"` — PRIMARY: entry points + related symbols +
-  code in one call. Start here for any feature, bug, or unfamiliar area.
+- `codegraph_explore "<task>"` — PRIMARY: entry points + related symbols +
+  code in one call. Start here for any feature, bug, or unfamiliar area. Use
+  `codegraph_context` only on hosts where that tool is exposed.
 - `codegraph_search` — find a symbol by name (kind + signature + location);
   prefer this over `fff grep` when looking up a symbol by name.
 - `codegraph_callers` / `codegraph_callees` — who calls / what is called.
 - `codegraph_impact <symbol>` — blast radius before a refactor.
 - `codegraph_node` — a symbol's source / signature / docstring.
-- `codegraph_explore` — deeper architecture/module exploration. Use it after
-  `codegraph_search` or `codegraph_context` has surfaced concrete symbol or
-  file names; prefer one precise explore call over a grep/read loop. In
-  CodeGraph 0.8+, explore source sections include line numbers for direct
-  `file:line` citations.
 - `codegraph_files` / `codegraph_status` — directory layout / index health.
 
 Trust codegraph results — they come from a full AST parse; do not re-verify
@@ -97,9 +100,8 @@ Still, keep the index fresh explicitly:
   explicit `codegraph sync` or CodeGraph-installed git hooks.
 
 Standard cycle: locate (`fff` / `codegraph_search`) → understand
-(`codegraph_context`, then `codegraph_explore` for deep architecture questions)
-→ assess risk (`codegraph_impact`) → read and edit (`serena`) → verify (run
-the affected script; `playwright` smoke for UI).
+(`codegraph_explore`) → assess risk (`codegraph_impact`) → read and edit
+(`serena`) → verify (run the affected script; `playwright` smoke for UI).
 
 Use Context7 before relying on memory for version-sensitive framework/library
 behavior, especially FastAPI, Starlette, Pydantic, SQLAlchemy, Alembic, HTTPX,
